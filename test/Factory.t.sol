@@ -32,7 +32,7 @@ function deployFactory(
     address ledgerImpl,
     address[3] memory pools
 ) returns (CommunityFactory factory) {
-    Seats seats = new Seats(vm_.computeCreateAddress(deployer, vm_.getNonce(deployer) + 1));
+    Seats seats = new Seats(vm_.computeCreateAddress(deployer, vm_.getNonce(deployer) + 1), IConfig(cfg));
     factory = new CommunityFactory(cfg, address(seats), communityImpl, ledgerImpl, deployer);
     for (uint256 t; t < 3; t++) {
         factory.addVenue(pools[t]);
@@ -142,7 +142,7 @@ contract FactoryTest is Test {
     /// A `Seats` that trusts another factory would refuse every community this one creates, so
     /// the factory refuses it at construction.
     function test_refusesASeatsWiredToAnotherFactory() public {
-        Seats wrong = new Seats(makeAddr("anotherFactory"));
+        Seats wrong = new Seats(makeAddr("anotherFactory"), IConfig(address(cfg)));
         address communityImpl = address(new MockCommunityModule());
         address ledgerImpl = address(new MockCommunityModule());
         vm.expectRevert(CommunityFactory.SeatsNotWiredToThisFactory.selector);

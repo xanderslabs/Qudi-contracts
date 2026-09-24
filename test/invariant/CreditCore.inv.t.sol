@@ -2,273 +2,322 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
-import {StdInvariant} from "forge-std/StdInvariant.sol";
-import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import {CreditCore} from "../../src/CreditCore.sol";
 import {ICreditCore} from "../../src/interfaces/ICreditCore.sol";
-import {CreditStanding} from "../../src/CreditStanding.sol";
-import {Config} from "../../src/Config.sol";
-import {IConfig} from "../../src/interfaces/IConfig.sol";
+import {ICommunityFactory} from "../../src/interfaces/ICommunityFactory.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
-import {MockVenue} from "../mocks/MockVenue.sol";
-import {CreditCoreHarness} from "../helpers/CreditCoreHarness.sol";
-import {MockCommunityFactory} from "../helpers/MockCommunityFactory.sol";
+import {MockStrategy} from "../mocks/MockStrategy.sol";
+import {MockImpactSource} from "../mocks/MockImpactSource.sol";
+import {CreditFixture} from "../helpers/CreditFixture.sol";
 
-/// Drives every state-changing path on `CreditCore` from the roles that own them, with real
-/// verbs (fund, allocate, close, add a community, move venue capital, move the venue price,
-/// change the book) rather than a stub that calls one function. Tracks ghost state the
-/// invariants check the contract against.
+/// Drives `CreditCore` through everything that moves money or paper: draws, settlements, stage
+/// crossings, write-offs, seat and yield legs, grants, pool strategy moves, strategy gains and
+/// losses, and Qudi's own withdrawals. It records any settlement that reverted for a member who had
+/// something to repay and the USDC to pay it.
 contract CreditCoreHandler is Test {
-    CreditCoreHarness public cc;
+    CreditCore public core;
     MockUSDC public usdc;
-    MockVenue public venue;
-    MockVenue public venue2; // A second venue so the aggregate and
-    // per-venue caps are each exercised deliberately rather than one masking the other.
-    MockCommunityFactory public factory;
+    MockStrategy public strategy;
+    MockImpactSource public extra;
+    ICommunityFactory public factory;
+    address public owner;
+    address public operator;
+    address public allocator;
+    bytes32 public agreement;
 
-    address public governance;
-    address public treasuryMgr;
-    address public allocationMs;
+    uint256[] internal _communities;
+    address[] internal _members;
 
-    uint256 public ghostFunded; // total USDC ever seeded
-    uint256 public ghostToVenue; // total USDC moved from CreditCore into the venue
-    uint256 public ghostFromVenue; // total USDC redeemed from the venue back to CreditCore
-    mapping(uint256 => uint256) public ghostAllocation;
-    uint256 public ghostSumAllocations;
-    bool public everBreachedByOutflow; // set if a successful outflow left cash below the requirement
+    /// Set when a settlement failed for a member with an advance to repay.
+    bool public settleBlocked;
 
-    // Coverage counters: every call to a venue verb and how many landed.
-    uint256 public venueDepositTries;
-    uint256 public venueDepositLands;
-    uint256 public venueWithdrawTries;
-    uint256 public venueWithdrawLands;
-
-    uint256 internal constant MAX_ID = 8;
+    mapping(bytes32 => uint256) public tries;
+    mapping(bytes32 => uint256) public lands;
+    /// Why draws were refused, by error selector.
+    mapping(bytes4 => uint256) public drawRefusals;
 
     constructor(
-        CreditCoreHarness cc_,
+        CreditCore core_,
         MockUSDC usdc_,
-        MockVenue venue_,
-        MockVenue venue2_,
-        MockCommunityFactory factory_,
-        address governance_,
-        address treasuryMgr_,
-        address allocationMs_
+        MockStrategy strategy_,
+        MockImpactSource extra_,
+        ICommunityFactory factory_,
+        address[3] memory roles,
+        bytes32 agreement_,
+        uint256[] memory communities,
+        address[] memory members
     ) {
-        cc = cc_;
+        core = core_;
         usdc = usdc_;
-        venue = venue_;
-        venue2 = venue2_;
+        strategy = strategy_;
+        extra = extra_;
         factory = factory_;
-        governance = governance_;
-        treasuryMgr = treasuryMgr_;
-        allocationMs = allocationMs_;
+        owner = roles[0];
+        operator = roles[1];
+        allocator = roles[2];
+        agreement = agreement_;
+        _communities = communities;
+        _members = members;
     }
 
-    /// Alternate deterministically between the two venues so both are exercised.
-    function _pickVenue(uint256 turn) internal view returns (MockVenue) {
-        return turn % 2 == 0 ? venue : venue2;
+    function communityCount() external view returns (uint256) {
+        return _communities.length;
     }
 
-    /// Per-venue headroom for `v`: the per-venue cap minus what `v` already holds, floored at 0.
-    function _perVenueHeadroom(MockVenue v) internal view returns (uint256) {
-        uint256 cap = cc.perVenueCap();
-        uint256 held = cc.venueExposure(address(v));
-        return cap > held ? cap - held : 0;
+    function communityAt(uint256 i) external view returns (uint256) {
+        return _communities[i];
     }
 
-    function _checkOutflow() internal {
-        if (usdc.balanceOf(address(cc)) < cc.totalAllocated() + cc.requiredRetainedCapital()) {
-            everBreachedByOutflow = true;
+    function memberCount() external view returns (uint256) {
+        return _members.length;
+    }
+
+    function memberAt(uint256 i) external view returns (address) {
+        return _members[i];
+    }
+
+    function _community(uint256 seed) internal view returns (uint256) {
+        return _communities[seed % _communities.length];
+    }
+
+    function _member(uint256 seed) internal view returns (address) {
+        return _members[seed % _members.length];
+    }
+
+    function _land(bytes32 op, bool ok) internal {
+        tries[op]++;
+        if (ok) lands[op]++;
+    }
+
+    // ---- the member side ----
+
+    function draw(uint256 who, uint256 which, uint256 amount) external {
+        address m = _member(who);
+        uint256 id = _community(which);
+        uint256 line = core.standingOf(id, m).drawable;
+        if (line < 10e6) line = 10e6;
+        amount = bound(amount, 10e6, line);
+        vm.prank(m);
+        try core.draw(id, amount, agreement) {
+            _land("draw", true);
+        } catch (bytes memory reason) {
+            drawRefusals[bytes4(reason)]++;
+            _land("draw", false);
         }
     }
 
-    function fund(uint256 amount) external {
-        amount = bound(amount, 1, 5_000_000e6);
-        usdc.mint(governance, amount);
-        vm.startPrank(governance);
-        usdc.approve(address(cc), amount);
-        cc.fund(amount);
-        vm.stopPrank();
-        ghostFunded += amount;
-    }
-
-    function addCommunity() external {
-        if (factory.communityCount() >= MAX_ID) return;
-        factory.addCommunity();
-    }
-
-    function allocate(uint256 id, uint256 amount, uint8 kind) external {
-        if (factory.communityCount() == 0) return;
-        id = bound(id, 0, factory.communityCount() - 1);
-        amount = bound(amount, 1, 5_000_000e6);
-        vm.prank(allocationMs);
-        try cc.allocate(id, amount, ICreditCore.AllocationType(kind % 2)) {
-            ghostAllocation[id] += amount;
-            ghostSumAllocations += amount;
-            _checkOutflow();
-        } catch {}
-    }
-
-    function closeCommunity(uint256 id) external {
-        id = bound(id, 0, MAX_ID - 1);
-        uint256 before = cc.allocationOf(id);
-        vm.prank(governance);
-        try cc.closeCommunity(id) {
-            ghostSumAllocations -= before;
-            ghostAllocation[id] = 0;
-        } catch {}
-    }
-
-    function depositToVenue(uint256 amount) external {
-        // Two caps bound a deposit: the aggregate cap, ~50%
-        // of liquid above the operating buffer, and the per-venue cap, 25% of total
-        // Treasury cash. Bound by the tighter of a third of unallocated() (the aggregate
-        // proxy) and this venue's per-venue headroom, so a deposit lands whichever cap is
-        // closer instead of overshooting the per-venue one about half the time. The venue
-        // alternates, so one venue filling toward 25% exercises the per-venue path and both
-        // venues together toward 50% exercise the aggregate path.
-        MockVenue v = _pickVenue(venueDepositTries);
-        uint256 total = cc.totalVenueExposure();
-        uint256 aggCap = cc.venueAllocationCap();
-        uint256 aggRoom = aggCap > total ? aggCap - total : 0;
-        uint256 perVenueRoom = _perVenueHeadroom(v);
-        uint256 room = aggRoom < perVenueRoom ? aggRoom : perVenueRoom;
-        amount = bound(amount, 1, room == 0 ? 1 : room);
-        venueDepositTries++;
-        vm.prank(treasuryMgr);
-        try cc.depositToVenue(address(v), amount) {
-            ghostToVenue += amount;
-            venueDepositLands++;
-            _checkOutflow();
-        } catch {}
-    }
-
-    function withdrawFromVenue(uint256 shares) external {
-        MockVenue v = _pickVenue(venueWithdrawTries);
-        uint256 held = v.balanceOf(address(cc));
-        if (held == 0) {
-            v = _pickVenue(venueWithdrawTries + 1); // fall back to the other venue
-            held = v.balanceOf(address(cc));
-            if (held == 0) return;
+    /// Repayment must never fail for a member who has an advance and the USDC to pay it.
+    function settle(uint256 who, uint256 amount) external {
+        address m = _member(who);
+        ICreditCore.ObligationView memory o = core.obligationOf(m);
+        if (o.drawTimestamp == 0 || o.closed) return;
+        amount = bound(amount, 1, o.principal + 5e6);
+        usdc.mint(m, amount);
+        vm.prank(m);
+        usdc.approve(address(core), amount);
+        vm.prank(m);
+        try core.settle(amount) {
+            _land("settle", true);
+        } catch {
+            settleBlocked = true;
+            _land("settle", false);
         }
-        shares = bound(shares, 1, held);
-        uint256 balBefore = usdc.balanceOf(address(cc));
-        venueWithdrawTries++;
-        vm.prank(treasuryMgr);
-        try cc.withdrawFromVenue(address(v), shares) {
-            ghostFromVenue += usdc.balanceOf(address(cc)) - balBefore;
-            venueWithdrawLands++;
-        } catch {}
     }
 
-    function venueGain(uint256 amount) external {
-        MockVenue v = _pickVenue(amount);
-        if (v.totalSupply() == 0) return;
-        amount = bound(amount, 1, 1_000_000e6);
+    function materialize(uint256 who) external {
+        core.materialize(_member(who));
+        _land("materialize", true);
+    }
+
+    function finalizeWriteOff(uint256 who) external {
+        try core.finalizeWriteOff(_member(who)) {
+            _land("writeOff", true);
+        } catch {
+            _land("writeOff", false);
+        }
+    }
+
+    function warp(uint256 secs) external {
+        vm.warp(block.timestamp + bound(secs, 1 hours, 40 days));
+        _land("warp", true);
+    }
+
+    function setImpact(uint256 who, uint256 which, uint256 amount) external {
+        extra.setImpact(_community(which), _member(who), bound(amount, 0, 2_000e6));
+        _land("impact", true);
+    }
+
+    // ---- money into a community ----
+
+    /// A seat or yield leg: the community (a seat mint) or its ledger (fee settlement) pays in and
+    /// books it. An odd amount is a seat leg, which is also community activity.
+    function leg(uint256 which, uint256 amount) external {
+        uint256 id = _community(which);
+        amount = bound(amount, 1, 500e6);
+        address payer = factory.communityAt(id);
+        if (amount % 2 == 0) payer = factory.ledgerOf(payer);
+        usdc.mint(payer, amount);
+        vm.prank(payer);
+        usdc.transfer(address(core), amount);
+        vm.prank(payer);
+        try core.receiveCommunityLeg(id, amount) {
+            _land("leg", true);
+        } catch {
+            // A closed account refuses a leg; the ledger then sends it to the treasury instead.
+            vm.prank(address(core));
+            usdc.transfer(owner, amount);
+            _land("leg", false);
+        }
+    }
+
+    function grant(uint256 which, uint256 amount) external {
+        uint256 id = _community(which);
+        amount = bound(amount, 1, 2_000e6);
+        usdc.mint(owner, amount);
+        vm.prank(owner);
+        usdc.approve(address(core), amount);
+        vm.prank(owner);
+        core.fund(amount);
+        vm.prank(allocator);
+        try core.allocate(id, amount, ICreditCore.AllocationType.Growth) {
+            _land("grant", true);
+        } catch {
+            _land("grant", false);
+        }
+    }
+
+    // ---- Qudi's side ----
+
+    function depositToStrategy(uint256 amount) external {
+        amount = bound(amount, 1, usdc.balanceOf(address(core)) + 1);
+        vm.prank(operator);
+        try core.depositToStrategy(address(strategy), amount) {
+            _land("toStrategy", true);
+        } catch {
+            _land("toStrategy", false);
+        }
+    }
+
+    function withdrawFromStrategy(uint256 amount) external {
+        amount = bound(amount, 1, strategy.totalAssets() + 1);
+        vm.prank(operator);
+        try core.withdrawFromStrategy(address(strategy), amount) {
+            _land("fromStrategy", true);
+        } catch {
+            _land("fromStrategy", false);
+        }
+    }
+
+    function strategyGain(uint256 amount) external {
+        amount = bound(amount, 1, 100e6);
         usdc.mint(address(this), amount);
-        usdc.approve(address(v), amount);
-        v.fund(amount);
+        usdc.approve(address(strategy), amount);
+        strategy.fund(amount);
+        _land("gain", true);
     }
 
-    function venueLoss(uint256 amount) external {
-        MockVenue v = _pickVenue(amount);
-        uint256 venueBal = usdc.balanceOf(address(v));
-        if (venueBal == 0) return;
-        amount = bound(amount, 1, venueBal);
-        v.skim(amount);
+    /// A loss no larger than Qudi's own money. A loss past it would be Qudi's to cover from outside
+    /// the pool, and no rule inside `CreditCore` can make up money that is gone.
+    function strategyLoss(uint256 amount) external {
+        uint256 cap = core.poolView().unallocated;
+        uint256 held = strategy.totalAssets();
+        if (held < cap) cap = held;
+        if (cap == 0) return;
+        strategy.skim(bound(amount, 1, cap));
+        _land("loss", true);
     }
 
-    function setBook(uint256 c, uint256 l, uint256 fc, uint256 dr) external {
-        cc.setBook(
-            bound(c, 0, 20_000_000e6), bound(l, 0, 20_000_000e6), bound(fc, 0, 20_000_000e6), bound(dr, 0, 20_000_000e6)
-        );
-    }
-
-    function setPending(uint256 v) external {
-        cc.setPendingObligationReserve(bound(v, 0, 1_000_000e6));
-    }
-
-    function warp(uint256 s) external {
-        vm.warp(block.timestamp + bound(s, 1, 30 days));
-    }
-
-    /// Sum of the contract's own allocation entries over the id space the handler touches.
-    function contractSumAllocations() external view returns (uint256 s) {
-        for (uint256 i; i < MAX_ID; i++) {
-            s += cc.allocationOf(i);
+    function withdrawTreasury(uint256 amount) external {
+        amount = bound(amount, 1, core.poolView().unallocated + 1);
+        vm.prank(owner);
+        try core.withdrawTreasury(owner, amount) {
+            _land("treasury", true);
+        } catch {
+            _land("treasury", false);
         }
     }
 }
 
-contract CreditCoreInvariantTest is StdInvariant, Test {
-    MockUSDC usdc;
-    Config config;
-    MockCommunityFactory factory;
-    MockVenue venue;
-    MockVenue venue2;
-    CreditStanding standing;
-    CreditCoreHarness cc;
+/// The handler over two six-seat communities, four borrowers in each, and one pool strategy. Shared
+/// by the invariant campaign and the fixed replay.
+abstract contract CreditInvariantBase is CreditFixture {
     CreditCoreHandler handler;
+    MockStrategy poolStrategy;
 
-    address governance = makeAddr("governance");
-    address treasuryMgr = makeAddr("treasuryManager");
-    address allocationMs = makeAddr("allocationMultisig");
+    function setUp() public virtual override {
+        super.setUp();
+        _useExtra();
+        poolStrategy = _poolStrategy();
 
-    function setUp() public {
-        usdc = new MockUSDC();
-        config = new Config(address(usdc), makeAddr("treasury"), makeAddr("registry"));
-        factory = new MockCommunityFactory();
-        factory.addCommunity(); // start with one community so allocate is reachable
-        venue = new MockVenue(IERC20(address(usdc)), "V", "V");
-        venue2 = new MockVenue(IERC20(address(usdc)), "V2", "V2");
-        standing = new CreditStanding(IConfig(address(config)), address(factory), governance);
-        cc = new CreditCoreHarness(
-            IERC20(address(usdc)),
-            IConfig(address(config)),
-            address(factory),
-            governance,
-            treasuryMgr,
-            allocationMs,
-            standing
+        uint256[] memory ids = new uint256[](2);
+        address[] memory members = new address[](8);
+        for (uint256 c; c < 2; c++) {
+            (, uint256 id, address[] memory people) = _community(100e6, 6);
+            ids[c] = id;
+            for (uint256 i; i < 4; i++) {
+                members[c * 4 + i] = people[i + 1];
+                extra.setImpact(id, people[i + 1], 200e6);
+            }
+        }
+        _season();
+
+        handler = new CreditCoreHandler(
+            core, usdc, poolStrategy, extra, factory, [address(this), operator, allocator], AGREEMENT, ids, members
         );
-        vm.prank(governance);
-        standing.setCreditCore(address(cc));
-        cc.addVenue(address(venue));
-        cc.addVenue(address(venue2));
+    }
 
-        handler = new CreditCoreHandler(cc, usdc, venue, venue2, factory, governance, treasuryMgr, allocationMs);
+    /// (a) Cash plus pool strategies always cover every unlent paper balance.
+    function _backingHolds() internal view {
+        ICreditCore.PoolView memory p = core.poolView();
+        assertGe(p.cash + p.strategyValue + p.totalOutstanding, p.totalAllocated, "backing");
+    }
+
+    /// (b) No community has more out than its balance, and the totals are the sums of the records.
+    function _noCommunityLendsPastItsBalance() internal view {
+        uint256 allocated;
+        uint256 outstanding;
+        for (uint256 i; i < handler.communityCount(); i++) {
+            ICreditCore.CommunityCredit memory c = core.communityCreditOf(handler.communityAt(i));
+            assertLe(c.outstanding, c.allocation, "a community lent past its balance");
+            allocated += c.allocation;
+            outstanding += c.outstanding;
+        }
+        ICreditCore.PoolView memory p = core.poolView();
+        assertEq(p.totalAllocated, allocated, "the total is the sum of the records");
+        assertEq(p.totalOutstanding, outstanding);
+    }
+
+    /// (c) `CreditCore`'s booked cash is its USDC balance.
+    function _bookedCashIsTheBalance() internal view {
+        assertEq(core.expectedCash(), usdc.balanceOf(address(core)), "booked cash");
+    }
+
+    /// (d) Repayment is never blocked for a member with something to repay.
+    function _repaymentNeverBlocked() internal view {
+        assertFalse(handler.settleBlocked(), "a settlement was refused");
+    }
+}
+
+/// Proof 16, as an invariant campaign over the handler.
+contract CreditCoreInvariantTest is CreditInvariantBase {
+    function setUp() public override {
+        super.setUp();
         targetContract(address(handler));
     }
 
-    /// Test 1: cash never falls below the sum of allocations. `unallocated()` is defined as
-    /// `cash - totalAllocated` clamped at zero, so `cash == totalAllocated + unallocated()` is
-    /// an identity whose only failing case is that clamp firing, i.e. cash below
-    /// `totalAllocated`. That floor is the real property here (this is the
-    /// clamp property, not a conservation result; `invariant_noValueCreated` is
-    /// the conservation check).
-    function invariant_cashEqualsAllocatedPlusUnallocated() public view {
-        assertEq(usdc.balanceOf(address(cc)), cc.totalAllocated() + cc.unallocated());
+    function invariant_a_backingAlwaysHolds() public view {
+        _backingHolds();
     }
 
-    /// Test 1 (continued): the running `totalAllocated` equals the sum of the per-community
-    /// entries, and both track the handler's independent ghost.
-    function invariant_allocationAccountingIsConsistent() public view {
-        assertEq(cc.totalAllocated(), handler.contractSumAllocations());
-        assertEq(cc.totalAllocated(), handler.ghostSumAllocations());
+    function invariant_b_noCommunityLendsPastItsBalance() public view {
+        _noCommunityLendsPastItsBalance();
     }
 
-    /// Test 2: no path mints, burns or creates value. CreditCore's USDC balance is exactly
-    /// what was seeded, minus what went to the venue, plus what came back. It never fabricates
-    /// or loses a unit; venue price moves land on the venue, not on the Treasury balance.
-    function invariant_noValueCreated() public view {
-        assertEq(usdc.balanceOf(address(cc)), handler.ghostFunded() + handler.ghostFromVenue() - handler.ghostToVenue());
+    function invariant_c_bookedCashIsTheBalance() public view {
+        _bookedCashIsTheBalance();
     }
 
-    /// The gate holds: no successful outflow (allocate or venue deposit) ever left cash below
-    /// `totalAllocated + requiredRetainedCapital`. A later venue appreciation can push the
-    /// requirement above cash, which pauses new allocations; that is not an
-    /// outflow and not a breach.
-    function invariant_noOutflowBreachedTheRequirement() public view {
-        assertFalse(handler.everBreachedByOutflow());
+    function invariant_d_repaymentIsNeverBlocked() public view {
+        _repaymentNeverBlocked();
     }
 }

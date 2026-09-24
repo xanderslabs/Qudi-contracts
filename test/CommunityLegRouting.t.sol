@@ -58,7 +58,7 @@ contract CommunityLegRoutingTest is InviteSigner {
         // One creation sits between this nonce read and the factory: `Seats`, which takes the
         // factory address as a constructor argument.
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
-        Seats seats = new Seats(predicted);
+        Seats seats = new Seats(predicted, IConfig(address(config)));
         factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
         require(address(factory) == predicted, "factory precompute mismatch");
 

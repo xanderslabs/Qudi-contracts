@@ -17,6 +17,8 @@ import {CommunityFactory} from "../src/CommunityFactory.sol";
 import {CreditCore} from "../src/CreditCore.sol";
 import {CreditStanding} from "../src/CreditStanding.sol";
 import {ICreditStanding} from "../src/interfaces/ICreditStanding.sol";
+import {CloneImpactSource} from "../src/CloneImpactSource.sol";
+import {ICommunityFactory} from "../src/interfaces/ICommunityFactory.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
 
 /// Minimal interface onto `test/mocks/MockUSDC.sol`'s open `mint`, declared locally rather than
@@ -70,6 +72,8 @@ interface IMintableTestUsdc {
 ///                  the three strategies are handed to at the end. Defaults to the deployer (the
 ///                  testnet posture: the config owner is a single EOA). On mainnet this is the
 ///                  TimelockController.
+///   CREDIT_AGREEMENT_HASH  required; the hash of the Credit Agreement a member's first draw
+///                  must carry.
 ///   STRATEGY_OPERATOR  optional; each `ManualStrategy`'s operator, who funds yield, sets the rate,
 ///                  deploys to listed destinations, returns money and reports losses. Defaults to
 ///                  the deployer. Not behind the timelock: those are routine steps, and the
@@ -131,6 +135,8 @@ contract Deploy is Script {
     CommunityFactory internal factory;
     CreditStanding internal standing;
     CreditCore internal creditCore;
+    CloneImpactSource internal seatSource;
+    CloneImpactSource internal yieldSource;
 
     function run() external {
         address usdc = vm.envAddress("USDC_ADDRESS");
@@ -156,7 +162,7 @@ contract Deploy is Script {
         ledgerImpl = new Ledger();
         // `Seats` trusts one factory, fixed here, and the factory refuses a `Seats` that names
         // any other.
-        seats = new Seats(predictedFactory);
+        seats = new Seats(predictedFactory, IConfig(address(config)));
 
         factory = new CommunityFactory(
             address(config), address(seats), address(communityImpl), address(ledgerImpl), deployer
@@ -183,10 +189,17 @@ contract Deploy is Script {
             ICreditStanding(address(standing))
         );
         standing.setCreditCore(address(creditCore));
-        // The dev key attributes impact until the real role is wired.
-        standing.setImpactAttributor(vm.envOr("IMPACT_ATTRIBUTOR", deployer));
+        // The two impact sources: the seat leg in each community's `Community` and the yield leg in
+        // each community's `Ledger`, both reached through the factory. No pool strategy is listed
+        // yet; the pool holds only community balances until one is.
+        seatSource = new CloneImpactSource(ICommunityFactory(address(factory)), false);
+        yieldSource = new CloneImpactSource(ICommunityFactory(address(factory)), true);
+        standing.addImpactSource(address(seatSource));
+        standing.addImpactSource(address(yieldSource));
         config.setAddress(K.CREDIT_CORE, address(creditCore));
         require(config.creditCore() == address(creditCore), "credit core not wired");
+        // The Credit Agreement members sign on their first draw. Credit stays shut until it is set.
+        config.setCreditAgreementHash(vm.envBytes32("CREDIT_AGREEMENT_HASH"));
 
         // ---- labels, strategies, weights and the registry (the deployer owns all of them) ----
         _wireVenues();
@@ -252,6 +265,8 @@ contract Deploy is Script {
         console.log("factory:       ", address(factory));
         console.log("creditStanding:", address(standing));
         console.log("creditCore:    ", address(creditCore));
+        console.log("seatSource:    ", address(seatSource));
+        console.log("yieldSource:   ", address(yieldSource));
     }
 
     /// The three venues and their strategies. The array index is the venue id the registry hands

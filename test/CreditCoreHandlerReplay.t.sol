@@ -1,127 +1,84 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity 0.8.30;
 
-import {Test} from "forge-std/Test.sol";
-import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import {Config} from "../src/Config.sol";
-import {IConfig} from "../src/interfaces/IConfig.sol";
-import {CreditStanding} from "../src/CreditStanding.sol";
-import {MockUSDC} from "./mocks/MockUSDC.sol";
-import {MockVenue} from "./mocks/MockVenue.sol";
-import {CreditCoreHarness} from "./helpers/CreditCoreHarness.sol";
-import {MockCommunityFactory} from "./helpers/MockCommunityFactory.sol";
-import {CreditCoreHandler} from "./invariant/CreditCore.inv.t.sol";
+import {ICreditCore} from "../src/interfaces/ICreditCore.sol";
+import {CreditInvariantBase} from "./invariant/CreditCore.inv.t.sol";
 
-/// A fixed 4000-step handler-shaped sequence, seeded from a constant, so
-/// the landed-attempt counts are the same number before and after the handler fix and any
-/// change in them is the fix. Not an invariant run: a plain deterministic replay whose method
-/// picks and raw arguments come only from the step index, so state changes move which calls
-/// land but never which calls are made.
-contract CreditCoreHandlerReplayTest is Test {
-    MockUSDC usdc;
-    Config config;
-    MockCommunityFactory factory;
-    MockVenue venue;
-    MockVenue venue2;
-    CreditCoreHarness cc;
-    CreditCoreHandler handler;
-
-    address governance = makeAddr("governance");
-    address treasuryMgr = makeAddr("treasuryManager");
-    address allocationMs = makeAddr("allocationMultisig");
-
-    bytes32 constant SEED = keccak256("qudi.handler-replay.v1");
-    uint256 constant STEPS = 4000;
-
-    function setUp() public {
-        usdc = new MockUSDC();
-        config = new Config(address(usdc), makeAddr("treasury"), makeAddr("registry"));
-        factory = new MockCommunityFactory();
-        factory.addCommunity();
-        venue = new MockVenue(IERC20(address(usdc)), "V", "V");
-        venue2 = new MockVenue(IERC20(address(usdc)), "V2", "V2");
-        CreditStanding standing = new CreditStanding(IConfig(address(config)), address(factory), governance);
-        cc = new CreditCoreHarness(
-            IERC20(address(usdc)),
-            IConfig(address(config)),
-            address(factory),
-            governance,
-            treasuryMgr,
-            allocationMs,
-            standing
-        );
-        vm.prank(governance);
-        standing.setCreditCore(address(cc));
-        cc.addVenue(address(venue));
-        cc.addVenue(address(venue2));
-        handler = _newHandler();
-    }
-
-    /// Built through a helper so a compile against either handler constructor arity works; the
-    /// try/catch picks whichever the current source declares.
-    function _newHandler() internal returns (CreditCoreHandler h) {
-        h = new CreditCoreHandler(cc, usdc, venue, venue2, factory, governance, treasuryMgr, allocationMs);
-    }
+/// A fixed sequence through the credit handler, seeded from a constant, checking all four pool
+/// invariants after every step. The fuzzer can wander into corners that never draw or never
+/// write off; this run shows each path landing at least once, so a green invariant campaign
+/// cannot be green only because nothing happened.
+contract CreditCoreHandlerReplayTest is CreditInvariantBase {
+    bytes32 constant SEED = keccak256("qudi.credit-replay.v1");
+    uint256 constant STEPS = 600;
 
     function _arg(uint256 step, uint256 i) internal pure returns (uint256) {
         return uint256(keccak256(abi.encode(SEED, step, i)));
     }
 
-    /// Weighted so the sequence actually fills venues toward the caps, where the difference
-    /// between the old bound (overshoots the per-venue cap) and the new one (fits under it)
-    /// shows. Weights: fund 4, allocate 2, depositToVenue 7, withdrawFromVenue 2, venueGain 2,
-    /// venueLoss 1, addCommunity 1, setBook 1, warp 1 (total 21).
-    function _weightedPick(uint256 step) internal pure returns (uint256) {
-        uint256 r = _arg(step, 0) % 21;
-        if (r < 4) return 0; // fund
-        if (r < 6) return 2; // allocate
-        if (r < 13) return 4; // depositToVenue
-        if (r < 15) return 5; // withdrawFromVenue
-        if (r < 17) return 6; // venueGain
-        if (r < 18) return 7; // venueLoss
-        if (r < 19) return 1; // addCommunity
-        if (r < 20) return 8; // setBook
-        return 10; // warp
-    }
-
-    function test_replay4000Steps_reportsLandedDepositCounts() public {
+    function test_replay_everyPathLandsAndEveryInvariantHolds() public {
         for (uint256 step; step < STEPS; step++) {
-            _dispatch(_weightedPick(step), step);
+            _dispatch(_arg(step, 0) % 18, step);
+            _backingHolds();
+            _noCommunityLendsPastItsBalance();
+            _bookedCashIsTheBalance();
+            _repaymentNeverBlocked();
         }
 
-        emit log_named_uint("venue deposit attempts ", handler.venueDepositTries());
-        emit log_named_uint("venue deposits landed   ", handler.venueDepositLands());
-        emit log_named_uint("venue withdraw attempts ", handler.venueWithdrawTries());
-        emit log_named_uint("venue withdraws landed  ", handler.venueWithdrawLands());
+        bytes32[10] memory ops = [
+            bytes32("draw"),
+            "settle",
+            "writeOff",
+            "leg",
+            "grant",
+            "toStrategy",
+            "fromStrategy",
+            "gain",
+            "loss",
+            "treasury"
+        ];
+        bytes4[7] memory why = [
+            ICreditCore.TabAlreadyOpen.selector,
+            ICreditCore.PortfolioQualityBreached.selector,
+            ICreditCore.ExceedsAvailable.selector,
+            ICreditCore.NotEligible.selector,
+            ICreditCore.ExceedsLine.selector,
+            ICreditCore.PoolIlliquid.selector,
+            ICreditCore.CommunityIsClosed.selector
+        ];
+        for (uint256 i; i < why.length; i++) {
+            emit log_named_uint(vm.toString(abi.encodePacked(why[i])), handler.drawRefusals(why[i]));
+        }
+        for (uint256 i; i < ops.length; i++) {
+            emit log_named_uint(string(abi.encodePacked(ops[i])), handler.lands(ops[i]));
+            assertGt(handler.lands(ops[i]), 0, "a path never landed");
+        }
+        assertGt(core.poolView().totalOutstanding + _writtenOff(), 0);
+    }
 
-        // The point of the fix: most deposit attempts land. Anything above half is a pass;
-        // the exact number is in the log.
-        assertGt(handler.venueDepositLands() * 2, handler.venueDepositTries());
+    function _writtenOff() internal view returns (uint256 total) {
+        for (uint256 i; i < handler.communityCount(); i++) {
+            ICreditCore.CommunityCredit memory c = core.communityCreditOf(handler.communityAt(i));
+            total += c.writtenOff;
+        }
     }
 
     function _dispatch(uint256 pick, uint256 step) internal {
-        if (pick == 0) {
-            try handler.fund(_arg(step, 1)) {} catch {}
-        } else if (pick == 1) {
-            try handler.addCommunity() {} catch {}
-        } else if (pick == 2) {
-            try handler.allocate(_arg(step, 1), _arg(step, 2), uint8(_arg(step, 3))) {} catch {}
-        } else if (pick == 3) {
-            try handler.closeCommunity(_arg(step, 1)) {} catch {}
-        } else if (pick == 4) {
-            try handler.depositToVenue(_arg(step, 1)) {} catch {}
-        } else if (pick == 5) {
-            try handler.withdrawFromVenue(_arg(step, 1)) {} catch {}
-        } else if (pick == 6) {
-            try handler.venueGain(_arg(step, 1)) {} catch {}
-        } else if (pick == 7) {
-            try handler.venueLoss(_arg(step, 1)) {} catch {}
-        } else if (pick == 8) {
-            try handler.setBook(_arg(step, 1), _arg(step, 2), _arg(step, 3), _arg(step, 4)) {} catch {}
-        } else if (pick == 9) {
-            try handler.setPending(_arg(step, 1)) {} catch {}
-        } else {
-            try handler.warp(_arg(step, 1)) {} catch {}
-        }
+        uint256 x = _arg(step, 1);
+        uint256 y = _arg(step, 2);
+        uint256 z = _arg(step, 3);
+        // Two borrowers (the last of the eight) never repay, so write-offs happen.
+        if (pick < 4) handler.draw(x, y, z);
+        else if (pick < 8) handler.settle(x % 6, y);
+        else if (pick == 8) handler.warp(x);
+        else if (pick == 9) handler.finalizeWriteOff(x);
+        else if (pick == 10) handler.materialize(x);
+        else if (pick == 11) handler.leg(x, y);
+        else if (pick == 12) handler.grant(x, y);
+        else if (pick == 13) handler.depositToStrategy(x);
+        else if (pick == 14) handler.withdrawFromStrategy(x);
+        else if (pick == 15) handler.strategyGain(x);
+        else if (pick == 16) handler.strategyLoss(x);
+        else handler.withdrawTreasury(x);
     }
 }

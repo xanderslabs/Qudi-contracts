@@ -6,6 +6,7 @@ import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {Config} from "../src/Config.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
 import {Community} from "../src/Community.sol";
+import {IConfig} from "../src/interfaces/IConfig.sol";
 import {Seats} from "../src/Seats.sol";
 import {ICommunity} from "../src/interfaces/ICommunity.sol";
 import {ICommunityInit} from "../src/interfaces/ICommunityInit.sol";
@@ -72,7 +73,7 @@ contract CommunityTest is InviteSigner {
         // with paid mints has to have one wired, so the fixture wires it.
         vm.prank(owner);
         config.setAddress(ConfigKeys.CREDIT_CORE, address(core));
-        seats = new Seats(address(this));
+        seats = new Seats(address(this), IConfig(address(config)));
         community = _fresh();
 
         ICommunityInit.CommunityWiring memory w = ICommunityInit.CommunityWiring({

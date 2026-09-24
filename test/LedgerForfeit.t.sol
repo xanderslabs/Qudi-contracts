@@ -64,7 +64,7 @@ contract LedgerForfeitTest is InviteSigner {
             pools[t] = new Venue(usdc, IConfig(address(config)), predicted, owner, "Qudi", "q");
             poolAddrs[t] = address(pools[t]);
         }
-        Seats seats = new Seats(predicted);
+        Seats seats = new Seats(predicted, IConfig(address(config)));
         factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
         for (uint8 t = 0; t < 3; t++) {
             vm.prank(owner);

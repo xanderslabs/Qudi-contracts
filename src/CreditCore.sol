@@ -2,112 +2,132 @@
 pragma solidity 0.8.30;
 
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import {IERC4626} from "openzeppelin-contracts/contracts/interfaces/IERC4626.sol";
 import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {Math} from "openzeppelin-contracts/contracts/utils/math/Math.sol";
-import {SafeCast} from "openzeppelin-contracts/contracts/utils/math/SafeCast.sol";
 import {Ownable2Step, Ownable} from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
 import {ICreditCore} from "./interfaces/ICreditCore.sol";
 import {ICreditStanding} from "./interfaces/ICreditStanding.sol";
 import {IConfig} from "./interfaces/IConfig.sol";
 import {ICommunityFactory} from "./interfaces/ICommunityFactory.sol";
 import {ICommunity} from "./interfaces/ICommunity.sol";
+import {ILedger} from "./interfaces/ILedger.sol";
 import {IComplianceRegistry} from "./interfaces/IComplianceRegistry.sol";
-import {IStrategyDelay} from "./interfaces/IStrategyDelay.sol";
+import {IStrategy} from "./interfaces/IStrategy.sol";
 import {DebtMath} from "./DebtMath.sol";
+import {StandingMath} from "./StandingMath.sol";
 
-/// The singleton CreditCore, Treasury half. Keyed by community id, not
-/// per-community clones.
+/// The credit pool and its ledger, one contract for every community, keyed by community id.
 ///
-/// **What it holds.** Qudi-owned credit capital in USDC, and nothing else. No member
-/// vault principal, no Collective Vault balances, no Shareouts, no Campaign rewards, no
-/// temporary member balances. It accepts no public deposits: `fund` is owner-only Qudi seed.
-/// It issues no share, LP or redemption token, and there is no path for anyone to withdraw a
-/// balance they put in.
+/// **One record per community:** its paper balance (`allocation`), what it has lent
+/// (`outstanding`) and what it has written off. A community lends only from its own balance, so
+/// Qudi needs no money of its own for anyone to draw. What a community can lend now is its
+/// unlent balance, faded if the community has gone quiet.
 ///
-/// **Community Credit Accounts** are restricted internal accounting allocations: a number
-/// (`allocationOf[communityId]`) inside this contract. Members, hosts and communities have no
-/// ownership, redemption or withdrawal right over it, and there is no function that pays one
-/// out. It changes only by an Allocation Multisig `allocate` (up), by a registered community
-/// contract's `receiveCommunityLeg` (up), or by `closeCommunity` (down, back to the global
-/// Treasury once debts resolve). That sentence is what makes closure a sweep and not a
-/// distribution.
+/// **A loss stays where it happened.** At write-off the unpaid principal leaves that community's
+/// outstanding and its balance, and no other record moves. The advance can still be repaid, and
+/// every dollar repaid goes back to the same community, or to Qudi once its account has closed.
 ///
-/// **The gate.** Every path that reduces unallocated Treasury cash ends in
-/// `_requireRetained()`, which reverts unless
-/// `cash >= totalAllocated + requiredRetainedCapital()`. This is what stands between the
-/// protocol and lending out its own reserves. Standing and the debt half (draw, repay,
-/// write-off, the bad-debt waterfall) add to this contract; their outflows call the same
-/// `_requireRetained()`.
+/// **The backing rule.** Cash plus the pool strategies always cover every unlent paper balance.
+/// Every path that lowers Qudi's own money checks it: a grant, a pool strategy deposit or
+/// withdrawal, and the treasury withdrawal. Draws, repayments, legs and write-offs move cash and
+/// paper together, so they cannot break it. What is left over is Qudi's unallocated money: pool
+/// strategy yield and losses land there, never in a community's balance.
 ///
-/// **Roles.** The owner is governance (the Risk Committee timelock on
-/// mainnet). The Treasury Manager (2-of-3, no delay) rebalances venue capital within the
-/// owner-set allowlist and nothing else: it cannot allocate, distribute surplus, transfer to
-/// the company, or touch a committed allocation. The Community Allocation Multisig (2-of-3,
-/// 24h) is the only caller of `allocate`; on mainnet its address is a `TimelockController`
-/// whose delay is the 24 hours. On testnet the dev key holds every role.
+/// **Liquidity.** A pool strategy deposit must leave `POOL_LIQUID_FLOOR_BPS` of the unlent balances
+/// as cash. The floor limits only what the operator sends out; a draw that finds too little cash
+/// reverts `PoolIlliquid` and the operator rebalances.
+///
+/// **Roles.** The owner is the timelock: pool strategy listing, closure, and the treasury
+/// withdrawal. The operator moves money between cash and listed pool strategies within the floor.
+/// The allocation multisig grants Qudi's money to communities. Nobody else moves money out.
 contract CreditCore is ICreditCore, Ownable2Step {
     using SafeERC20 for IERC20;
-    using SafeCast for uint256;
 
     IERC20 public immutable usdc;
-    /// Source of the community count for the operating requirement and of community-id
-    /// validation. A "community" is a community.
+    /// Validates community ids and names each community's `Community` and `Ledger`.
     address public immutable factory;
     IConfig public immutable config;
-    /// The Standing half, split out into its own contract. Deployed before this contract and
-    /// taken here as an immutable constructor argument; `CreditStanding.setCreditCore` (owner
-    /// -only, reverts if already set) is the matching one-way wire in the other direction. This
-    /// contract never mutates `CreditStanding`'s wiring.
+    /// The standing half, deployed first and taken here; `CreditStanding.setCreditCore` is the
+    /// one-way wire back.
     ICreditStanding public immutable standing;
 
-    address public override treasuryManager;
+    address public override operator;
     address public override allocationMultisig;
 
-    /// Sum of every `allocationOf` entry. `cash - totalAllocated` is unallocated Treasury cash.
-    uint256 internal _totalAllocated;
-    mapping(uint256 => uint256) internal _allocationOf;
-    mapping(uint256 => bool) internal _closed;
+    uint256 internal constant WAD = 1e18;
 
-    /// An independent running mirror of `usdc.balanceOf(address(this))`, moved by exactly the
-    /// same amounts every USDC-moving path moves the real balance by. Equality between the two
-    /// (checked by the invariant campaign's `expectedCash()`) is what proves no path ever
-    /// raw-transfers around the ledger.
+    /// `healFromWad` and `healFromAt` are where the lendable share stood at the last activity and
+    /// when: after a quiet spell the share heals from there rather than jumping back.
+    struct CommunityRecord {
+        uint256 allocation;
+        uint256 outstanding;
+        uint256 writtenOff;
+        uint64 lastActivityAt;
+        uint64 healFromAt;
+        uint64 healFromWad;
+        bool closed;
+    }
+
+    mapping(uint256 => CommunityRecord) internal _records;
+    uint256 internal _totalAllocated;
+    uint256 internal _totalOutstanding;
+
+    /// A running mirror of `usdc.balanceOf(address(this))`, moved by exactly what every USDC path
+    /// moves. Equality between the two is what proves no path moves money around the ledger.
     uint256 internal _bookedCash;
 
-    address[] internal _venues;
-    mapping(address => bool) public isVenue;
+    address[] internal _strategies;
+    mapping(address => bool) public isStrategy;
+
+    /// One advance per account, across every community. A written-off advance keeps its unpaid
+    /// principal so it can still be repaid; `closed` means repaid in full. `stage` is the stage as
+    /// last recorded, used to see a crossing; every view derives the live stage.
+    struct Obligation {
+        uint128 principal;
+        uint128 originalPrincipal;
+        uint64 drawTimestamp;
+        uint64 communityId;
+        uint8 stage;
+        bool writtenOff;
+        bool closed;
+    }
+
+    mapping(address => Obligation) internal _tab;
+    mapping(address => bool) internal _agreementAccepted;
+    /// Each community's borrowers with an advance not yet repaid or written off, for the book
+    /// quality gate. One advance per account and the member cap keep it short.
+    mapping(uint256 => address[]) internal _openBorrowers;
+    mapping(address => uint256) internal _openIndex; // position in its community's list, plus one
 
     constructor(
         IERC20 usdc_,
         IConfig config_,
         address factory_,
         address owner_,
-        address treasuryManager_,
+        address operator_,
         address allocationMultisig_,
         ICreditStanding standing_
     ) Ownable(owner_) {
         if (
             address(usdc_) == address(0) || address(config_) == address(0) || factory_ == address(0)
-                || treasuryManager_ == address(0) || allocationMultisig_ == address(0)
-                || address(standing_) == address(0)
+                || operator_ == address(0) || allocationMultisig_ == address(0) || address(standing_) == address(0)
         ) revert ZeroAddress();
         usdc = usdc_;
         config = config_;
         factory = factory_;
         standing = standing_;
-        treasuryManager = treasuryManager_;
+        operator = operator_;
         allocationMultisig = allocationMultisig_;
-        emit TreasuryManagerSet(address(0), treasuryManager_);
+        emit OperatorSet(address(0), operator_);
         emit AllocationMultisigSet(address(0), allocationMultisig_);
     }
 
-    // ---- role wiring (owner only) ----
+    // ---- roles (owner only) ----
 
-    function setTreasuryManager(address next) external onlyOwner {
+    function setOperator(address next) external onlyOwner {
         if (next == address(0)) revert ZeroAddress();
-        emit TreasuryManagerSet(treasuryManager, next);
-        treasuryManager = next;
+        emit OperatorSet(operator, next);
+        operator = next;
     }
 
     function setAllocationMultisig(address next) external onlyOwner {
@@ -116,12 +136,59 @@ contract CreditCore is ICreditCore, Ownable2Step {
         allocationMultisig = next;
     }
 
-    // ---- funding (Qudi seed only: no public deposits) ----
+    function _requireCommunity(uint256 communityId) internal view {
+        if (communityId >= ICommunityFactory(factory).communityCount()) revert UnknownCommunity();
+    }
 
-    /// One-way. The sender gets no share, no claim, and no way to pull it back. Owner-only so
-    /// no member path can put money into credit. A raw USDC transfer to this contract also
-    /// just increases unallocated cash; `treasuryView().unallocated` is defined from the live
-    /// balance.
+    // ---- the pool's figures ----
+
+    function _cash() internal view returns (uint256) {
+        return usdc.balanceOf(address(this));
+    }
+
+    function _strategyValue() internal view returns (uint256 total) {
+        uint256 n = _strategies.length;
+        for (uint256 i; i < n; i++) {
+            total += IStrategy(_strategies[i]).totalAssets();
+        }
+    }
+
+    /// Every community's balance less what it has lent: the paper the pool must back.
+    function _unlent() internal view returns (uint256) {
+        return _totalAllocated - _totalOutstanding;
+    }
+
+    /// Qudi's own money: cash and strategies above the unlent paper balances.
+    function _unallocated() internal view returns (uint256) {
+        uint256 assets = _cash() + _strategyValue();
+        uint256 unlent = _unlent();
+        return assets > unlent ? assets - unlent : 0;
+    }
+
+    function _requireBacked() internal view {
+        if (_cash() + _strategyValue() < _unlent()) revert Unbacked();
+    }
+
+    function expectedCash() external view returns (uint256) {
+        return _bookedCash;
+    }
+
+    function poolView() external view returns (PoolView memory v) {
+        v.cash = _cash();
+        v.strategyValue = _strategyValue();
+        v.totalAllocated = _totalAllocated;
+        v.totalOutstanding = _totalOutstanding;
+        v.unallocated = _unallocated();
+    }
+
+    function strategies() external view returns (address[] memory) {
+        return _strategies;
+    }
+
+    // ---- funding and allocation ----
+
+    /// Qudi's own money in. Owner only, so no member path can put money into credit, and the sender
+    /// gets no claim on it.
     function fund(uint256 amount) external onlyOwner {
         if (amount == 0) revert ZeroAmount();
         usdc.safeTransferFrom(msg.sender, address(this), amount);
@@ -129,559 +196,258 @@ contract CreditCore is ICreditCore, Ownable2Step {
         emit Funded(msg.sender, amount);
     }
 
-    /// The `_bookedCash` ledger, for the invariant campaign's cash-conservation check:
-    /// it must always equal `usdc.balanceOf(address(this))`.
-    function expectedCash() external view returns (uint256) {
-        return _bookedCash;
-    }
-
-    // ---- allocations (Community Allocation Multisig only) ----
-
-    /// Assign unallocated capital to a community's account. Growth or Stabilization; both
-    /// create nothing member-attributable and neither targets a member Line. Reverts if it
-    /// would leave the Treasury below its retained-capital requirement. Not recallable:
-    /// there is no function that lowers an allocation except `closeCommunity` after debts
-    /// resolve.
+    /// A grant of Qudi's money to a community. It can hand out only what is Qudi's: the backing
+    /// rule refuses a grant that would leave unlent paper uncovered. A community with no activity
+    /// yet starts its dormancy clock here, so a balance that only ever came from grants still fades.
     function allocate(uint256 communityId, uint256 amount, AllocationType kind) external {
         if (msg.sender != allocationMultisig) revert NotAllocationMultisig();
         _assign(communityId, amount, kind);
-        // The gate belongs here and not in `receiveCommunityLeg`: this path moves existing cash
-        // from unallocated to allocated, which is what the retained-capital gate stands in front of.
-        _requireRetained();
+        if (_records[communityId].lastActivityAt == 0) _noteActivity(communityId);
+        _requireBacked();
     }
 
-    /// The second door onto the same balance. A contract `CommunityFactory`
-    /// created for `communityId` has already transferred the USDC in and calls this to book it:
-    /// the seat mint's 40% community share from `Community._split`, and the vault yield's 15%
-    /// pool leg from `Ledger.claimPoolLeg`. Campaign proceeds use the same door when
-    /// campaigns exist.
+    /// The door a community's own contracts pay through. The seat mint's 40% comes from its
+    /// `Community`, the yield's 15% from its `Ledger`. Three gates, in order: the caller must be a
+    /// contract the factory created; it must belong to the community it names, so the callee
+    /// decides whose balance rises; and the USDC must already be here, which keeps the booked cash
+    /// equal to the balance.
     ///
-    /// `kind` is the leg's provenance and it is the caller's to name, because `CreditCore`
-    /// **The kind is derived, never supplied.** The seats clone pays the mint leg and a ledger
-    /// pays the yield leg, so comparing the caller against the community's seats address
-    /// separates them without asking. `communityAt` is the same read `draw` already makes. A
-    /// caller-supplied kind was built first and replaced: it let a contract label
-    /// its own leg, which is the same weakness that rules out a caller-named community id.
-    /// `Growth` and `Stabilization` are unreachable here by construction rather than by a guard.
+    /// The kind is derived, never supplied: the community clone pays the seat leg and any other
+    /// contract of that community pays a yield leg, so no caller can label its own leg. A seat leg
+    /// is community activity. A yield leg is not, because yield arrives whether or not anyone acts.
     ///
-    /// Three gates, in order. The caller must be a registered community contract; it must be
-    /// registered to the community it named, so the callee decides provenance rather than the
-    /// caller asserting it; and the USDC must already be in the contract, which is what keeps
-    /// `expectedCash()` equal to the real balance and stops a registered contract booking a leg
-    /// it never paid.
-    ///
-    /// No `_requireRetained()`. A leg raises cash and allocation by the same amount, so
-    /// unallocated cash does not move and this is not a path that reduces it. Proved in
-    /// `test/CreditCoreCommunityLeg.t.sol` rather than argued, because it is a money gate.
+    /// No backing check: a leg raises cash and the balance by the same amount.
     function receiveCommunityLeg(uint256 communityId, uint256 amount) external {
         uint256 callerIdPlusOne = ICommunityFactory(factory).communityIdOf(msg.sender);
         if (callerIdPlusOne == 0) revert NotCommunityContract();
         if (callerIdPlusOne - 1 != communityId) revert CommunityMismatch();
         if (usdc.balanceOf(address(this)) < _bookedCash + amount) revert LegNotFunded();
 
-        AllocationType kind = msg.sender == ICommunityFactory(factory).communityAt(communityId)
-            ? AllocationType.SeatMint
-            : AllocationType.Yield;
-
+        bool seatLeg = msg.sender == ICommunityFactory(factory).communityAt(communityId);
         _bookedCash += amount;
-        _assign(communityId, amount, kind);
+        _assign(communityId, amount, seatLeg ? AllocationType.SeatMint : AllocationType.Yield);
+        if (seatLeg) _noteActivity(communityId);
     }
 
-    /// One internal assignment for both doors, so a leg and a grant reach the same
-    /// `_allocationOf` entry and emit the same `AllocationAssigned` with the same `kind`
-    /// semantics. One balance, provenance in the event stream.
     function _assign(uint256 communityId, uint256 amount, AllocationType kind) internal {
         if (amount == 0) revert ZeroAmount();
-        if (communityId >= ICommunityFactory(factory).communityCount()) revert UnknownCommunity();
-        if (_closed[communityId]) revert CommunityIsClosed();
-
-        _allocationOf[communityId] += amount;
+        _requireCommunity(communityId);
+        CommunityRecord storage r = _records[communityId];
+        if (r.closed) revert CommunityIsClosed();
+        r.allocation += amount;
         _totalAllocated += amount;
+        emit AllocationAssigned(communityId, kind, amount, msg.sender, _unallocated(), r.allocation);
+    }
 
-        emit AllocationAssigned(communityId, kind, amount, msg.sender, _unallocated(), _allocationOf[communityId]);
+    // ---- dormancy ----
+
+    /// A deposit in the community's own ledger, or a paid seat mint in its own `Community`, by
+    /// `member`. Only those two contracts of this community may report one. It is community activity
+    /// and the member's own activity in the community. Both callers call it best-effort, so it can
+    /// never block a deposit or a join.
+    function noteActivity(uint256 communityId, address member) external {
+        address community = ICommunityFactory(factory).communityAt(communityId);
+        if (msg.sender != community && msg.sender != ICommunityFactory(factory).ledgerOf(community)) {
+            revert NotCommunityOwnContract();
+        }
+        _noteActivity(communityId);
+        standing.recordActivity(communityId, member);
+    }
+
+    /// Activity: a paid seat mint, a deposit, or a draw. The share heals from wherever it stands now.
+    function _noteActivity(uint256 communityId) internal {
+        CommunityRecord storage r = _records[communityId];
+        r.healFromWad = uint64(_lendableShare(r));
+        r.healFromAt = uint64(block.timestamp);
+        r.lastActivityAt = uint64(block.timestamp);
+    }
+
+    /// The share of the unlent balance a community can lend now, 1e18 for all of it. After the
+    /// grace with no activity it fades linearly to 0 over the fade length; activity heals it back
+    /// linearly over the heal length from where it stood. The lower of the two applies. Computed on
+    /// read. A community with no activity yet has nothing to fade from.
+    function _lendableShare(CommunityRecord storage r) internal view returns (uint256) {
+        if (r.lastActivityAt == 0) return WAD;
+        (uint64 grace, uint64 fadeLength, uint64 healLength,) = config.communityDormancy();
+        uint256 fade = StandingMath.dormancyDecay(block.timestamp - r.lastActivityAt, grace, fadeLength, 0);
+        uint256 heal = StandingMath.healRamp(r.healFromWad, block.timestamp - r.healFromAt, healLength);
+        return fade < heal ? fade : heal;
+    }
+
+    function _lendable(uint256 communityId) internal view returns (uint256) {
+        CommunityRecord storage r = _records[communityId];
+        return Math.mulDiv(r.allocation - r.outstanding, _lendableShare(r), WAD);
+    }
+
+    /// Anyone, once the community has been fully faded for the return period and has nothing out.
+    /// The balance becomes Qudi's unallocated money, as at closure. The community is not closed:
+    /// new activity starts it again, healing from nothing.
+    function sweepDormant(uint256 communityId) external {
+        _requireCommunity(communityId);
+        CommunityRecord storage r = _records[communityId];
+        (uint64 grace, uint64 fadeLength,, uint64 returnAfter) = config.communityDormancy();
+        if (r.lastActivityAt == 0 || block.timestamp < uint256(r.lastActivityAt) + grace + fadeLength + returnAfter) {
+            revert NotDormant();
+        }
+        if (r.outstanding != 0) revert CommunityHasDebt();
+        uint256 returned = r.allocation;
+        r.allocation = 0;
+        _totalAllocated -= returned;
+        emit DormantSwept(communityId, returned);
     }
 
     // ---- closure ----
 
-    /// The community's remaining balance returns to the global Treasury and the community
-    /// enters a closed state. It is Qudi's money earmarked for the community
-    /// (members, hosts and communities have no claim on it), so an unspent
-    /// earmark coming back is an accounting finish, not a distribution.
-    ///
-    /// **This narrows the no-recall rule rather than overriding it.** That rule blocked closure
-    /// while a balance was outstanding so that governance could not pull an allocation back *at will*. Winding
-    /// up a dead community's books is not at will: it is terminal, `onlyOwner`, and gated by
-    /// `_communityHasUnresolvedDebt`, which is not a stub (it reads
-    /// `_openObligationCount[communityId] > 0`), so every obligation must be settled first. The
-    /// blanket block conflated recalling a live allocation with winding up a dead community.
-    ///
-    /// What still gates closure: `onlyOwner`, the already-closed guard, and the debt gate. What
-    /// closure does not do is stop the community operating; the factory has no closure concept,
-    /// which belongs to the Ledger's state machine.
-    ///
-    /// Idempotent guard: a closed community cannot be closed again, or topped up through either
-    /// door.
+    /// The community's balance returns to Qudi and its account closes for good. It is Qudi's money
+    /// earmarked for the community, so an unspent earmark coming back is an accounting finish, not
+    /// a distribution. Waits until nothing is out in the community.
     function closeCommunity(uint256 communityId) external onlyOwner {
-        if (_closed[communityId]) revert AlreadyClosed();
-        if (_communityHasUnresolvedDebt(communityId)) revert CommunityHasDebt();
-
-        uint256 returned = _allocationOf[communityId];
-        _allocationOf[communityId] = 0;
+        _requireCommunity(communityId);
+        CommunityRecord storage r = _records[communityId];
+        if (r.closed) revert AlreadyClosed();
+        if (r.outstanding != 0) revert CommunityHasDebt();
+        uint256 returned = r.allocation;
+        r.allocation = 0;
         _totalAllocated -= returned;
-        _closed[communityId] = true;
-        // Unallocated cash only rises here, so the retained-capital gate cannot be breached.
+        r.closed = true;
         emit CommunityClosed(communityId, returned);
     }
 
-    // ---- venue rebalance (Treasury Manager only) ----
+    // ---- pool strategies ----
 
-    /// Whitelist a USDC ERC-4626 venue.
-    ///
-    /// **Risk Committee only.** Listing is the highest-consequence action on this
-    /// contract, so it carries the Risk Committee's 48-hour delay, the same mechanism that
-    /// parameter changes sit behind: the caller must be the owner of `Config`, which is that
-    /// `TimelockController`. `removeVenue` stays immediate (emergencies run one
-    /// direction only).
-    ///
-    /// **Duration limit.** The venue's `IStrategyDelay.redeemDelay()` must not
-    /// exceed `MAX_VENUE_REDEMPTION_DELAY`, which is the pending-obligation window. That
-    /// window had its own key and this value was derived from it; the key was retired as
-    /// unread, so `Config` now sets this one directly with the same reason recorded there.
-    /// A venue that does not implement `redeemDelay()` cannot be listed: its delay is unknown,
-    /// so it fails closed. Checked here at listing and re-checked in `depositToVenue`, because a
-    /// venue can lengthen its delay after it is listed.
-    ///
-    /// Listing grants no token allowance. `depositToVenue` approves exactly the deposit amount
-    /// for the duration of that one call and resets to zero, so a listed venue holds no standing
-    /// authority to move Treasury USDC and the retained-capital gate sees every outflow.
-    function addVenue(address venue) external {
-        if (msg.sender != _riskCommittee()) revert NotRiskCommittee();
-        if (isVenue[venue]) revert DuplicateVenue();
-        if (IERC4626(venue).asset() != address(usdc)) revert VenueAssetMismatch();
-        try IStrategyDelay(venue).redeemDelay() returns (uint64 delay) {
-            if (delay > config.maxVenueRedemptionDelay()) revert VenueRedeemDelayTooLong();
-        } catch {
-            revert VenueRedeemDelayUnknown();
-        }
-        isVenue[venue] = true;
-        _venues.push(venue);
-        emit VenueAdded(venue);
+    /// The timelock lists a strategy with this contract as its one depositor. The pool invests
+    /// only here, never in member venues.
+    function addStrategy(address strategy) external onlyOwner {
+        if (isStrategy[strategy]) revert DuplicateStrategy();
+        if (IStrategy(strategy).asset() != address(usdc)) revert StrategyAssetMismatch();
+        isStrategy[strategy] = true;
+        _strategies.push(strategy);
+        emit StrategyAdded(strategy);
     }
 
-    /// The Risk Committee is the owner of `Config`: a 48-hour `TimelockController` on
-    /// mainnet, the dev key on testnet. Reused here so venue listing
-    /// runs through the exact timelock a parameter change does, with no second timelock shape.
-    function _riskCommittee() internal view returns (address) {
-        return Ownable(address(config)).owner();
-    }
-
-    function removeVenue(address venue) external onlyOwner {
-        if (!isVenue[venue]) revert UnknownVenue();
-        // The Treasury Manager must withdraw the position first; a governance call does not
-        // trigger a surprise redemption.
-        if (IERC4626(venue).balanceOf(address(this)) != 0) revert VenueHoldsBalance();
-        isVenue[venue] = false;
-        uint256 n = _venues.length;
+    /// Only an empty position is removed: the operator brings the money back first, so removal is
+    /// never a surprise redemption.
+    function removeStrategy(address strategy) external onlyOwner {
+        if (!isStrategy[strategy]) revert UnknownStrategy();
+        if (IStrategy(strategy).totalAssets() != 0) revert StrategyHoldsBalance();
+        isStrategy[strategy] = false;
+        uint256 n = _strategies.length;
         for (uint256 i; i < n; i++) {
-            if (_venues[i] == venue) {
-                _venues[i] = _venues[n - 1];
-                _venues.pop();
+            if (_strategies[i] == strategy) {
+                _strategies[i] = _strategies[n - 1];
+                _strategies.pop();
                 break;
             }
         }
-        usdc.forceApprove(venue, 0);
-        emit VenueRemoved(venue);
+        emit StrategyRemoved(strategy);
     }
 
-    /// Move idle USDC into an allowlisted venue. Cash falls by `assets` and the venue-loss
-    /// reserve rises with the new exposure, so this is doubly gated by `_requireRetained()`:
-    /// venue positions never count as cash toward the requirement.
-    ///
-    /// The USDC allowance is set to exactly `assets` immediately before the deposit and back to
-    /// zero immediately after, so no venue ever holds standing authority to pull Treasury cash.
-    ///
-    /// The venue's redemption delay is re-read here as well as at listing: a venue can
-    /// lengthen its delay after it is listed, and this stops new money entering one whose delay
-    /// has grown past the limit. It does not pull out money already there; delisting is for
-    /// that, and `removeVenue` stays immediate so it is always available.
-    ///
-    /// Three further limits apply after the deposit lands:
-    /// - **Slippage.** The shares the venue actually minted must not fall below
-    ///   `previewDeposit(assets)` by more than `MAX_VENUE_SLIPPAGE_BPS`. A deposit receives
-    ///   shares, so the comparison is on shares. More shares than previewed is favourable and
-    ///   never reverts.
-    /// - **Per-venue cap.** This one venue's exposure must not exceed `PER_VENUE_CAP_BPS` of
-    ///   total Treasury cash (`cash + total venue exposure`, not the venue sleeve, so the cap
-    ///   does not loosen as the sleeve grows).
-    /// - **Aggregate cap.** Total venue exposure must not exceed `VENUE_ALLOCATION_MAX_BPS` of
-    ///   liquid capital above the operating buffer.
-    function depositToVenue(address venue, uint256 assets) external {
-        if (msg.sender != treasuryManager) revert NotTreasuryManager();
-        if (!isVenue[venue]) revert UnknownVenue();
-        if (assets == 0) revert ZeroAmount();
-        if (IStrategyDelay(venue).redeemDelay() > config.maxVenueRedemptionDelay()) revert VenueRedeemDelayTooLong();
-        uint256 previewShares = IERC4626(venue).previewDeposit(assets);
-        usdc.forceApprove(venue, assets);
-        uint256 gotShares = IERC4626(venue).deposit(assets, address(this));
-        usdc.forceApprove(venue, 0);
-        _bookedCash -= assets;
-        _checkSlippage(gotShares, previewShares);
-        _requireRetained();
-        if (_venueExposureOf(venue) > _perVenueCap()) revert PerVenueCapExceeded();
-        if (_totalVenueExposure() > _venueAllocationCap()) revert VenueAllocationCapExceeded();
-        emit VenueDeposit(venue, assets);
+    function _onlyOperatorOn(address strategy, uint256 amount) internal view {
+        if (msg.sender != operator) revert NotOperator();
+        if (!isStrategy[strategy]) revert UnknownStrategy();
+        if (amount == 0) revert ZeroAmount();
     }
 
-    /// Redeem venue shares back to idle USDC. Cash rises, so the retained-capital gate is not
-    /// needed. Standard ERC-4626 `redeem` by the share owner (this contract) needs no USDC
-    /// allowance, so there is nothing to mirror from the deposit side.
-    ///
-    /// Slippage: the USDC the venue actually paid must not fall below
-    /// `previewRedeem(shares)` by more than `MAX_VENUE_SLIPPAGE_BPS`. A redeem receives
-    /// assets, so the comparison is on assets. More assets than previewed is favourable and
-    /// never reverts.
-    function withdrawFromVenue(address venue, uint256 shares) external {
-        if (msg.sender != treasuryManager) revert NotTreasuryManager();
-        if (!isVenue[venue]) revert UnknownVenue();
-        if (shares == 0) revert ZeroAmount();
-        uint256 previewAssets = IERC4626(venue).previewRedeem(shares);
-        uint256 assets = IERC4626(venue).redeem(shares, address(this), address(this));
-        _bookedCash += assets;
-        _checkSlippage(assets, previewAssets);
-        emit VenueWithdraw(venue, shares, assets);
+    /// The operator sends cash to a listed strategy. The allowance is exactly the amount and is
+    /// reset after, so no strategy holds standing authority over the pool's cash. Afterwards the
+    /// backing rule must hold, and the cash left must be at least the liquid floor.
+    function depositToStrategy(address strategy, uint256 amount) external {
+        _onlyOperatorOn(strategy, amount);
+        usdc.forceApprove(strategy, amount);
+        IStrategy(strategy).deposit(amount);
+        usdc.forceApprove(strategy, 0);
+        _bookedCash -= amount;
+        _requireBacked();
+        if (_cash() * 10_000 < uint256(config.poolLiquidFloorBps()) * _unlent()) revert BelowLiquidFloor();
+        emit StrategyDeposit(strategy, amount);
     }
 
-    /// Reverts `VenueSlippageExceeded` when `got` is below `preview` by more than
-    /// `MAX_VENUE_SLIPPAGE_BPS`. Cross-multiplied so there is no division and no rounding
-    /// slack in the venue's favour. `got >= preview` (favourable, or an empty-venue zero
-    /// preview) can never trip it.
-    function _checkSlippage(uint256 got, uint256 preview) internal view {
-        if (got >= preview) return;
-        uint256 floorBps = 10_000 - config.maxVenueSlippageBps();
-        if (got * 10_000 < preview * floorBps) revert VenueSlippageExceeded();
+    /// The operator brings money back. Cash can only rise, so the floor is not checked: checking it
+    /// could only refuse a move toward liquidity.
+    function withdrawFromStrategy(address strategy, uint256 amount) external {
+        _onlyOperatorOn(strategy, amount);
+        uint256 before = _cash();
+        IStrategy(strategy).withdraw(amount, address(this));
+        uint256 received = _cash() - before;
+        _bookedCash += received;
+        _requireBacked();
+        emit StrategyWithdraw(strategy, received);
     }
 
-    /// One venue's USDC exposure, marked to venue price.
-    function _venueExposureOf(address venue) internal view returns (uint256) {
-        return IERC4626(venue).convertToAssets(IERC4626(venue).balanceOf(address(this)));
-    }
+    // ---- the treasury withdrawal ----
 
-    /// `PER_VENUE_CAP_BPS` of total Treasury cash, which is `cash + total venue
-    /// exposure`, the same base the aggregate cap uses. Measured against that base, not the
-    /// venue sleeve, so the cap does not loosen as the sleeve grows. Rounds down.
-    function _perVenueCap() internal view returns (uint256) {
-        uint256 base = usdc.balanceOf(address(this)) + _totalVenueExposure();
-        return Math.mulDiv(base, config.perVenueCapBps(), 10_000, Math.Rounding.Floor);
-    }
-
-    function _largestVenueExposure() internal view returns (uint256 largest) {
-        uint256 n = _venues.length;
-        for (uint256 i; i < n; i++) {
-            IERC4626 v = IERC4626(_venues[i]);
-            uint256 assets = v.convertToAssets(v.balanceOf(address(this)));
-            if (assets > largest) largest = assets;
-        }
-    }
-
-    /// Sum of every venue position, marked to venue price. Feeds the venue allocation cap.
-    function _totalVenueExposure() internal view returns (uint256 total) {
-        uint256 n = _venues.length;
-        for (uint256 i; i < n; i++) {
-            IERC4626 v = IERC4626(_venues[i]);
-            total += v.convertToAssets(v.balanceOf(address(this)));
-        }
-    }
-
-    /// At most `VENUE_ALLOCATION_MAX_BPS` (50% at launch) of liquid capital above
-    /// the operating buffer may sit in venues; the rest stays instantly liquid. Liquid capital
-    /// is cash plus venue positions, less committed community allocations and the operating
-    /// requirement. Rounds down: the cap is never overstated.
-    function _venueAllocationCap() internal view returns (uint256) {
-        uint256 base = usdc.balanceOf(address(this)) + _totalVenueExposure();
-        uint256 committed = _totalAllocated + _operatingRequirement();
-        if (base <= committed) return 0;
-        return Math.mulDiv(base - committed, config.venueAllocationMaxBps(), 10_000, Math.Rounding.Floor);
-    }
-
-    // ---- the retained-capital requirement ----
-
-    /// `OPERATING_REQUIREMENT + CREDIT_LOSS_RESERVE + VENUE_LOSS_RESERVE
-    ///  + PENDING_OBLIGATION_RESERVE + STRESS_CAPITAL`, every parameter read live from
-    /// `Config` at its launch values. The book is an input (`_stageOutstanding`), not
-    /// a constant.
-    function _requiredRetainedCapital() internal view returns (uint256) {
-        return _operatingRequirement() + _creditLossReserve() + _venueLossReserve() + _pendingObligationReserve()
-            + _stressCapital();
-    }
-
-    /// Stage-weighted allowance on the outstanding book, cash-backed at the configured percentages
-    /// (this reserve does reduce lendable cash). Each stage's slice
-    /// rounds up: the requirement is never understated.
-    function _creditLossReserve() internal view returns (uint256) {
-        (uint256 current, uint256 late, uint256 finalCure, uint256 defaultRecovery) = _stageOutstanding();
-        (uint16 currentBps, uint16 lateBps, uint16 finalCureBps, uint16 defaultRecoveryBps) =
-            config.creditLossReserveBps();
-        return _ceilBps(current, currentBps) + _ceilBps(late, lateBps) + _ceilBps(finalCure, finalCureBps)
-            + _ceilBps(defaultRecovery, defaultRecoveryBps);
-    }
-
-    /// 20% of the largest single-venue exposure, rounded up.
-    function _venueLossReserve() internal view returns (uint256) {
-        return _ceilBps(_largestVenueExposure(), config.venueLossReserveBps());
-    }
-
-    /// `max(10% of total outstanding, $100,000)`. The rate slice rounds up.
-    function _stressCapital() internal view returns (uint256) {
-        (uint16 rateBps, uint256 floor) = config.stressCapital();
-        (uint256 current, uint256 late, uint256 finalCure, uint256 defaultRecovery) = _stageOutstanding();
-        uint256 byRate = _ceilBps(current + late + finalCure + defaultRecovery, rateBps);
-        return byRate > floor ? byRate : floor;
-    }
-
-    function _ceilBps(uint256 amount, uint256 bps) internal pure returns (uint256) {
-        return Math.mulDiv(amount, bps, 10_000, Math.Rounding.Ceil);
-    }
-
-    /// Sum of the per-community operating buffers, with the global floor as the minimum. The
-    /// "global ops float" addend in the requirement has no `Config` parameter and is not
-    /// derived from one here; the floor is the effective global minimum.
-    function _operatingRequirement() internal view returns (uint256) {
-        (uint256 perCommunity, uint256 globalFloor) = config.operatingRequirement();
-        uint256 byCommunity = ICommunityFactory(factory).communityCount() * perCommunity;
-        return byCommunity > globalFloor ? byCommunity : globalFloor;
-    }
-
-    /// Reserved claimable withdrawals and the payment-reversal window (the charge term that
-    /// was once part of it is retired). Computed from an input, not returned as a constant: it is the sum of
-    /// obligations the Credit Treasury itself owes and holds cash against. That input is empty
-    /// today because no fee leg, reversal holdback, or claimable obligation is routed into
-    /// CreditCore yet; it is a seam, the same shape as `_stageOutstanding`, not a hardcoded
-    /// zero.
-    function _pendingObligationReserve() internal view virtual returns (uint256) {
-        return _reservedClaimableObligations();
-    }
-
-    /// Obligations owed by the Credit Treasury with cash reserved against them: reversal
-    /// holdbacks and any claimable-withdrawal leg a later task routes here. Zero until
-    /// that state exists on chain.
-    function _reservedClaimableObligations() internal view virtual returns (uint256) {
-        return 0;
-    }
-
-    // ---- the debt-ledger reads ----
-    //
-    // Real reads of the per-obligation debt ledger below. Still `virtual`: the test harness
-    // overrides them with a direct poke when a test sets one, and falls through to these
-    // bodies otherwise, so the synthetic-book tests and the real-draw tests share one
-    // contract without one shadowing the other's state.
-
-    function _stageOutstanding()
-        internal
-        view
-        virtual
-        returns (uint256 current, uint256 late, uint256 finalCure, uint256 defaultRecovery)
-    {
-        return (_stageBucket[0], _stageBucket[1], _stageBucket[2], _stageBucket[3]);
-    }
-
-    function _communityHasUnresolvedDebt(uint256 communityId) internal view virtual returns (bool) {
-        return _openObligationCount[communityId] > 0;
-    }
-
-    // ---- the gate ----
-
-    /// Reverts unless the live USDC balance covers every community allocation plus the full
-    /// retained-capital requirement. Called at the end of every path that reduces
-    /// unallocated cash. Only cash counts: venue positions and receivables never do.
-    function _requireRetained() internal view {
-        if (usdc.balanceOf(address(this)) < _totalAllocated + _requiredRetainedCapital()) {
-            revert BelowRetainedCapital();
-        }
+    /// The timelock takes Qudi's own money out. It can never take a dollar that backs a community's
+    /// unlent balance.
+    function withdrawTreasury(address to, uint256 amount) external onlyOwner {
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        _bookedCash -= amount;
+        usdc.safeTransfer(to, amount);
+        _requireBacked();
+        emit TreasuryWithdrawn(to, amount);
     }
 
     // ---- views ----
 
-    function _unallocated() internal view returns (uint256) {
-        uint256 cash = usdc.balanceOf(address(this));
-        return cash > _totalAllocated ? cash - _totalAllocated : 0;
-    }
-
-    function _surplus() internal view returns (int256) {
-        uint256 cash = usdc.balanceOf(address(this));
-        return cash.toInt256() - _totalAllocated.toInt256() - _requiredRetainedCapital().toInt256();
-    }
-
-    /// The retained-capital requirement and surplus, and the stage-outstanding book that
-    /// formula is computed from, bundled in one call. Replaces the standalone
-    /// `requiredRetainedCapital`, `unallocated` (derivable: `cash - totalAllocated`),
-    /// `surplus`, `totalAllocated`, `stageOutstanding`, and `totalOutstandingPrincipal`
-    /// (derivable: the sum of the four stage buckets). The venue views
-    /// (`largestVenueExposure`, `totalVenueExposure`, `venueAllocationCap`, `perVenueCap`) are
-    /// removed rather than folded in here; see `TreasuryView`'s doc comment.
-    function treasuryView() external view returns (TreasuryView memory v) {
-        (uint256 current, uint256 late, uint256 finalCure, uint256 defaultRecovery) = _stageOutstanding();
-        v.cash = usdc.balanceOf(address(this));
-        v.totalAllocated = _totalAllocated;
-        v.surplus = _surplus();
-        v.requiredRetainedCapital = _requiredRetainedCapital();
-        v.current = current;
-        v.late = late;
-        v.finalCure = finalCure;
-        v.defaultRecovery = defaultRecovery;
-    }
-
-    /// One community's allocation, budget, Trust Extension budget, and capacity, bundled in
-    /// one call. Replaces the standalone `allocationOf`, `isCommunityClosed`,
-    /// `outstandingPrincipalOf`, `communityImpactBudget`, and `teLiveOf`/`communityTeBudget`.
-    /// `openObligationCountOf`, `communityImpactTotal`, and the attributed-yield leg
-    /// of `standingCountersOf` are removed rather than folded in; see `CommunityCredit`'s doc
-    /// comment.
     function communityCreditOf(uint256 communityId) external view returns (CommunityCredit memory v) {
-        v.allocation = _allocationOf[communityId];
-        v.closed = _closed[communityId];
-        v.outstandingPrincipal = _outstandingPrincipalOf[communityId];
-        v.impactBudget = standing.communityImpactBudget(communityId, _communitySnapshot(communityId));
-        v.teLive = _teLiveOf[communityId];
-        v.teBudget = _communityTeBudget(communityId);
+        CommunityRecord storage r = _records[communityId];
+        v.allocation = r.allocation;
+        v.outstanding = r.outstanding;
+        v.writtenOff = r.writtenOff;
+        v.lendableShareWad = _lendableShare(r);
+        v.lendable = Math.mulDiv(r.allocation - r.outstanding, v.lendableShareWad, WAD);
+        v.lastActivityAt = r.lastActivityAt;
+        v.closed = r.closed;
     }
 
-    // =================================================================================
-    // Standing lives in `CreditStanding`: Impact Units, the
-    // relational share, conduct decay and scars, activity decay, phases, Trust
-    // Extension, and the Line. `standingOf` stays here: it is a composed view
-    // mixing this contract's own agreement/debt state with Standing reads, and CreditCore is
-    // the half that holds the context those reads need.
-    // =================================================================================
-
-    /// The snapshot `communityImpactBudget`/`line`/`impactBase` need from this contract's own
-    /// storage: `CreditStanding` never reads `_allocationOf`/
-    /// `_outstandingPrincipalOf` itself.
     function _communitySnapshot(uint256 communityId)
         internal
         view
         returns (ICreditStanding.CommunityLedgerSnapshot memory)
     {
-        return ICreditStanding.CommunityLedgerSnapshot({
-            allocation: _allocationOf[communityId], outstandingPrincipal: _outstandingPrincipalOf[communityId]
-        });
+        return ICreditStanding.CommunityLedgerSnapshot({lendable: _lendable(communityId)});
     }
 
-    /// The snapshot `line`/`impactBase` need of `member`'s obligation.
-    /// `openInCommunity`/`elapsedSinceDraw` answer the per-community delinquency questions
-    /// (`_openDelinquencyConduct`/`_hasOpenDelinquency` in the pre-split code: open, not closed,
-    /// not written off, AND drawn against `communityId`). `openAnywhere`/`principal` answer the
-    /// account-wide exposure question (`_memberCurrentExposure` in the pre-split code always
-    /// ignored `communityId`: one open tab per account, not per community), so they are computed
-    /// without the community match.
+    /// An advance drawn in `communityId` and not yet written off lowers conduct once it is Late.
+    /// Any advance not repaid, written off or not, makes the account ineligible.
     function _tabSnapshot(uint256 communityId, address member)
         internal
         view
         returns (ICreditStanding.MemberTabSnapshot memory s)
     {
         Obligation storage o = _tab[member];
-        bool exists = o.drawTimestamp != 0 && !o.closed && !o.writtenOff;
-        if (!exists) return s;
+        if (o.drawTimestamp == 0 || o.closed) return s;
         s.openAnywhere = true;
         s.principal = o.principal;
-        if (o.communityId == communityId) {
+        if (!o.writtenOff && o.communityId == communityId) {
             s.openInCommunity = true;
             s.elapsedSinceDraw = uint64(block.timestamp) - o.drawTimestamp;
         }
     }
 
-    /// A member's Line and every CreditCore-native gate `draw` checks
-    /// for `communityId`, named separately so the "why not?" drawer can point at the one that
-    /// binds. Membership, the draw-block flag, and seat seasoning are a different contract's
-    /// state (see `MemberStanding`'s doc comment) and are not duplicated here. Replaces the
-    /// standalone `line`, `isAccountDefaulted`, and `agreementOf`. `phaseOf`,
-    /// `impactUnitsOf`, `pendingImpactOf`, `communityImpactTotal`, and `trustExtension` are
-    /// also removed here: none of them are this view's concern, so
-    /// their values are not reachable from any external view until a profile/history screen
-    /// gives them one; the test suite still reaches the math directly through
-    /// `CreditCoreHarness`/`CreditStandingHarness`.
     function standingOf(uint256 communityId, address member) external view returns (MemberStanding memory v) {
-        standing.requireCommunity(communityId);
-        ICreditStanding.CommunityLedgerSnapshot memory communitySnap = _communitySnapshot(communityId);
+        _requireCommunity(communityId);
         v.agreementAccepted = _agreementAccepted[member];
-        v.communityHasCapacity = standing.communityImpactBudget(communityId, communitySnap) >= config.minLendable();
         v.accountDefaulted = standing.isAccountDefaulted(member);
-        (v.drawable, v.eligible) = standing.line(communityId, member, communitySnap, _tabSnapshot(communityId, member));
+        (v.drawable, v.eligible) =
+            standing.line(communityId, member, _communitySnapshot(communityId), _tabSnapshot(communityId, member));
     }
 
-    // =================================================================================
-    // The debt lifecycle: draw, settle, the stage machine, and deterministic
-    // write-off. One open tab per account, across every community. Nothing a member is paid
-    // or deposits is ever applied to their debt: debt falls only
-    // through the member's own settlement or through write-off.
-    // =================================================================================
+    // ---- the advance ----
 
-    /// One account, one obligation, ever open at a time. Fields
-    /// packed to keep the struct at two slots. `stage` is the stage as of the last
-    /// materialization (draw, settle, finalizeWriteOff, or `materialize` touching this account),
-    /// used only to detect a transition for the reserve-bucket bookkeeping; every VIEW of
-    /// the current stage (`currentStage`, `obligationOf`) derives it live instead.
-    struct Obligation {
-        uint128 principal;
-        uint128 originalPrincipal;
-        uint64 drawTimestamp;
-        uint64 communityId;
-        uint128 teDrawn;
-        uint8 stage;
-        bool writtenOff;
-        bool closed;
-    }
-
-    mapping(address => Obligation) internal _tab;
-    mapping(address => bool) internal _agreementAccepted; // Once per account
-    mapping(address => bytes32) internal _agreementHash;
-
-    mapping(uint256 => uint256) internal _outstandingPrincipalOf; // per-community receivable
-    mapping(uint256 => uint256) internal _openObligationCount;
-    mapping(uint256 => uint256) internal _teLiveOf; // aggregate, per community
-    /// The four credit-loss reserve buckets (`DebtMath.reserveIdx`): Current, Late, Final
-    /// Cure, Default Recovery. Global across every community; `stageOutstanding()` reads it.
-    uint256[4] internal _stageBucket;
-
-    /// `hasOpenTab`: an obligation exists, is not closed
-    /// or written off, and has not silently crossed the write-off boundary unmaterialized.
-    function hasOpenTab(address member) public view returns (bool) {
-        Obligation storage o = _tab[member];
-        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return false;
-        return _currentStage(o) != Stage.WrittenOff;
-    }
-
-    /// `min(sum of phase budgets, TE_COMMUNITY_CAP_BPS x cumulative attributed funding yield)`
-    /// is the same community-cap term `CreditStanding._trustExtension` computes, exposed
-    /// standalone so the draw gate can compare it against live aggregate usage.
-    /// `communityAttributedYield` is one of the crossings into Standing: the cumulative figure
-    /// itself is `CreditStanding`'s own state, read here rather than duplicated, while the phase
-    /// budgets (config-only) and the formula stay local since `_teLiveOf` (this contract's own
-    /// state) is compared against the result right at the call site in `draw`.
-    function _communityTeBudget(uint256 communityId) internal view returns (uint256) {
-        (,, uint256 b1,) = config.phaseCaps(uint8(Phase.ProvenOnce));
-        (,, uint256 b2,) = config.phaseCaps(uint8(Phase.Developing));
-        (,, uint256 b3,) = config.phaseCaps(uint8(Phase.Established));
-        uint256 sumBudgets = b1 + b2 + b3;
-        uint256 yieldCap = uint256(config.teCommunityCapBps()) * standing.communityAttributedYield(communityId) / 10_000;
-        return sumBudgets < yieldCap ? sumBudgets : yieldCap;
-    }
-
-    /// `currentStage`'s pure arithmetic, taking the boundaries as a single call so every entry
-    /// point that needs them (materialize, the views) reads the config once.
     function _deriveStage(uint256 elapsed) internal view returns (uint8) {
         (uint64 grace, uint64 late, uint64 finalCure, uint64 dr, uint64 wo) = config.stageBoundaries();
         return DebtMath.deriveStage(elapsed, grace, late, finalCure, dr, wo);
     }
 
-    function _currentStage(Obligation storage o) internal view returns (Stage) {
-        if (o.drawTimestamp == 0) return Stage.Tenor;
-        return Stage(_deriveStage(block.timestamp - o.drawTimestamp));
+    /// An advance is drawn, not repaid, not written off, and has not silently crossed the write-off
+    /// boundary.
+    function hasOpenTab(address member) public view returns (bool) {
+        Obligation storage o = _tab[member];
+        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return false;
+        return _deriveStage(block.timestamp - o.drawTimestamp) != DebtMath.STAGE_WRITTEN_OFF;
     }
 
-    /// The tab view, bundled: principal, live stage, exact payoff, and
-    /// every milestone timestamp the countdown needs, in one call. `payoff` equals `principal`
-    /// under the 0% price; kept as its own field so a price change never reshapes this
-    /// struct. Milestone fields are zero for an account with no tab.
     function obligationOf(address member) external view returns (ObligationView memory v) {
         Obligation storage o = _tab[member];
         v.principal = o.principal;
@@ -689,12 +455,10 @@ contract CreditCore is ICreditCore, Ownable2Step {
         v.payoff = o.principal;
         v.drawTimestamp = o.drawTimestamp;
         v.communityId = o.communityId;
-        v.teDrawn = o.teDrawn;
-        v.stage = _currentStage(o);
         v.writtenOff = o.writtenOff;
         v.closed = o.closed;
-
         if (o.drawTimestamp != 0) {
+            v.stage = Stage(o.writtenOff ? DebtMath.STAGE_WRITTEN_OFF : _deriveStage(block.timestamp - o.drawTimestamp));
             (uint64 grace, uint64 late, uint64 finalCure, uint64 dr, uint64 wo) = config.stageBoundaries();
             v.graceAt = o.drawTimestamp + grace;
             v.lateAt = o.drawTimestamp + late;
@@ -704,96 +468,120 @@ contract CreditCore is ICreditCore, Ownable2Step {
         }
     }
 
-    // ---- draw (agreement, aggregate cap, retained capital) ----
-
-    function draw(uint256 communityId, uint256 amount, bytes32 agreementHash) external {
-        standing.requireCommunity(communityId);
-        if (_closed[communityId]) revert CommunityIsClosed();
-        // A zero draw opens a real obligation with no principal at risk,
-        // and a same-block settle of it still credits a completed obligation and te_earned.
-        // Rejecting it closes the free-completion path that needs no capital at all. It does
-        // not close the residual same-block draw-then-settle gap, which is deferred.
-        if (amount == 0) revert ZeroAmount();
-        address m = msg.sender;
-
-        // Materialize the caller's own tab first: if it silently crossed the write-off
-        // boundary, this closes it in the same transaction, exactly as a debt-sensitive entry
-        // point must, before the "one open tab" gate below reads it.
-        _materialize(m);
-        if (hasOpenTab(m)) revert TabAlreadyOpen();
-
-        address community = ICommunityFactory(factory).communityAt(communityId);
-        // Suspension and the freeze are exit-only, "no in only out of existing", and `isMember` is false for
-        // both, so this one line is the gate. A removed, departed or frozen member may zero out
-        // what they already hold and nothing more, so no new obligation opens in their name.
-        // `settle`, `materialize` and `finalizeWriteOff` deliberately carry no such gate: each of
-        // them only ever reduces what is owed, and gating them would let a community's own vote
-        // trap a member in a debt they are forbidden to clear.
-        if (!ICommunity(community).isMember(m)) revert NotAMember();
-        if (IComplianceRegistry(config.complianceRegistry()).isBlocked(m)) revert AccountBlocked();
-        uint64 seatedAt = ICommunity(community).mintedAt(m);
-        if (block.timestamp < uint256(seatedAt) + config.memberSeasoningWindow()) revert NotSeasoned();
-
-        bytes32 recordedHash;
-        if (!_agreementAccepted[m]) {
-            if (agreementHash == bytes32(0)) revert CreditAgreementRequired();
-            _agreementAccepted[m] = true;
-            _agreementHash[m] = agreementHash;
-            recordedHash = agreementHash;
+    /// Membership, the screener block and seat seasoning. A removed, departed or frozen member may
+    /// repay what they hold and nothing more, so no new advance opens in their name. Repayment
+    /// carries none of these gates: a community's own vote must never trap a member in a debt they
+    /// are forbidden to clear.
+    function _requireMember(address community, address member) internal view {
+        if (!ICommunity(community).isMember(member)) revert NotAMember();
+        if (IComplianceRegistry(config.complianceRegistry()).isBlocked(member)) revert AccountBlocked();
+        if (block.timestamp < uint256(ICommunity(community).mintedAt(member)) + config.memberSeasoningWindow()) {
+            revert NotSeasoned();
         }
+    }
 
-        // Composed fresh at each call rather than held in a local: `_tab[m]` is
-        // guaranteed closed/absent at this point (the `hasOpenTab` gate above already reverted
-        // otherwise), so both snapshots reflect "no open tab" and neither call sees the draw
-        // this transaction is about to record. Kept as inline expressions, not named locals,
-        // because the legacy (non-`via_ir`) codegen this contract compiles under
-        // runs out of stack slots in this function otherwise.
+    /// The account's first draw must carry the hash of the Credit Agreement `Config` holds now.
+    /// Returns the hash to record, or zero once the account has accepted.
+    function _acceptAgreement(address member, bytes32 agreementHash) internal returns (bytes32) {
+        if (_agreementAccepted[member]) return bytes32(0);
+        if (agreementHash == bytes32(0) || agreementHash != config.creditAgreementHash()) revert WrongAgreement();
+        _agreementAccepted[member] = true;
+        return agreementHash;
+    }
+
+    /// No new draw while late plus defaulted principal is above `PORTFOLIO_QUALITY_BPS` of what the
+    /// community has out. Each advance's stage comes from its own timestamp, so nobody has to have
+    /// recorded it. An empty book passes.
+    function _requirePortfolioQuality(uint256 communityId) internal view {
+        uint256 out = _records[communityId].outstanding;
+        if (out == 0) return;
+        (, uint64 lateStart,,,) = config.stageBoundaries();
+        address[] storage list = _openBorrowers[communityId];
+        uint256 bad;
+        uint256 n = list.length;
+        for (uint256 i; i < n; i++) {
+            Obligation storage o = _tab[list[i]];
+            if (block.timestamp - o.drawTimestamp >= lateStart) bad += o.principal;
+        }
+        if (bad * 10_000 > uint256(config.portfolioQualityBps()) * out) revert PortfolioQualityBreached();
+    }
+
+    /// Draws `amount` from the community's own balance. In order: the community exists and has not
+    /// closed, in `CreditCore` or by its members' vote; the account has no advance; the member is
+    /// seated, seasoned and not blocked; the Credit Agreement; enough Active seasoned members; the
+    /// ledger is accrued so the member's yield impact is current; the book is not going bad; the
+    /// community can lend this much now; the member's line covers it; and the cash is here.
+    function draw(uint256 communityId, uint256 amount, bytes32 agreementHash) external {
+        _requireCommunity(communityId);
+        if (amount == 0) revert ZeroAmount();
+        address community = ICommunityFactory(factory).communityAt(communityId);
+        address ledger = ICommunityFactory(factory).ledgerOf(community);
+        if (_records[communityId].closed || ILedger(ledger).communityClosed()) revert CommunityIsClosed();
+
+        address m = msg.sender;
+        // A tab that silently crossed the write-off boundary is written off here first. Written off
+        // or not, an advance with principal still owed blocks a new one.
+        _materialize(m);
+        Obligation storage o = _tab[m];
+        if (o.drawTimestamp != 0 && !o.closed) revert TabAlreadyOpen();
+        _requireMember(community, m);
+        bytes32 recordedHash = _acceptAgreement(m, agreementHash);
+        if (ICommunity(community).seasonedCount() < config.communityMinMembers()) revert TooFewMembers();
+
+        ILedger(ledger).accrue();
+        _requirePortfolioQuality(communityId);
+        if (amount > _lendable(communityId)) revert ExceedsAvailable();
         (uint256 drawable, bool eligible) =
             standing.line(communityId, m, _communitySnapshot(communityId), _tabSnapshot(communityId, m));
         if (!eligible) revert NotEligible();
         if (amount > drawable) revert ExceedsLine();
-
-        uint256 base =
-            standing.impactBase(communityId, m, _communitySnapshot(communityId), _tabSnapshot(communityId, m));
-        uint256 teComponent = amount > base ? amount - base : 0;
-        if (teComponent != 0) {
-            uint256 budget = _communityTeBudget(communityId);
-            if (_teLiveOf[communityId] + teComponent > budget) revert CommunityTeCapExceeded();
-        }
+        if (_cash() < amount) revert PoolIlliquid();
 
         _tab[m] = Obligation({
             principal: uint128(amount),
             originalPrincipal: uint128(amount),
             drawTimestamp: uint64(block.timestamp),
             communityId: uint64(communityId),
-            teDrawn: uint128(teComponent),
-            stage: uint8(Stage.Tenor),
+            stage: DebtMath.STAGE_TENOR,
             writtenOff: false,
             closed: false
         });
-        _outstandingPrincipalOf[communityId] += amount;
-        _openObligationCount[communityId] += 1;
-        _teLiveOf[communityId] += teComponent;
-        _stageBucket[0] += amount;
+        _records[communityId].outstanding += amount;
+        _totalOutstanding += amount;
+        _openBorrowers[communityId].push(m);
+        _openIndex[m] = _openBorrowers[communityId].length;
+        _noteActivity(communityId);
 
         _bookedCash -= amount;
         usdc.safeTransfer(m, amount);
-        _requireRetained();
-
-        emit Drawn(communityId, m, amount, teComponent, uint64(block.timestamp), recordedHash);
+        emit Drawn(communityId, m, amount, uint64(block.timestamp), recordedHash);
     }
 
-    // ---- settle (one to one against principal; never pausable) ----
+    function _removeOpen(uint256 communityId, address member) internal {
+        address[] storage list = _openBorrowers[communityId];
+        uint256 i = _openIndex[member] - 1;
+        address last = list[list.length - 1];
+        list[i] = last;
+        _openIndex[last] = i + 1;
+        list.pop();
+        delete _openIndex[member];
+    }
 
+    // ---- settle: one to one against principal, always open ----
+
+    /// Repays the caller's own advance. Anything over the principal is refunded. Before write-off a
+    /// payment lowers what the community has out; after it, the loss already came out of the
+    /// community's balance, so the payment puts it back there, or becomes Qudi's money once the
+    /// community's account has closed. Nothing else can block it.
     function settle(uint256 amount) external {
         address m = msg.sender;
         _materialize(m);
         Obligation storage o = _tab[m];
-        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) revert NoOpenTab();
+        if (o.drawTimestamp == 0 || o.closed) revert NoOpenTab();
         if (amount == 0) revert ZeroAmount();
 
-        uint256 outstanding = o.principal;
-        uint256 retire = amount < outstanding ? amount : outstanding;
+        uint256 owed = o.principal;
+        uint256 retire = amount < owed ? amount : owed;
         uint256 refund = amount - retire;
         uint256 communityId = o.communityId;
 
@@ -804,146 +592,94 @@ contract CreditCore is ICreditCore, Ownable2Step {
             _bookedCash -= refund;
         }
 
-        o.principal = uint128(outstanding - retire);
-        _outstandingPrincipalOf[communityId] -= retire;
-        _stageBucket[DebtMath.reserveIdx(o.stage)] -= retire;
-
-        bool closedNow;
-        if (o.principal == 0) {
-            _closeTab(m, o);
-            closedNow = true;
+        o.principal = uint128(owed - retire);
+        CommunityRecord storage r = _records[communityId];
+        if (o.writtenOff) {
+            if (!r.closed) {
+                r.allocation += retire;
+                _totalAllocated += retire;
+            }
+        } else {
+            r.outstanding -= retire;
+            _totalOutstanding -= retire;
         }
 
+        bool closedNow = o.principal == 0;
+        if (closedNow) _closeTab(m, o);
         emit Settled(communityId, m, retire, refund, o.principal, closedNow);
     }
 
-    /// Full settlement: closes the tab, releases live TE exposure, and,
-    /// if the obligation was ever delinquent and is being cured before formal Default, records
-    /// a scar at the decayed conduct value and marks the obligation completed (Standing
-    /// progression, `te_earned`). A cure reaching formal Default was already
-    /// disqualified by `_materialize` before this ever runs (the obligation would already be
-    /// written off, or `_materialize` already zeroed conduct and disqualified pre-Default
-    /// Units at the 155-day crossing); this only handles the Tenor/Grace/Late/Final-Cure cures.
+    /// Repaid in full. A defaulted advance, before or after write-off, starts the default's cooling.
+    /// Any other counts toward the member's phase, and one repaid after Late leaves a scar at the
+    /// conduct value of that moment.
     function _closeTab(address member, Obligation storage o) internal {
         o.closed = true;
         uint256 communityId = o.communityId;
-        _openObligationCount[communityId] -= 1;
-        if (o.teDrawn != 0) {
-            _teLiveOf[communityId] -= o.teDrawn;
-            o.teDrawn = 0;
+        if (!o.writtenOff) _removeOpen(communityId, member);
+        if (o.stage >= DebtMath.STAGE_DEFAULT_RECOVERY) {
+            standing.recordDefaultRepaid(member);
+            return;
         }
-        if (o.stage < uint8(Stage.DefaultRecovery)) {
-            if (o.stage >= uint8(Stage.Late)) {
-                // Two of the nine crossings, in sequence. `conductDecayAt` is a
-                // pure read of `standing`'s own config-derived math (no state to order against);
-                // `recordScar` is the write it feeds, called immediately after with the same
-                // value, exactly as the pre-split `_recordScar(communityId, member,
-                // _conductDecayAt(...))` call did in one contract.
-                uint256 decayed = standing.conductDecayAt(block.timestamp - o.drawTimestamp);
-                standing.recordScar(communityId, member, decayed);
-            }
-            // `_teLiveOf`/`_openObligationCount` above are already updated for this obligation,
-            // so `creditObligationCompletion`'s activity/phase bookkeeping on `CreditStanding`
-            // runs after this contract's own state for the same tab is final, matching the
-            // pre-split ordering (both mutations happened in `_closeTab`, this one last).
-            standing.creditObligationCompletion(communityId, member, config.teEarnIncrement());
+        if (o.stage >= DebtMath.STAGE_LATE) {
+            standing.recordScar(communityId, member, standing.conductDecayAt(block.timestamp - o.drawTimestamp));
         }
+        standing.recordRepaid(communityId, member);
     }
 
-    // ---- the stage machine: materialize before other debt logic ----
+    // ---- the stage machine ----
 
-    /// Derives the account's current stage and, if it differs from the last materialized value,
-    /// moves the reserve bucket and applies any one-time consequence of the crossing
-    /// (formal Default's pre-Default disqualification and TE release; write-off's loss
-    /// waterfall). A no-op for an account with no open obligation. Every debt-sensitive entry
-    /// point (`draw`, `settle`, `finalizeWriteOff`, `materialize`) calls this first.
+    /// Records the stage the advance has reached by its timestamp, and applies a crossing's one-time
+    /// consequence: formal default at Default Recovery, the write-off at its boundary. A no-op with
+    /// nothing open. Every debt entry point runs it first.
     function _materialize(address member) internal {
         Obligation storage o = _tab[member];
         if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return;
-
-        uint8 newStage = _deriveStage(block.timestamp - o.drawTimestamp);
-        if (newStage == DebtMath.STAGE_WRITTEN_OFF) {
+        uint8 next = _deriveStage(block.timestamp - o.drawTimestamp);
+        if (next == o.stage) return;
+        if (next == DebtMath.STAGE_WRITTEN_OFF) {
             _executeWriteOff(member, o);
             return;
         }
-        if (newStage == o.stage) return;
-
-        uint8 oldIdx = DebtMath.reserveIdx(o.stage);
-        uint8 newIdx = DebtMath.reserveIdx(newStage);
-        if (oldIdx != newIdx) {
-            _stageBucket[oldIdx] -= o.principal;
-            _stageBucket[newIdx] += o.principal;
-        }
-        if (newStage == DebtMath.STAGE_DEFAULT_RECOVERY && o.stage < DebtMath.STAGE_DEFAULT_RECOVERY) {
-            // `recordFormalDefault` needs no snapshot (every field it touches on
-            // `CreditStanding` is that contract's own state), so call ordering relative to the
-            // stage-bucket move above and the `teDrawn` release below is not a correctness
-            // question, only an audit-trail one; kept at the same point in the sequence the
-            // pre-split `_recordFormalDefault` call held.
+        if (next >= DebtMath.STAGE_DEFAULT_RECOVERY && o.stage < DebtMath.STAGE_DEFAULT_RECOVERY) {
             standing.recordFormalDefault(o.communityId, member);
-            if (o.teDrawn != 0) {
-                _teLiveOf[o.communityId] -= o.teDrawn;
-                o.teDrawn = 0;
-            }
         }
-        o.stage = newStage;
+        o.stage = next;
     }
 
-    /// Permissionless. Records the stage `member`'s obligation is
-    /// already in by its timestamp, and moves the reserve bucket with it. It runs
-    /// `_materialize` and nothing else, so it can only record a crossing that
-    /// `block.timestamp - drawTimestamp` has already made: a caller cannot choose a stage, move
-    /// one early, or hold one back (a keeper does not control stage entry). At the
-    /// write-off boundary it executes the write-off exactly as `finalizeWriteOff` does.
+    /// Anyone. It can only record a crossing the timestamp has already made: no caller chooses a
+    /// stage, moves one early, or holds one back.
     function materialize(address member) external {
         _materialize(member);
     }
 
-    // ---- deterministic write-off ----
-
     function finalizeWriteOff(address member) external {
         Obligation storage o = _tab[member];
-        if (o.drawTimestamp == 0) revert NoOpenTab();
+        if (o.drawTimestamp == 0 || o.closed) revert NoOpenTab();
         if (o.writtenOff) revert AlreadyWrittenOff();
-        if (o.closed) revert NoOpenTab();
         (,,,, uint64 wo) = config.stageBoundaries();
         if (block.timestamp - o.drawTimestamp < wo) revert NotYetWrittenOff();
-        _materialize(member); // derives Written Off and executes it, exactly once
+        _materialize(member);
     }
 
-    /// The bad-debt waterfall's first and, for now, only automatic step:
-    /// the community's own allocated capital absorbs the loss immediately, clamped at
-    /// what the community still has (the credit-loss reserve, unallocated Treasury, and the
-    /// global pause are formula/operational responses, not automatic transfers built here). Runs exactly once per obligation: `o.writtenOff` is set
-    /// before any external interaction, and every entry point that could reach here goes
-    /// through `_materialize`, which already excludes a closed-or-written-off tab.
+    /// The unpaid principal leaves the community's outstanding and its balance together, so the
+    /// loss is that community's alone and no other record moves. The default is recorded here too
+    /// if the crossing was skipped between touches. The principal stays on the advance, owed.
     function _executeWriteOff(address member, Obligation storage o) internal {
         uint256 principal = o.principal;
         uint256 communityId = o.communityId;
-
-        _outstandingPrincipalOf[communityId] -= principal;
-        _openObligationCount[communityId] -= 1;
-        _stageBucket[DebtMath.reserveIdx(o.stage)] -= principal;
-
-        if (o.teDrawn != 0) {
-            _teLiveOf[communityId] -= o.teDrawn;
-        }
-        // Idempotent: applies formal-Default consequences now if the 155-day crossing was
-        // skipped between touches (the jump still disqualifies at formal Default). Called
-        // here, before the community loss waterfall below, the same position the pre-split
-        // `_recordFormalDefault` call held; it needs no snapshot of `_allocationOf` or `o`.
         standing.recordFormalDefault(communityId, member);
 
-        uint256 allocationBefore = _allocationOf[communityId];
-        uint256 fromCommunity = principal > allocationBefore ? allocationBefore : principal;
-        _allocationOf[communityId] = allocationBefore - fromCommunity;
-        _totalAllocated -= fromCommunity;
+        CommunityRecord storage r = _records[communityId];
+        uint256 allocationBefore = r.allocation;
+        r.outstanding -= principal;
+        _totalOutstanding -= principal;
+        r.allocation = allocationBefore - principal;
+        _totalAllocated -= principal;
+        r.writtenOff += principal;
+        _removeOpen(communityId, member);
 
-        o.principal = 0;
-        o.teDrawn = 0;
         o.writtenOff = true;
-        o.closed = true;
-
-        emit WriteOffFinalized(communityId, member, principal, allocationBefore, _allocationOf[communityId]);
+        o.stage = DebtMath.STAGE_WRITTEN_OFF;
+        emit WriteOffFinalized(communityId, member, principal, allocationBefore, r.allocation);
     }
 }

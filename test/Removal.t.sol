@@ -18,13 +18,15 @@ import {ICreditCore} from "../src/interfaces/ICreditCore.sol";
 import {VenueIds} from "./helpers/VenueIds.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
-import {CreditCoreHarness} from "./helpers/CreditCoreHarness.sol";
-import {CreditStandingHarness} from "./helpers/CreditStandingHarness.sol";
+import {CreditCore} from "../src/CreditCore.sol";
+import {CreditStanding} from "../src/CreditStanding.sol";
+import {ICreditStanding} from "../src/interfaces/ICreditStanding.sol";
+import {MockImpactSource} from "./mocks/MockImpactSource.sol";
 
-/// Reads the account's credit figures on both sides of one call, inside one transaction. Proof
-/// 10 needs this: a test body that reads the cap after a removal only shows the cap is right by
-/// the end of the test, and the rule is that it is right in the transaction that
-/// changes the seat. It also stands in as a member when the member's own call is the change.
+/// Reads a member's impact on both sides of one call, inside one transaction. Proof 10 needs this:
+/// a test body that reads impact after a removal only shows it is right by the end of the test, and
+/// the rule is that it is right in the transaction that changes the seat. It also stands in as a
+/// member when the member's own call is the change.
 contract SameTxProbe {
     function exec(address target, bytes calldata data) external returns (bytes memory r) {
         bool ok;
@@ -36,19 +38,19 @@ contract SameTxProbe {
         }
     }
 
-    function capAround(address target, bytes calldata data, CreditStandingHarness s, address m)
+    function impactAround(address target, bytes calldata data, ICreditStanding s, uint256 communityId, address m)
         external
-        returns (uint256 capBefore, uint256 capAfter, uint256 totalAfter)
+        returns (uint256 before, uint256 afterwards, uint256 elsewhere)
     {
-        capBefore = s.accountExposureCap(0, m);
+        before = s.impactOf(communityId, m);
         (bool ok, bytes memory r) = target.call(data);
         if (!ok) {
             assembly {
                 revert(add(r, 32), mload(r))
             }
         }
-        capAfter = s.accountExposureCap(0, m);
-        totalAfter = s.accountImpactTotal(m);
+        afterwards = s.impactOf(communityId, m);
+        elsewhere = s.impactOf(0, m);
     }
 }
 
@@ -66,8 +68,9 @@ contract RemovalTest is InviteSigner {
     CommunityFactory factory;
     Community community;
     Ledger ledger;
-    CreditStandingHarness standing;
-    CreditCoreHarness cc;
+    CreditStanding standing;
+    CreditCore cc;
+    MockImpactSource extra;
 
     address governance = makeAddr("governance");
     address treasuryMgr = makeAddr("treasuryManager");
@@ -97,7 +100,7 @@ contract RemovalTest is InviteSigner {
         for (uint8 t = 0; t < 3; t++) {
             poolAddrs[t] = address(new Venue(usdc, IConfig(address(config)), predicted, governance, "Qudi", "q"));
         }
-        Seats seats = new Seats(predicted);
+        Seats seats = new Seats(predicted, IConfig(address(config)));
         factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
         for (uint8 t = 0; t < 3; t++) {
             vm.prank(governance);
@@ -106,8 +109,8 @@ contract RemovalTest is InviteSigner {
         }
         assertEq(address(factory), predicted, "the tier vaults are wired to this factory");
 
-        standing = new CreditStandingHarness(IConfig(address(config)), address(factory), governance);
-        cc = new CreditCoreHarness(
+        standing = new CreditStanding(IConfig(address(config)), address(factory), governance);
+        cc = new CreditCore(
             IERC20(address(usdc)),
             IConfig(address(config)),
             address(factory),
@@ -119,6 +122,10 @@ contract RemovalTest is InviteSigner {
         vm.prank(governance);
         standing.setCreditCore(address(cc));
         config.setAddress(K.CREDIT_CORE, address(cc));
+        config.setCreditAgreementHash(AGREEMENT);
+        extra = new MockImpactSource();
+        vm.prank(governance);
+        standing.addImpactSource(address(extra));
 
         usdc.mint(governance, 300_000e6);
         vm.startPrank(governance);
@@ -249,9 +256,9 @@ contract RemovalTest is InviteSigner {
         cc.settle(amount);
     }
 
-    /// Seasoned impact enough for a first draw at MIN_LENDABLE.
+    /// Impact enough for a First Access line of $100.
     function _primeEligible(address who) internal {
-        standing.primeImpact(0, who, 500e6, 1000e6);
+        extra.setImpact(0, who, 500e6);
     }
 
     // =============================================================================
@@ -538,26 +545,27 @@ contract RemovalTest is InviteSigner {
     // Proof 9: the freeze does not erase impact
     // =============================================================================
 
-    /// Settling runs `CreditStanding._syncSeat`, which deletes every seat-side mapping when the
-    /// stamp stops matching the live seat. If a frozen seat read as gone, this settle would wipe
-    /// the member's impact, and a vote that then fails would hand back a member with nothing.
+    /// A frozen seat is still Active. If it read as gone, the frozen member's repayment would be
+    /// recorded against no seat and their impact would stop counting, and a vote that then fails
+    /// would hand back a member with nothing.
     function test_proof9_aFrozenMemberWhoSettlesKeepsTheirImpactWhenTheVoteFails() public {
         _primeEligible(ada);
         _draw(ada, 50e6);
-        (uint256 completedBefore,,,) = standing.standingCountersOf(0, ada);
+        uint256 impactBefore = standing.impactOf(0, ada);
 
         _propose(host, ada);
         assertFalse(community.isMember(ada), "frozen");
+        assertEq(standing.impactOf(0, ada), impactBefore, "a frozen seat still counts");
         vm.warp(block.timestamp + 1 days);
         _settle(ada, 50e6);
-        (uint256 completedDuring,,,) = standing.standingCountersOf(0, ada);
-        assertEq(completedDuring, completedBefore + 1, "the settle landed on the seat");
+        (uint256 repaid,) = standing.repaidOf(ada);
+        assertEq(repaid, 1, "the repayment counted");
 
         vm.warp(block.timestamp + _window() + 1);
         assertTrue(community.isMember(ada), "the vote failed");
-        assertEq(standing.impactUnitsOf(0, ada), 500e6, "impact intact");
-        (uint256 completedAfter,,,) = standing.standingCountersOf(0, ada);
-        assertEq(completedAfter, completedBefore + 1, "and so is the obligation the frozen member completed");
+        assertEq(standing.impactOf(0, ada), impactBefore, "impact intact");
+        (repaid,) = standing.repaidOf(ada);
+        assertEq(repaid, 1, "and so is the advance the frozen member repaid");
     }
 
     // =============================================================================
@@ -570,9 +578,8 @@ contract RemovalTest is InviteSigner {
         communityB = Community(factory.createCommunity("Second Community", price));
     }
 
-    /// Ada holds 100e6 of impact in A and 400e6 in B, so the cap is 3 x 500e6. Removed from B,
-    /// the cap read inside the executing call is 3 x 100e6, with nothing written to B's
-    /// `CreditStanding` storage in between.
+    /// Ada holds impact in A and in B. Removed from B, her impact there reads 0 inside the executing
+    /// call, with nothing written to `CreditStanding` in between, and A's is untouched.
     function test_proof10_aRemovalEndsImpactInTheSameTransaction() public {
         Community communityB = _secondCommunity();
         address[4] memory members = [ada, bea, cid, dee];
@@ -584,22 +591,21 @@ contract RemovalTest is InviteSigner {
         }
         vm.warp(block.timestamp + config.memberSeasoningWindow() + 1);
 
-        standing.primeImpact(0, ada, 100e6, 1000e6);
-        standing.primeImpact(1, ada, 400e6, 1000e6);
-        assertEq(standing.accountExposureCap(0, ada), 1_500e6, "cap on both seats' impact");
+        extra.setImpact(0, ada, 100e6);
+        extra.setImpact(1, ada, 400e6);
 
         community = communityB; // the adapter and helpers act on B from here
         _proposeAndCarry(ada);
         vm.warp(block.timestamp + _window() + 1);
 
         SameTxProbe probe = new SameTxProbe();
-        (uint256 capBefore, uint256 capAfter, uint256 totalAfter) =
-            probe.capAround(address(communityB), _executeCall(ada), standing, ada);
+        (uint256 before, uint256 afterwards, uint256 inA) =
+            probe.impactAround(address(communityB), _executeCall(ada), standing, 1, ada);
 
         assertEq(_state(ada), SUSPENDED, "removed from B");
-        assertEq(capBefore, 1_500e6, "frozen in B until the removal executed, and still counted");
-        assertEq(capAfter, 300e6, "B's impact left the cap in the executing transaction");
-        assertEq(totalAfter, 100e6, "and the account total with it");
+        assertEq(before, 400e6, "frozen in B until the removal executed, and still counted");
+        assertEq(afterwards, 0, "B's impact ended in the executing transaction");
+        assertEq(inA, 100e6, "A's is untouched");
     }
 
     /// The same for leaving. The member is the probe, so its own `forfeit()` and the two reads
@@ -616,16 +622,16 @@ contract RemovalTest is InviteSigner {
             (address inviteKey, bytes memory keySig) = _inviteFor(address(both[i]), p);
             probe.exec(address(both[i]), abi.encodeCall(ICommunity.join, (inviteKey, keySig)));
         }
-        standing.primeImpact(0, p, 100e6, 1000e6);
-        standing.primeImpact(1, p, 400e6, 1000e6);
+        extra.setImpact(0, p, 100e6);
+        extra.setImpact(1, p, 400e6);
 
-        (uint256 capBefore, uint256 capAfter, uint256 totalAfter) =
-            probe.capAround(address(communityB), abi.encodeCall(ICommunity.forfeit, ()), standing, p);
+        (uint256 before, uint256 afterwards, uint256 inA) =
+            probe.impactAround(address(communityB), abi.encodeCall(ICommunity.forfeit, ()), standing, 1, p);
 
         assertEq(factory.seats().ownerOf(communityB.tokenOf(p)), p, "the Left seat is still in the wallet");
-        assertEq(capBefore, 1_500e6);
-        assertEq(capAfter, 300e6, "B's impact left the cap in the forfeiting transaction");
-        assertEq(totalAfter, 100e6, "and the account total with it");
+        assertEq(before, 400e6);
+        assertEq(afterwards, 0, "B's impact ended in the forfeiting transaction");
+        assertEq(inA, 100e6, "A's is untouched");
     }
 
     // =============================================================================

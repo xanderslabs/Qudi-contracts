@@ -8,6 +8,7 @@ import {Base64} from "openzeppelin-contracts/contracts/utils/Base64.sol";
 import {Strings} from "openzeppelin-contracts/contracts/utils/Strings.sol";
 import {ICommunity} from "./interfaces/ICommunity.sol";
 import {ISeats} from "./interfaces/ISeats.sol";
+import {IConfig} from "./interfaces/IConfig.sol";
 
 /// Every community's seats, in one soulbound ERC-721 Enumerable. A wallet in five communities
 /// holds five tokens here, so the app lists a member's communities from this one address.
@@ -24,6 +25,8 @@ contract Seats is ERC721Enumerable, ISeats {
     using Strings for uint256;
 
     address public immutable factory;
+    /// Read for `MAX_SEATS_PER_WALLET` at every mint.
+    IConfig public immutable config;
 
     uint256 internal _nextTokenId = 1;
     mapping(uint256 => Seat) internal _seats;
@@ -34,9 +37,10 @@ contract Seats is ERC721Enumerable, ISeats {
     mapping(address => uint256) internal _seatCount;
     mapping(address => uint256) internal _activeCount;
 
-    constructor(address factory_) ERC721("Qudi Seats", "QSEAT") {
-        if (factory_ == address(0)) revert ZeroAddress();
+    constructor(address factory_, IConfig config_) ERC721("Qudi Seats", "QSEAT") {
+        if (factory_ == address(0) || address(config_) == address(0)) revert ZeroAddress();
         factory = factory_;
+        config = config_;
     }
 
     function registerCommunity(address community, uint256 communityId) external {
@@ -48,11 +52,15 @@ contract Seats is ERC721Enumerable, ISeats {
 
     /// Only a registered community mints, and only in itself: the seat's community is always the
     /// caller. One seat per wallet per community, for good. A kept Suspended or Left seat refuses
-    /// a second one.
+    /// a second one. A wallet holds at most `MAX_SEATS_PER_WALLET` seats across every community,
+    /// founding seats included.
     function mint(address to, uint256 pricePaid) external returns (uint256 tokenId) {
         uint256 idPlusOne = _communityIdPlusOne[msg.sender];
         if (idPlusOne == 0) revert NotCommunity();
         if (_seatOf[msg.sender][to] != 0) revert AlreadySeated();
+        // Every seat counts, Active, Suspended or Left: a formal default walks every seat the wallet
+        // holds, inside the repayment that crosses it, so the walk must stay short enough to fit.
+        if (balanceOf(to) >= config.maxSeatsPerWallet()) revert TooManySeats();
 
         tokenId = _nextTokenId++;
         uint256 seatNumber = ++_seatCount[msg.sender];

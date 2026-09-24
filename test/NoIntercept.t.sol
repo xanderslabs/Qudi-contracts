@@ -18,7 +18,8 @@ import {ILedger} from "../src/interfaces/ILedger.sol";
 import {Venue} from "../src/Venue.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {VenueIds} from "./helpers/VenueIds.sol";
-import {CreditStandingHarness} from "./helpers/CreditStandingHarness.sol";
+import {CreditStanding} from "../src/CreditStanding.sol";
+import {MockImpactSource} from "./mocks/MockImpactSource.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockCreditPoolForVault} from "./mocks/MockVaultSiblings.sol";
 
@@ -44,7 +45,8 @@ contract NoInterceptTest is InviteSigner {
     Config config;
     ComplianceRegistry registry;
     CommunityFactory factory;
-    CreditStandingHarness standing;
+    CreditStanding standing;
+    MockImpactSource extra;
     CreditCore cc;
     Venue flexVault;
     Venue coreVault;
@@ -95,7 +97,7 @@ contract NoInterceptTest is InviteSigner {
         pools[VenueIds.FLEX] = address(flexVault);
         pools[VenueIds.CORE] = address(coreVault);
         pools[VenueIds.TERM] = makeAddr("poolTerm");
-        Seats seats = new Seats(predicted);
+        Seats seats = new Seats(predicted, IConfig(address(config)));
         factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
         flexVault.setLabels(VenueIds.labels(VenueIds.FLEX));
         coreVault.setLabels(VenueIds.labels(VenueIds.CORE));
@@ -104,7 +106,7 @@ contract NoInterceptTest is InviteSigner {
         }
         require(address(factory) == predicted, "factory precompute mismatch");
 
-        standing = new CreditStandingHarness(IConfig(address(config)), address(factory), address(this));
+        standing = new CreditStanding(IConfig(address(config)), address(factory), address(this));
         cc = new CreditCore(
             IERC20(address(usdc)),
             IConfig(address(config)),
@@ -116,6 +118,9 @@ contract NoInterceptTest is InviteSigner {
         );
         standing.setCreditCore(address(cc));
         config.setAddress(ConfigKeys.CREDIT_CORE, address(cc));
+        config.setCreditAgreementHash(AGREEMENT);
+        extra = new MockImpactSource();
+        standing.addImpactSource(address(extra));
 
         usdc.mint(address(this), 300_000e6);
         usdc.approve(address(cc), 300_000e6);
@@ -136,6 +141,9 @@ contract NoInterceptTest is InviteSigner {
 
         _join(member);
         _join(behind);
+        // Credit opens at five seasoned seats.
+        _join(makeAddr("third"));
+        _join(makeAddr("fourth"));
     }
 
     // =================================================================
@@ -164,7 +172,7 @@ contract NoInterceptTest is InviteSigner {
     /// same figure as their tab (see the contract comment). Returns the draw timestamp.
     function _openAdvance(address who, uint256 debt) internal returns (uint64 ts) {
         vm.warp(block.timestamp + config.memberSeasoningWindow() + 1);
-        standing.primeImpact(0, who, 500e6, 1000e6);
+        extra.setImpact(0, who, 500e6);
         vm.prank(who);
         cc.draw(0, debt, AGREEMENT);
         ts = cc.obligationOf(who).drawTimestamp;

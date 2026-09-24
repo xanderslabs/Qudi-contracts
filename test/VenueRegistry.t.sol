@@ -27,7 +27,8 @@ contract VenueRegistryTest is Test {
         cfg = new Config(address(usdc), makeAddr("treasury"), address(new ComplianceRegistry(address(this))));
         address communityImpl = address(new MockCommunityModule());
         address ledgerImpl = address(new MockCommunityModule());
-        Seats seats = new Seats(vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1));
+        Seats seats =
+            new Seats(vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1), IConfig(address(cfg)));
         factory = new CommunityFactory(address(cfg), address(seats), communityImpl, ledgerImpl, owner);
     }
 

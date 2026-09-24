@@ -3,37 +3,21 @@ pragma solidity 0.8.30;
 
 import {ICreditCore} from "./ICreditCore.sol";
 
-/// Read, write and event surface of `CreditStanding`: Impact Units,
-/// conduct decay and scars, activity decay, phases, Trust Extension, and the Line.
+/// A member's standing: impact from the registered sources, the phase their repaid advances have
+/// reached, conduct and scars, their own activity, a default and its heal, and the line all of it
+/// adds up to. No money moves here.
 ///
-/// `Phase` and `ImpactSource` are declared on `ICreditCore` rather than here (the
-/// nine call sites run CreditCore -> CreditStanding; `draw`/`settle`/the composed views are
-/// `ICreditCore`'s own external surface and already reference these enums, so keeping them there
-/// and having `ICreditStanding` import `ICreditCore` is a one-directional dependency, not a
-/// cycle. `ICreditCore` never imports `ICreditStanding`).
-///
-/// `CreditStanding` never calls `CreditCore`. Every place a Standing
-/// calculation needs Treasury or debt-ledger state, `CreditCore` composes a snapshot from its
-/// own storage and passes it as an argument here. `CommunityLedgerSnapshot` and
-/// `MemberTabSnapshot` are those snapshots.
+/// `CreditStanding` never calls `CreditCore`. Where the line needs the pool's state, `CreditCore`
+/// passes a snapshot of its own storage in.
 interface ICreditStanding {
-    /// `CreditCore._allocationOf[communityId]` and `._outstandingPrincipalOf[communityId]`,
-    /// snapshotted for `communityImpactBudget`'s liquid-cash calculation.
+    /// What the community can lend now: its unlent balance after the dormancy fade.
     struct CommunityLedgerSnapshot {
-        uint256 allocation;
-        uint256 outstandingPrincipal;
+        uint256 lendable;
     }
 
-    /// The member's obligation as `CreditCore` currently sees it, restricted to exactly the
-    /// fields the delinquency/exposure seams need.
-    ///
-    /// `openInCommunity` and `elapsedSinceDraw` answer the per-community delinquency questions
-    /// (`_openDelinquencyConduct`, `_hasOpenDelinquency` in the pre-split code): open, not
-    /// closed, not written off, AND drawn against the community being asked about.
-    ///
-    /// `openAnywhere` and `principal` answer the account-wide exposure question
-    /// (`_memberCurrentExposure` in the pre-split code always ignored `communityId`: one open
-    /// tab per account, not per community), so they are computed without a community match.
+    /// The member's advance as `CreditCore` sees it. `openInCommunity` and `elapsedSinceDraw` are
+    /// for an advance drawn in the community asked about, which lowers conduct once it is Late.
+    /// `openAnywhere` is any advance on the account that is not repaid, written off or not.
     struct MemberTabSnapshot {
         bool openInCommunity;
         uint64 elapsedSinceDraw;
@@ -41,128 +25,78 @@ interface ICreditStanding {
         uint256 principal;
     }
 
-    event ImpactAttributorSet(address indexed previous, address indexed current);
-    /// `obligationLedger` becomes the `CreditCore` address after the split:
-    /// this replaces `ObligationLedgerSet`. One-way; see `setCreditCore`.
     event CreditCoreSet(address indexed creditCore);
-    event ImpactAccrued(
-        uint256 indexed communityId,
-        address indexed member,
-        ICreditCore.ImpactSource source,
-        bytes32 indexed sourceEventId,
-        uint256 pending,
-        uint256 minted
-    );
-    event ImpactSeasoned(uint256 indexed communityId, address indexed member, uint256 amount);
+    event ImpactSourceAdded(address indexed source);
+    event ImpactSourceRemoved(address indexed source);
     event ScarRecorded(uint256 indexed communityId, address indexed member, uint256 frozenConductWad);
-    event TrustExtensionEarned(
-        uint256 indexed communityId, address indexed member, uint256 amount, uint256 totalEarned
-    );
-    event ObligationCompleted(uint256 indexed communityId, address indexed member, uint256 completedCount);
-    /// Fired from `_recordFormalDefault`'s internal call into `_disqualifyPreDefaultUnits`. The
-    /// external `disqualifyPreDefaultUnits` entry point that could otherwise fire this
-    /// independently is retired.
-    event PreDefaultUnitsDisqualified(uint256 indexed communityId, address indexed member);
-    event CommunityAttributedYieldCredited(uint256 indexed communityId, uint256 amount, uint256 cumulative);
-    event AccountDefaulted(address indexed member);
     event ScarDropped(uint256 indexed communityId, address indexed member, uint256 attemptedConductWad);
+    event AdvanceRepaid(uint256 indexed communityId, address indexed member, uint256 repaidCount);
+    /// A formal default, recorded once per default. The impact the member held in each community
+    /// they were seated in is disqualified from then on.
+    event AccountDefaulted(address indexed member);
+    event ImpactDisqualified(uint256 indexed communityId, address indexed member, uint256 amount);
+    /// The defaulted advance was repaid in full. The default heals at `healsAt`.
+    event DefaultRepaid(address indexed member, uint64 healsAt);
 
-    error NotImpactAttributor();
-    /// The caller is not the wired `CreditCore` address (replaces `NotObligationLedger`).
     error NotCreditCore();
-    error QueueFull();
     error ScarValueOutOfRange();
     error ZeroAddress();
     error UnknownCommunity();
-    /// `setCreditCore` called a second time (wiring is one-way).
+    error DuplicateImpactSource();
+    error UnknownImpactSource();
+    /// `setCreditCore` called a second time: the wiring is one-way.
     error CreditCoreAlreadySet();
-    /// `setCreditCore` called with a `CreditCore` wired to a different `factory` or `config`
-    /// than this `CreditStanding`.
+    /// `setCreditCore` with a `CreditCore` wired to another factory or config.
     error CreditCoreMismatch();
-    /// `setCreditCore` called with a `CreditCore` whose own `standing()` does not point back at
-    /// this `CreditStanding`.
+    /// `setCreditCore` with a `CreditCore` whose `standing()` is not this contract.
     error CreditCoreStandingMismatch();
 
-    function setImpactAttributor(address next) external;
-    /// Owner-only, and only once: wires the immutable-in-effect `CreditCore`
-    /// address that `onlyCreditCore` gates against. No address is mutable after wiring.
+    /// Owner only, once.
     function setCreditCore(address creditCore_) external;
-
     function creditCore() external view returns (address);
-    function impactAttributor() external view returns (address);
 
-    // ---- Impact Units ----
+    // ---- the impact registry ----
 
-    function accrueImpact(
-        uint256 communityId,
-        address member,
-        uint256 attributedUsdc,
-        ICreditCore.ImpactSource source,
-        bytes32 sourceEventId,
-        uint64 sourceTimestamp
-    ) external;
-    function pokeSeasoning(uint256 communityId, address member) external;
-    function creditCommunityAttributedYield(uint256 communityId, uint256 amount) external;
+    /// Owner only (the timelock). Lists a product whose `impactOf` counts toward every line.
+    function addImpactSource(address source) external;
+    function removeImpactSource(address source) external;
+    function impactSources() external view returns (address[] memory);
+    /// Effective impact: the sum over every source, less what a default disqualified, floored at 0.
+    /// Zero unless the member holds an Active seat in the community.
+    function impactOf(uint256 communityId, address member) external view returns (uint256);
+    function disqualifiedImpactOf(uint256 communityId, address member) external view returns (uint256);
 
-    // ---- the nine call sites CreditCore makes into Standing ----
+    // ---- the line ----
 
-    /// `CommunityImpactBudget = liquid_cash - OPERATIONAL_BUFFER - MIN_LENDABLE`, floored at
-    /// zero. `snap` is CreditCore's community-allocation/outstanding-principal pair:
-    /// Standing never reads `CreditCore` storage itself.
-    function communityImpactBudget(uint256 communityId, CommunityLedgerSnapshot calldata snap)
-        external
-        view
-        returns (uint256);
-    /// Cumulative attributed funding yield for the community. A plain getter: CreditCore's
-    /// own `_communityTeBudget` reads this directly rather than Standing recomputing that
-    /// formula for a caller outside itself.
-    function communityAttributedYield(uint256 communityId) external view returns (uint256);
-    /// Reverts `UnknownCommunity` unless `communityId < ICommunityFactory(factory).communityCount()`.
-    /// Exposed so CreditCore's debt half and Standing's own external entry points share the
-    /// exact same check and error selector rather than drifting apart after the split.
     function requireCommunity(uint256 communityId) external view;
-    /// The Line: `(drawable, eligible)`. `communitySnap`/`tabSnap` are the
-    /// snapshots the four reverse seams (`_communityLiquidCash`,
-    /// `_openDelinquencyConduct`, `_hasOpenDelinquency`, `_memberCurrentExposure`) used to read
-    /// directly out of `CreditCore` storage.
+    /// `(drawable, eligible)`. Eligible means a line of at least `MIN_LENDABLE`, no advance open
+    /// anywhere, and no default.
     function line(
         uint256 communityId,
         address member,
         CommunityLedgerSnapshot calldata communitySnap,
         MemberTabSnapshot calldata tabSnap
     ) external view returns (uint256 drawable, bool eligible);
-    /// `ImpactBase_i = CommunityImpactBudget x share_i x activity_factor x conduct_factor`
-    /// with snapshots as `line` above.
-    function impactBase(
-        uint256 communityId,
-        address member,
-        CommunityLedgerSnapshot calldata communitySnap,
-        MemberTabSnapshot calldata tabSnap
-    ) external view returns (uint256);
-
-    /// `recordScar`/`creditObligationCompletion`/`recordFormalDefault`: role-gated to
-    /// `onlyCreditCore`. `settle` and `finalizeWriteOff` are the entry points to
-    /// be careful about: they must call these AFTER mutating
-    /// `_tab`/`_stageBucket`/`_outstandingPrincipalOf` for the same obligation, so the conduct
-    /// value handed to `recordScar` and the exposure a subsequent read sees are already
-    /// post-mutation. `disqualifyPreDefaultUnits` is retired
-    /// as an external entry point: `CreditCore` never called it, so it was
-    /// operator-callable dead capability with no appeal path. Formal Default still reaches the
-    /// internal `_disqualifyPreDefaultUnits` through `recordFormalDefault`, unchanged.
-    function recordScar(uint256 communityId, address member, uint256 frozenConductWad) external;
-    function creditObligationCompletion(uint256 communityId, address member, uint256 teEarnIncrement) external;
-    /// Formal Default's permanent, account-wide consequences. Idempotent.
-    function recordFormalDefault(uint256 communityId, address member) external;
-
-    /// Conduct decay at `elapsed` seconds past draw. A pure read of `config`, so it needs
-    /// no role gate; grouped with the "writes" because its only caller,
-    /// `CreditCore._closeTab`, uses it to compute the value passed into `recordScar` immediately
-    /// after.
+    function phaseOf(address member) external view returns (ICreditCore.Phase);
+    /// Advances repaid in full since the account started or last healed from a default, and when
+    /// the first of them was.
+    function repaidOf(address member) external view returns (uint256 count, uint64 firstAt);
+    function isAccountDefaulted(address member) external view returns (bool);
+    /// When a repaid default heals, or 0 while it is unrepaid (or there is none).
+    function defaultHealsAt(address member) external view returns (uint64);
+    /// Conduct at `elapsed` seconds after the draw: 1 until Late, falling to 0 at Default Recovery.
     function conductDecayAt(uint256 elapsed) external view returns (uint256);
 
-    // ---- reads used by the composed public views CreditCore hosts ----
+    // ---- what `CreditCore` records ----
 
-    /// The account-wide conduct floor and Line disqualification `standingOf` (hosted on
-    /// `CreditCore`) reports.
-    function isAccountDefaulted(address member) external view returns (bool);
+    /// A repayment made after Late: the conduct value at that moment, which heals from there.
+    function recordScar(uint256 communityId, address member, uint256 frozenConductWad) external;
+    /// A deposit or a paid seat mint by the member in the community: their own activity there.
+    function recordActivity(uint256 communityId, address member) external;
+    /// An advance repaid in full before its default: one more toward the member's phase.
+    function recordRepaid(uint256 communityId, address member) external;
+    /// Formal default. Idempotent while the default lasts.
+    function recordFormalDefault(uint256 communityId, address member) external;
+    /// The defaulted advance is repaid in full, before or after write-off. Starts the cooling.
+    function recordDefaultRepaid(address member) external;
 }

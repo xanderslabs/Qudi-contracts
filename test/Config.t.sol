@@ -35,13 +35,8 @@ contract ConfigTest is Test {
         assertEq(h, 3000); // host
         assertEq(p, 4000); // Community Credit Account
         assertEq(pr, 3000); // protocol
-        assertEq(cfg.epochLength(), 30 days);
         assertEq(cfg.dormancyGrace(), 90 days);
-        (uint8 mm, uint8 ce, uint8 mo, uint8 gap) = cfg.eligibility();
-        assertEq(mm, 5);
-        assertEq(ce, 1);
-        assertEq(mo, 3);
-        assertEq(gap, 1);
+        assertEq(cfg.communityMinMembers(), 5);
         (uint16 ym, uint16 yp, uint16 ypr) = cfg.yieldSplit();
         assertEq(ym, 7000);
         assertEq(yp, 1500);
@@ -120,7 +115,7 @@ contract ConfigTest is Test {
     function test_noChargeParameterIsReachable() public {
         bytes32[] memory all = _allConfigKeys();
         // Count pinned to ConfigKeys.sol by check-config-key-enumeration.sh (CI).
-        assertEq(all.length, 74, "ConfigKeys count changed: update _allConfigKeys and re-audit");
+        assertEq(all.length, 62, "ConfigKeys count changed: update _allConfigKeys and re-audit");
 
         bytes32[] memory chargeShaped = _chargeShapedKeys();
         for (uint256 c; c < chargeShaped.length; c++) {
@@ -167,7 +162,7 @@ contract ConfigTest is Test {
     /// The complete ConfigKeys set, maintained in lockstep with ConfigKeys.sol. The count
     /// assertion in test_noChargeParameterIsReachable forces this to stay complete.
     function _allConfigKeys() internal pure returns (bytes32[] memory k) {
-        k = new bytes32[](74);
+        k = new bytes32[](62);
         uint256 i;
         k[i++] = K.SEAT_PRICE_FLOOR;
         k[i++] = K.SEAT_PRICE_CEILING;
@@ -177,7 +172,6 @@ contract ConfigTest is Test {
         k[i++] = K.MINT_SPLIT_HOST;
         k[i++] = K.MINT_SPLIT_POOL;
         k[i++] = K.MINT_SPLIT_PROTOCOL;
-        k[i++] = K.EPOCH_LENGTH;
         k[i++] = K.HOST_VOTE_THRESHOLD_BPS;
         k[i++] = K.HOST_VOTE_WINDOW;
         k[i++] = K.COMMUNITY_VOTE_THRESHOLD_BPS;
@@ -188,10 +182,6 @@ contract ConfigTest is Test {
         k[i++] = K.STAGE_DEFAULT_RECOVERY_START;
         k[i++] = K.STAGE_WRITTEN_OFF_AT;
         k[i++] = K.DORMANCY_GRACE;
-        k[i++] = K.ELIG_MIN_MEMBERS;
-        k[i++] = K.ELIG_CLEAN_EPOCHS;
-        k[i++] = K.ELIG_MEMBER_MONTHS;
-        k[i++] = K.ELIG_MAX_GAP_MONTHS;
         k[i++] = K.YIELD_SPLIT_MEMBER;
         k[i++] = K.YIELD_SPLIT_POOL;
         k[i++] = K.YIELD_SPLIT_PROTOCOL;
@@ -204,42 +194,41 @@ contract ConfigTest is Test {
         k[i++] = K.MEMBER_SEASONING_WINDOW;
         k[i++] = K.MIN_LENDABLE;
         k[i++] = K.GLOBAL_MEMBER_CAP;
-        k[i++] = K.EXPOSURE_IMPACT_MULT_X100;
         k[i++] = K.ACTIVITY_DECAY_LENGTH;
         k[i++] = K.ACTIVITY_FLOOR_BPS;
         k[i++] = K.STANDING_HEAL_WINDOW;
         k[i++] = K.PHASE_CAP_FIRST_ACCESS;
         k[i++] = K.PHASE_CAP_PROVEN_ONCE;
         k[i++] = K.PHASE_CAP_DEVELOPING;
-        k[i++] = K.CONCENTRATION_FIRST_ACCESS_BPS;
-        k[i++] = K.CONCENTRATION_PROVEN_ONCE_BPS;
-        k[i++] = K.CONCENTRATION_DEVELOPING_BPS;
-        k[i++] = K.CONCENTRATION_ESTABLISHED_BPS;
-        k[i++] = K.TE_BUDGET_PROVEN_ONCE;
-        k[i++] = K.TE_BUDGET_DEVELOPING;
-        k[i++] = K.TE_BUDGET_ESTABLISHED;
-        k[i++] = K.TE_COMMUNITY_CAP_BPS;
         k[i++] = K.PHASE_MIN_TIME_PROVEN_ONCE;
         k[i++] = K.PHASE_MIN_TIME_ESTABLISHED;
-        k[i++] = K.OPERATING_BUFFER_PER_COMMUNITY;
-        k[i++] = K.OPERATING_FLOOR_GLOBAL;
-        k[i++] = K.CREDIT_LOSS_RESERVE_CURRENT_BPS;
-        k[i++] = K.CREDIT_LOSS_RESERVE_LATE_BPS;
-        k[i++] = K.CREDIT_LOSS_RESERVE_FINAL_CURE_BPS;
-        k[i++] = K.CREDIT_LOSS_RESERVE_DEFAULT_RECOVERY_BPS;
-        k[i++] = K.VENUE_LOSS_RESERVE_BPS;
-        k[i++] = K.VENUE_ALLOCATION_MAX_BPS;
-        k[i++] = K.PER_VENUE_CAP_BPS;
-        k[i++] = K.MAX_VENUE_REDEMPTION_DELAY;
-        k[i++] = K.MAX_VENUE_SLIPPAGE_BPS;
-        k[i++] = K.STRESS_CAPITAL_RATE_BPS;
-        k[i++] = K.STRESS_CAPITAL_FLOOR;
-        // The debt half. CREDIT_CORE is an address (not settable via `set`, so not
-        // charge-shaped by construction). TE_EARN_INCREMENT sizes what a member CAN borrow
-        // (Trust Extension capacity), never what they owe (no charge, no fee, no
-        // interest at any stage) - it is not a charge under any name.
+        k[i++] = K.PHASE_CAP_ESTABLISHED;
+        // No-charge audit: the four multipliers and the concentration share size what a member CAN
+        // borrow, never what they owe. No repayment path reads them.
+        k[i++] = K.PHASE_MULT_FIRST_ACCESS;
+        k[i++] = K.PHASE_MULT_PROVEN_ONCE;
+        k[i++] = K.PHASE_MULT_DEVELOPING;
+        k[i++] = K.PHASE_MULT_ESTABLISHED;
+        k[i++] = K.CONCENTRATION_BPS;
+        // CREDIT_CORE is an address (not settable via `set`, so not charge-shaped by construction).
         k[i++] = K.CREDIT_CORE;
-        k[i++] = K.TE_EARN_INCREMENT;
+        // No-charge audit for the pool and credit gates: the liquid floor limits what the operator
+        // sends out; the dormancy windows, book quality and member count decide whether and how much
+        // a community lends; the heal cooling decides when a repaid default heals; the agreement
+        // hash is a document fingerprint. None is read on a repayment path, and none can add
+        // anything to what a member owes.
+        k[i++] = K.POOL_LIQUID_FLOOR_BPS;
+        k[i++] = K.COMMUNITY_DORMANCY_GRACE;
+        k[i++] = K.COMMUNITY_FADE_LENGTH;
+        k[i++] = K.COMMUNITY_HEAL_LENGTH;
+        k[i++] = K.COMMUNITY_RETURN_AFTER;
+        k[i++] = K.PORTFOLIO_QUALITY_BPS;
+        k[i++] = K.COMMUNITY_MIN_MEMBERS;
+        k[i++] = K.DEFAULT_HEAL_COOLING;
+        k[i++] = K.CREDIT_AGREEMENT_HASH;
+        // No-charge audit: a count of seats per wallet. It decides how many communities one wallet
+        // may join, never what anyone owes.
+        k[i++] = K.MAX_SEATS_PER_WALLET;
         // The two rate ceilings. No-charge audit: neither is charge-shaped. They bound how fast a
         // Venue's savings value may rise and how fast `ManualStrategy` releases pre-funded yield.
         // Neither is read on any repayment path, and neither can add anything to what a member
@@ -371,79 +360,6 @@ contract ConfigTest is Test {
     }
 
     // ---------------------------------------------------------------------
-    // Test 6: retained-capital parameters
-    // ---------------------------------------------------------------------
-
-    function test_retainedCapital_launchValues() public view {
-        (uint256 perCommunity, uint256 globalFloor) = cfg.operatingRequirement();
-        assertEq(perCommunity, 2000e6); // $2,000, 6-decimal
-        assertEq(globalFloor, 10_000e6); // $10,000
-        assertEq(perCommunity, 2_000_000_000); // not 2000
-        (uint16 current, uint16 late, uint16 finalCure, uint16 defaultRecovery) = cfg.creditLossReserveBps();
-        assertEq(current, 500); // 5%
-        assertEq(late, 2500); // 25%
-        assertEq(finalCure, 5000); // 50%
-        assertEq(defaultRecovery, 10_000); // 100%
-        assertEq(cfg.venueLossReserveBps(), 2000); // 20% of largest single-venue exposure
-        assertEq(cfg.venueAllocationMaxBps(), 5000); // 50% of liquid above buffer
-        (uint16 rateBps, uint256 floor) = cfg.stressCapital();
-        assertEq(rateBps, 1000); // 10% of total outstanding
-        assertEq(floor, 100_000e6); // $100,000
-    }
-
-    function test_retainedCapital_boundsEnforced() public {
-        cfg.set(K.CREDIT_LOSS_RESERVE_LATE_BPS, 10_000); // hi bound
-        cfg.set(K.CREDIT_LOSS_RESERVE_LATE_BPS, 0); // lo bound
-        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.CREDIT_LOSS_RESERVE_LATE_BPS));
-        cfg.set(K.CREDIT_LOSS_RESERVE_LATE_BPS, 10_001);
-    }
-
-    // ---------------------------------------------------------------------
-    // Treasury Manager venue limits
-    // ---------------------------------------------------------------------
-
-    function test_venueLimits_launchValues() public view {
-        assertEq(cfg.perVenueCapBps(), 2500); // 25% of total Treasury cash
-        assertEq(cfg.maxVenueSlippageBps(), 50); // 50 bps
-        // The redemption-delay limit is the pending-obligation window. That window's
-        // own key was retired as unread, so the 7 days is now asserted directly.
-        assertEq(cfg.maxVenueRedemptionDelay(), 7 days);
-    }
-
-    function test_venueLimits_rejectZero() public {
-        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.PER_VENUE_CAP_BPS));
-        cfg.set(K.PER_VENUE_CAP_BPS, 0);
-        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.MAX_VENUE_REDEMPTION_DELAY));
-        cfg.set(K.MAX_VENUE_REDEMPTION_DELAY, 0);
-        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.MAX_VENUE_SLIPPAGE_BPS));
-        cfg.set(K.MAX_VENUE_SLIPPAGE_BPS, 0);
-    }
-
-    function test_venueLimits_boundsEnforced() public {
-        // The per-venue ceiling is 5000 (50%), not 10_000. At 10_000 a
-        // venue's own exposure, part of the cap's base, could never exceed the cap.
-        cfg.set(K.PER_VENUE_CAP_BPS, 1); // lo
-        cfg.set(K.PER_VENUE_CAP_BPS, 5000); // hi
-        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.PER_VENUE_CAP_BPS));
-        cfg.set(K.PER_VENUE_CAP_BPS, 5001);
-
-        // The redemption-delay ceiling was set at the pending-obligation
-        // window's own ceiling. That key is retired, so the same 30 days is asserted here
-        // as a literal; the value and the reason for it are unchanged.
-        (, uint256 delayHi) = cfg.bounds(K.MAX_VENUE_REDEMPTION_DELAY);
-        assertEq(delayHi, 30 days);
-        cfg.set(K.MAX_VENUE_REDEMPTION_DELAY, 1); // lo
-        cfg.set(K.MAX_VENUE_REDEMPTION_DELAY, delayHi); // hi
-        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.MAX_VENUE_REDEMPTION_DELAY));
-        cfg.set(K.MAX_VENUE_REDEMPTION_DELAY, delayHi + 1);
-
-        cfg.set(K.MAX_VENUE_SLIPPAGE_BPS, 1); // lo
-        cfg.set(K.MAX_VENUE_SLIPPAGE_BPS, 1000); // hi, well below a meaningless level
-        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.MAX_VENUE_SLIPPAGE_BPS));
-        cfg.set(K.MAX_VENUE_SLIPPAGE_BPS, 1001);
-    }
-
-    // ---------------------------------------------------------------------
     // Test 7: role gating and ownership
     // ---------------------------------------------------------------------
 
@@ -543,10 +459,10 @@ contract ConfigTest is Test {
     // ---------------------------------------------------------------------
 
     function testFuzz_boundsEnforced(uint256 v) public {
-        (uint256 lo, uint256 hi) = cfg.bounds(K.EPOCH_LENGTH);
+        (uint256 lo, uint256 hi) = cfg.bounds(K.COMMUNITY_FADE_LENGTH);
         vm.assume(v < lo || v > hi);
-        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.EPOCH_LENGTH));
-        cfg.set(K.EPOCH_LENGTH, v);
+        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.COMMUNITY_FADE_LENGTH));
+        cfg.set(K.COMMUNITY_FADE_LENGTH, v);
     }
 
     function test_scalarSetRejectsCompositeKeys() public {
@@ -676,45 +592,122 @@ contract ConfigTest is Test {
     // ---- Standing keys ----
 
     function test_standing_launchValues() public view {
-        assertEq(cfg.minLendable(), 50e6);
+        assertEq(cfg.minLendable(), 10e6);
         assertEq(cfg.globalMemberCap(), 5000e6);
-        assertEq(cfg.exposureImpactMultX100(), 300); // 3x
         assertEq(cfg.activityDecayLength(), 180 days); // W
         assertEq(cfg.activityFloorBps(), 2500); // FLOOR 0.25
         assertEq(cfg.standingHealWindow(), 90 days);
-        assertEq(cfg.teCommunityCapBps(), 2000); // 20%
+        assertEq(cfg.concentrationBps(), 2000); // 20% of what the community can lend now
 
-        (uint256 c0, uint16 conc0, uint256 te0, uint64 mt0) = cfg.phaseCaps(0);
-        assertEq(c0, 100e6);
-        assertEq(conc0, 500);
-        assertEq(te0, 0);
-        assertEq(mt0, 0);
-        (uint256 c1, uint16 conc1, uint256 te1, uint64 mt1) = cfg.phaseCaps(1);
-        assertEq(c1, 300e6);
-        assertEq(conc1, 800);
-        assertEq(te1, 200e6);
-        assertEq(mt1, 30 days);
-        (uint256 c2, uint16 conc2, uint256 te2, uint64 mt2) = cfg.phaseCaps(2);
-        assertEq(c2, 1000e6);
-        assertEq(conc2, 1000);
-        assertEq(te2, 700e6);
-        assertEq(mt2, 0);
-        (uint256 c3, uint16 conc3, uint256 te3, uint64 mt3) = cfg.phaseCaps(3);
-        assertEq(c3, 5000e6); // Established caps at the Global Member Cap
-        assertEq(conc3, 1200);
-        assertEq(te3, 4000e6);
-        assertEq(mt3, 180 days);
+        uint256[4] memory mult = [uint256(100), 200, 300, 400];
+        uint256[4] memory cap = [uint256(100e6), 300e6, 1000e6, 5000e6];
+        uint64[4] memory minTime = [uint64(0), 30 days, 0, 180 days];
+        for (uint8 p; p < 4; p++) {
+            (uint256 m, uint256 c, uint64 t) = cfg.phaseTerms(p);
+            assertEq(m, mult[p], "multiplier");
+            assertEq(c, cap[p], "cap");
+            assertEq(t, minTime[p], "time since the first repayment");
+        }
     }
 
-    /// The activity FLOOR rejects zero. So do MIN_LENDABLE and the
-    /// exposure multiplier, for the same reason (a zero repeals the mechanism).
+    /// The pool and gate keys: launch values, and both ends of every range.
+    function test_credit_launchValuesAndBounds() public {
+        assertEq(cfg.poolLiquidFloorBps(), 3000);
+        (uint64 grace, uint64 fade, uint64 heal, uint64 ret) = cfg.communityDormancy();
+        assertEq(grace, 90 days);
+        assertEq(fade, 180 days);
+        assertEq(heal, 90 days);
+        assertEq(ret, 365 days);
+        assertEq(cfg.portfolioQualityBps(), 2500);
+        assertEq(cfg.communityMinMembers(), 5);
+        assertEq(cfg.defaultHealCooling(), 180 days);
+        assertEq(cfg.creditAgreementHash(), bytes32(0), "credit is shut until an agreement is set");
+
+        _assertRange(K.POOL_LIQUID_FLOOR_BPS, 1, 10_000);
+        _assertRange(K.COMMUNITY_DORMANCY_GRACE, 1 days, 730 days);
+        _assertRange(K.COMMUNITY_FADE_LENGTH, 1 days, 730 days);
+        _assertRange(K.COMMUNITY_HEAL_LENGTH, 1 days, 730 days);
+        _assertRange(K.COMMUNITY_RETURN_AFTER, 1 days, 730 days);
+        _assertRange(K.PORTFOLIO_QUALITY_BPS, 1, 10_000);
+        _assertRange(K.COMMUNITY_MIN_MEMBERS, 2, 10);
+        _assertRange(K.CONCENTRATION_BPS, 1, 10_000);
+        _assertRange(K.DEFAULT_HEAL_COOLING, 1 days, 730 days);
+        _assertRange(K.PHASE_CAP_ESTABLISHED, 1e6, 1_000_000e6);
+        _assertRange(K.PHASE_MULT_FIRST_ACCESS, 1, 1000);
+        _assertRange(K.PHASE_MULT_PROVEN_ONCE, 1, 1000);
+        _assertRange(K.PHASE_MULT_DEVELOPING, 1, 1000);
+        _assertRange(K.PHASE_MULT_ESTABLISHED, 1, 1000);
+        assertEq(cfg.maxSeatsPerWallet(), 10);
+        _assertRange(K.MAX_SEATS_PER_WALLET, 1, 50);
+    }
+
+    /// The agreement hash has its own owner-only setter, refuses zero, and is not a scalar key.
+    function test_creditAgreementHash_setterOnly() public {
+        bytes32 h = keccak256("agreement");
+        cfg.setCreditAgreementHash(h);
+        assertEq(cfg.creditAgreementHash(), h);
+        vm.expectRevert(Config.ZeroAgreementHash.selector);
+        cfg.setCreditAgreementHash(bytes32(0));
+        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.CREDIT_AGREEMENT_HASH));
+        cfg.set(K.CREDIT_AGREEMENT_HASH, 1);
+        vm.prank(makeAddr("stranger"));
+        vm.expectRevert();
+        cfg.setCreditAgreementHash(h);
+    }
+
+    /// The keys only the retired credit model read: its retained capital, reserves and stress
+    /// capital, the per-community buffer, Trust Extension, the share-of-budget exposure multiplier,
+    /// per-phase concentration, the old venue limits, the impact epoch and the old eligibility
+    /// rules. Each is gone: `bounds` does not know it, so it cannot be set.
+    function test_retiredKeys_oldCreditModel() public {
+        string[28] memory names = [
+            "qudi.EPOCH_LENGTH",
+            "qudi.ELIG_MIN_MEMBERS",
+            "qudi.ELIG_CLEAN_EPOCHS",
+            "qudi.ELIG_MEMBER_MONTHS",
+            "qudi.ELIG_MAX_GAP_MONTHS",
+            "qudi.EXPOSURE_IMPACT_MULT_X100",
+            "qudi.CONCENTRATION_FIRST_ACCESS_BPS",
+            "qudi.CONCENTRATION_PROVEN_ONCE_BPS",
+            "qudi.CONCENTRATION_DEVELOPING_BPS",
+            "qudi.CONCENTRATION_ESTABLISHED_BPS",
+            "qudi.TE_BUDGET_PROVEN_ONCE",
+            "qudi.TE_BUDGET_DEVELOPING",
+            "qudi.TE_BUDGET_ESTABLISHED",
+            "qudi.TE_COMMUNITY_CAP_BPS",
+            "qudi.TE_EARN_INCREMENT",
+            "qudi.OPERATING_BUFFER_PER_COMMUNITY",
+            "qudi.OPERATING_FLOOR_GLOBAL",
+            "qudi.CREDIT_LOSS_RESERVE_CURRENT_BPS",
+            "qudi.CREDIT_LOSS_RESERVE_LATE_BPS",
+            "qudi.CREDIT_LOSS_RESERVE_FINAL_CURE_BPS",
+            "qudi.CREDIT_LOSS_RESERVE_DEFAULT_RECOVERY_BPS",
+            "qudi.VENUE_LOSS_RESERVE_BPS",
+            "qudi.VENUE_ALLOCATION_MAX_BPS",
+            "qudi.PER_VENUE_CAP_BPS",
+            "qudi.MAX_VENUE_REDEMPTION_DELAY",
+            "qudi.MAX_VENUE_SLIPPAGE_BPS",
+            "qudi.STRESS_CAPITAL_RATE_BPS",
+            "qudi.STRESS_CAPITAL_FLOOR"
+        ];
+        for (uint256 i; i < names.length; i++) {
+            bytes32 key = keccak256(bytes(names[i]));
+            (uint256 lo, uint256 hi) = cfg.bounds(key);
+            assertGt(lo, hi, names[i]);
+            vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, key));
+            cfg.set(key, 1);
+        }
+    }
+
+    /// The activity FLOOR rejects zero. So do MIN_LENDABLE and the multipliers, for the same
+    /// reason (a zero repeals the mechanism).
     function test_standingBoundsRejectZero() public {
         vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.ACTIVITY_FLOOR_BPS));
         cfg.set(K.ACTIVITY_FLOOR_BPS, 0);
         vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.MIN_LENDABLE));
         cfg.set(K.MIN_LENDABLE, 0);
-        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.EXPOSURE_IMPACT_MULT_X100));
-        cfg.set(K.EXPOSURE_IMPACT_MULT_X100, 0);
+        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.PHASE_MULT_FIRST_ACCESS));
+        cfg.set(K.PHASE_MULT_FIRST_ACCESS, 0);
         vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.ACTIVITY_DECAY_LENGTH));
         cfg.set(K.ACTIVITY_DECAY_LENGTH, 0);
         vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.STANDING_HEAL_WINDOW));

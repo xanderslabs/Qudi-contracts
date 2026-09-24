@@ -7,6 +7,7 @@ import {ConfigKeys as K} from "../../src/ConfigKeys.sol";
 import {ComplianceRegistry} from "../../src/ComplianceRegistry.sol";
 import {Community} from "../../src/Community.sol";
 import {CommunityFactory} from "../../src/CommunityFactory.sol";
+import {IConfig} from "../../src/interfaces/IConfig.sol";
 import {Seats} from "../../src/Seats.sol";
 import {ICommunity} from "../../src/interfaces/ICommunity.sol";
 import {ICommunityInit} from "../../src/interfaces/ICommunityInit.sol";
@@ -63,7 +64,7 @@ abstract contract MembershipFixture is InviteSigner {
             pools[i] = makeAddr(string.concat("pool", vm.toString(i)));
         }
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
-        seats = new Seats(predicted);
+        seats = new Seats(predicted, IConfig(address(config)));
         factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
         for (uint8 t = 0; t < 3; t++) {
             factory.addVenue(pools[t]);

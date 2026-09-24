@@ -6,6 +6,7 @@ import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {Config} from "../src/Config.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
 import {Community} from "../src/Community.sol";
+import {IConfig} from "../src/interfaces/IConfig.sol";
 import {Seats} from "../src/Seats.sol";
 import {ICommunity} from "../src/interfaces/ICommunity.sol";
 import {ICommunityInit} from "../src/interfaces/ICommunityInit.sol";
@@ -60,7 +61,7 @@ contract RemovalFixTest is InviteSigner {
         vm.prank(owner);
         config.setAddress(K.CREDIT_CORE, address(core));
         community = new Community();
-        seats = new Seats(address(this));
+        seats = new Seats(address(this), IConfig(address(config)));
         seats.registerCommunity(address(community), 0);
         ICommunityInit.CommunityWiring memory w = ICommunityInit.CommunityWiring({
             config: address(config),

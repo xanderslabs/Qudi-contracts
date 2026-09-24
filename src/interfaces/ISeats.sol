@@ -27,7 +27,7 @@ interface ISeats is IERC721Enumerable {
     function registerCommunity(address community, uint256 communityId) external;
 
     /// A registered community mints a seat in itself. Reverts if `to` already holds a seat in the
-    /// calling community, in any state.
+    /// calling community, in any state, or holds `MAX_SEATS_PER_WALLET` seats in all.
     function mint(address to, uint256 pricePaid) external returns (uint256 tokenId);
 
     /// The seat's own community moves it from Active to Suspended or from Active to Left.
@@ -51,6 +51,8 @@ interface ISeats is IERC721Enumerable {
     error NotCommunity();
     error AlreadyRegistered();
     error AlreadySeated();
+    /// The wallet already holds `MAX_SEATS_PER_WALLET` seats, in any state.
+    error TooManySeats();
     error NotSeatCommunity();
     error InvalidStateChange();
     error Soulbound();

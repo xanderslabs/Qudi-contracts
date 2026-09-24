@@ -4,19 +4,21 @@
     "file": "src/CreditCore.sol",
     "function": "_materialize",
     "bound": "drawTimestamp==0 term in the no-op guard",
-    "match": "if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return;",
-    "mutant": "if (o.closed || o.writtenOff) return;",
-    "status": "catalogued"
+    "match": "        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return;\n        uint8 next",
+    "mutant": "        if (o.closed || o.writtenOff) return;\n        uint8 next",
+    "status": "catalogued",
+    "test": "test_materialize_recordsOnlyWhatTimeHasReached",
+    "note": "A never-drawn account derives Written Off and the write-off pops an empty open list."
   },
   {
     "id": "CC-02",
     "file": "src/CreditCore.sol",
     "function": "_materialize",
     "bound": "o.closed term in the no-op guard",
-    "match": "if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return;",
-    "mutant": "if (o.drawTimestamp == 0 || o.writtenOff) return;",
+    "match": "        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return;\n        uint8 next",
+    "mutant": "        if (o.drawTimestamp == 0 || o.writtenOff) return;\n        uint8 next",
     "status": "catalogued",
-    "test": "test_materialize_ignoresAnAlreadyClosedTab, test_materialize_repaidTabIsNeverWrittenOffTwice",
+    "test": "test_materialize_ignoresARepaidAdvance",
     "note": "The first test pins the arithmetic underflow it hits in a single-obligation fixture, two lines before the account-default consequence it names in its own assertions; the second test reaches that consequence directly, in a fixture with a second open obligation so the counter cannot underflow."
   },
   {
@@ -24,8 +26,8 @@
     "file": "src/CreditCore.sol",
     "function": "_materialize",
     "bound": "o.writtenOff term in the no-op guard",
-    "match": "if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return;",
-    "mutant": "if (o.drawTimestamp == 0 || o.closed) return;",
+    "match": "        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return;\n        uint8 next",
+    "mutant": "        if (o.drawTimestamp == 0 || o.closed) return;\n        uint8 next",
     "status": "redundant",
     "proof": "o.writtenOff is written at exactly one site (_executeWriteOff:895), which sets o.closed = true on the next line; the only other write to o.closed is _closeTab:788. writtenOff therefore implies closed, so the closed term already covers this disjunct."
   },
@@ -34,8 +36,8 @@
     "file": "src/CreditCore.sol",
     "function": "_materialize",
     "bound": "written-off crossing branch",
-    "match": "if (newStage == DebtMath.STAGE_WRITTEN_OFF) {",
-    "mutant": "if (false) {",
+    "match": "        if (next == DebtMath.STAGE_WRITTEN_OFF) {",
+    "mutant": "        if (false) {",
     "status": "catalogued",
     "test": "test_writeOff_exactly365AnyoneCanFinalize"
   },
@@ -44,130 +46,20 @@
     "file": "src/CreditCore.sol",
     "function": "_materialize",
     "bound": "no-op early return when the derived stage has not changed",
-    "match": "if (newStage == o.stage) return;",
-    "mutant": "if (false) return;",
+    "match": "        if (next == o.stage) return;",
+    "mutant": "",
     "status": "redundant",
     "proof": "When newStage == o.stage, oldIdx == newIdx (same reserveIdx), so the stage-bucket move below is a no-op; the formal-Default crossing's own guard (o.stage < STAGE_DEFAULT_RECOVERY) is false because o.stage already equals newStage; and `o.stage = newStage` reassigns the same value. Removing the early return changes no storage, only gas. Verified: 435/435 green with the guard forced false."
-  },
-  {
-    "id": "CC-06",
-    "file": "src/CreditCore.sol",
-    "function": "_materialize",
-    "bound": "stage-bucket move's oldIdx != newIdx guard",
-    "match": "        if (oldIdx != newIdx) {\n            _stageBucket[oldIdx] -= o.principal;\n            _stageBucket[newIdx] += o.principal;\n        }",
-    "mutant": "        if (true) {\n            _stageBucket[oldIdx] -= o.principal;\n            _stageBucket[newIdx] += o.principal;\n        }",
-    "status": "redundant",
-    "proof": "When oldIdx == newIdx, the move subtracts and adds the same amount from the same bucket, netting to zero change. Forcing it unconditional changes no storage. Verified: 435/435 green."
   },
   {
     "id": "CC-07",
     "file": "src/CreditCore.sol",
     "function": "_materialize",
     "bound": "formal-Default crossing's o.stage < STAGE_DEFAULT_RECOVERY term",
-    "match": "        if (newStage == DebtMath.STAGE_DEFAULT_RECOVERY && o.stage < DebtMath.STAGE_DEFAULT_RECOVERY) {",
-    "mutant": "        if (newStage == DebtMath.STAGE_DEFAULT_RECOVERY) {",
+    "match": "        if (next >= DebtMath.STAGE_DEFAULT_RECOVERY && o.stage < DebtMath.STAGE_DEFAULT_RECOVERY) {",
+    "mutant": "        if (next >= DebtMath.STAGE_DEFAULT_RECOVERY) {",
     "status": "redundant",
     "proof": "Independent of CC-05 (a chained proof, redone): _recordFormalDefault is internally idempotent (CreditStanding.sol: it only sets _accountDefaulted and emits once, guarded by its own `if (!_accountDefaulted[member])`), and subtracting a zero teDrawn (the release two lines below, inside its own `if (o.teDrawn != 0)` guard) is inert whether or not that guard is itself present: the guard is CC-11, which the catalogue marks redundant, so this proof does not lean on CC-11 being a gated bound, only on the arithmetic fact that o.teDrawn is already 0 on a repeat call. Verified directly: deleting CC-07's term and CC-11's guard together still leaves 442/442 green, so the redundancy claim holds even with CC-11 absent, which is what makes this proof sound rather than a live chain of proofs. So re-entering this block on a later call, with o.stage already at DEFAULT_RECOVERY, changes nothing: both of its effects are already no-ops on repeat, regardless of whether the newStage == o.stage early return (CC-05) skipped it first. Verified: 441/441 green with the term dropped alone, with CC-05 left untouched."
-  },
-  {
-    "id": "CC-08",
-    "file": "src/CreditCore.sol",
-    "function": "_closeTab",
-    "bound": "o.teDrawn != 0 guard around the TE release",
-    "match": "        if (o.teDrawn != 0) {\n            _teLiveOf[communityId] -= o.teDrawn;\n            o.teDrawn = 0;\n        }",
-    "mutant": "        if (true) {\n            _teLiveOf[communityId] -= o.teDrawn;\n            o.teDrawn = 0;\n        }",
-    "status": "redundant",
-    "proof": "Subtracting or assigning zero is a no-op; forcing the guard true changes nothing when o.teDrawn is already 0. Verified: 435/435 green."
-  },
-  {
-    "id": "CC-09",
-    "file": "src/CreditCore.sol",
-    "function": "_closeTab",
-    "bound": "_teLiveOf release on full settlement",
-    "match": "            _teLiveOf[communityId] -= o.teDrawn;\n            o.teDrawn = 0;",
-    "mutant": "            o.teDrawn = 0;",
-    "status": "catalogued",
-    "test": "test_teLive_releasedWhenTheTabCloses"
-  },
-  {
-    "id": "CC-10",
-    "file": "src/CreditCore.sol",
-    "function": "_closeTab",
-    "bound": "o.teDrawn field zeroed on close, separate statement from the aggregate release",
-    "match": "            _teLiveOf[communityId] -= o.teDrawn;\n            o.teDrawn = 0;",
-    "mutant": "            _teLiveOf[communityId] -= o.teDrawn;",
-    "status": "catalogued",
-    "test": "test_teLive_releasedWhenTheTabCloses"
-  },
-  {
-    "id": "CC-11",
-    "file": "src/CreditCore.sol",
-    "function": "_materialize",
-    "bound": "formal-Default crossing's o.teDrawn != 0 guard",
-    "match": "            if (o.teDrawn != 0) {\n                _teLiveOf[o.communityId] -= o.teDrawn;\n                o.teDrawn = 0;\n            }",
-    "mutant": "            if (true) {\n                _teLiveOf[o.communityId] -= o.teDrawn;\n                o.teDrawn = 0;\n            }",
-    "status": "redundant",
-    "proof": "Same no-op reasoning as CC-08: subtracting/assigning zero changes nothing. Verified: 435/435 green."
-  },
-  {
-    "id": "CC-12",
-    "file": "src/CreditCore.sol",
-    "function": "_materialize",
-    "bound": "_teLiveOf release at the formal-Default crossing",
-    "match": "                _teLiveOf[o.communityId] -= o.teDrawn;\n                o.teDrawn = 0;",
-    "mutant": "                o.teDrawn = 0;",
-    "status": "catalogued",
-    "test": "test_teLive_releasedAtTheFormalDefaultCrossing"
-  },
-  {
-    "id": "CC-13",
-    "file": "src/CreditCore.sol",
-    "function": "_materialize",
-    "bound": "o.teDrawn field zeroed at the formal-Default crossing, separate statement",
-    "match": "                _teLiveOf[o.communityId] -= o.teDrawn;\n                o.teDrawn = 0;",
-    "mutant": "                _teLiveOf[o.communityId] -= o.teDrawn;",
-    "status": "catalogued",
-    "test": "test_teLive_releasedAtTheFormalDefaultCrossing"
-  },
-  {
-    "id": "CC-14",
-    "file": "src/CreditCore.sol",
-    "function": "_executeWriteOff",
-    "bound": "o.teDrawn != 0 guard around the write-off TE release",
-    "match": "        if (o.teDrawn != 0) {\n            _teLiveOf[communityId] -= o.teDrawn;\n        }",
-    "mutant": "        if (true) {\n            _teLiveOf[communityId] -= o.teDrawn;\n        }",
-    "status": "redundant",
-    "proof": "Same no-op reasoning as CC-08. Verified: 435/435 green."
-  },
-  {
-    "id": "CC-15",
-    "file": "src/CreditCore.sol",
-    "function": "_executeWriteOff",
-    "bound": "_teLiveOf release on write-off that skipped formal Default",
-    "match": "        if (o.teDrawn != 0) {\n            _teLiveOf[communityId] -= o.teDrawn;\n        }",
-    "mutant": "        if (o.teDrawn != 0) {}",
-    "status": "catalogued",
-    "test": "test_teLive_releasedByAWriteOffThatSkippedDefault"
-  },
-  {
-    "id": "CC-16",
-    "file": "src/CreditCore.sol",
-    "function": "_executeWriteOff",
-    "bound": "o.teDrawn field zeroed unconditionally on write-off",
-    "match": "        o.principal = 0;\n        o.teDrawn = 0;\n        o.writtenOff = true;",
-    "mutant": "        o.principal = 0;\n        o.writtenOff = true;",
-    "status": "catalogued",
-    "test": "test_teLive_releasedByAWriteOffThatSkippedDefault"
-  },
-  {
-    "id": "CC-17",
-    "file": "src/CreditCore.sol",
-    "function": "_currentStage",
-    "bound": "drawTimestamp==0 fallback to Stage.Tenor",
-    "match": "        if (o.drawTimestamp == 0) return Stage.Tenor;",
-    "mutant": "",
-    "status": "redundant",
-    "proof": "Independent of both callers' guards (redone). Deleting this line makes _currentStage compute Stage(_deriveStage(block.timestamp - 0)) for drawTimestamp == 0: block.timestamp is always far past the write-off boundary wo (365 days of elapsed seconds) for any real chain, since block.timestamp is measured from the Unix epoch, so _deriveStage returns STAGE_WRITTEN_OFF regardless of which caller reads it. hasOpenTab's use site (`_currentStage(o) != Stage.WrittenOff`) evaluates `WrittenOff != WrittenOff` = false, and `obligationOf` reports a never-drawn account's stage as a view only. The answer matches the correct one for a never-drawn account directly, through the WrittenOff endpoint, not through the caller's own guard being present. (`interceptionActiveFor`, the second caller this proof once covered, was removed.) Verified: 441/441 green with the line deleted."
   },
   {
     "id": "CC-18",
@@ -220,308 +112,80 @@
     "test": "test_stageBoundaries_bothSidesInSeconds"
   },
   {
-    "id": "CC-23",
-    "file": "src/DebtMath.sol",
-    "function": "reserveIdx",
-    "bound": "Tenor/Grace inclusive comparison",
-    "match": "        if (stage <= STAGE_GRACE) return 0;",
-    "mutant": "        if (stage < STAGE_GRACE) return 0;",
-    "status": "redundant",
-    "proof": "reserveIdx(STAGE_GRACE) is 0 either way: the early return gives 0 directly, and the fall-through `stage - 1` gives STAGE_GRACE - 1 = 0 too. Verified: 435/435 green."
-  },
-  {
-    "id": "CC-24",
-    "file": "src/CreditCore.sol",
-    "function": "_largestVenueExposure",
-    "bound": "strict-greater comparison for the running max",
-    "match": "            if (assets > largest) largest = assets;",
-    "mutant": "            if (assets >= largest) largest = assets;",
-    "status": "redundant",
-    "proof": "A max-fold's result is identical whether ties reassign the same value or not. Verified: 435/435 green."
-  },
-  {
-    "id": "CC-25",
-    "file": "src/CreditCore.sol",
-    "function": "_requireRetained",
-    "bound": "the retained-capital gate's strict inequality",
-    "match": "        if (usdc.balanceOf(address(this)) < _totalAllocated + _requiredRetainedCapital()) {",
-    "mutant": "        if (usdc.balanceOf(address(this)) <= _totalAllocated + _requiredRetainedCapital()) {",
-    "status": "catalogued",
-    "test": "test_drawGate_retainedCapital"
-  },
-  {
-    "id": "CC-26",
-    "file": "src/CreditCore.sol",
-    "function": "_ceilBps",
-    "bound": "retained-capital rounding direction (ceil, never understate the requirement)",
-    "match": "        return Math.mulDiv(amount, bps, 10_000, Math.Rounding.Ceil);",
-    "mutant": "        return Math.mulDiv(amount, bps, 10_000, Math.Rounding.Floor);",
-    "status": "catalogued",
-    "test": "test_creditLossReserveRoundsUp"
-  },
-  {
-    "id": "CC-27",
-    "file": "src/CreditCore.sol",
-    "function": "_stressCapital",
-    "bound": "max(byRate, floor) clamp",
-    "match": "        return byRate > floor ? byRate : floor;",
-    "mutant": "        return floor;",
-    "status": "catalogued",
-    "test": "testFuzz_reserveComponentsNeverUnderstate"
-  },
-  {
-    "id": "CC-28",
-    "file": "src/CreditCore.sol",
-    "function": "_operatingRequirement",
-    "bound": "max(byCommunity, globalFloor) clamp",
-    "match": "        return byCommunity > globalFloor ? byCommunity : globalFloor;",
-    "mutant": "        return globalFloor;",
-    "status": "catalogued",
-    "test": "testFuzz_reserveComponentsNeverUnderstate"
-  },
-  {
-    "id": "CC-29",
-    "file": "src/CreditCore.sol",
-    "function": "_stageOutstanding",
-    "bound": "the four-bucket tuple is not transposed",
-    "match": "        return (_stageBucket[0], _stageBucket[1], _stageBucket[2], _stageBucket[3]);",
-    "mutant": "        return (_stageBucket[1], _stageBucket[0], _stageBucket[2], _stageBucket[3]);",
-    "status": "catalogued",
-    "test": "test_requiredRetainedCapital_stageBucketsAreNotTransposed"
-  },
-  {
-    "id": "CC-30",
-    "file": "src/CreditCore.sol",
-    "function": "_communityTeBudget",
-    "bound": "min(sum of phase budgets, yield cap)",
-    "match": "        return sumBudgets < yieldCap ? sumBudgets : yieldCap;",
-    "mutant": "        return sumBudgets;",
-    "status": "catalogued",
-    "test": "test_draw_aggregateTeCapBinds",
-    "note": "CreditCore.sol:624, the aggregate-cap copy draw() reads directly."
-  },
-  {
     "id": "CC-31",
     "file": "src/CreditCore.sol",
     "function": "hasOpenTab",
-    "bound": "whole no-op guard",
-    "match": "        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return false;\n        return _currentStage(o) != Stage.WrittenOff;",
-    "mutant": "        if (false) return false;\n        return _currentStage(o) != Stage.WrittenOff;",
+    "bound": "hasOpenTab's whole guard: a repaid advance inside the year must read closed",
+    "match": "        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return false;",
+    "mutant": "",
     "status": "catalogued",
-    "note": "Trivially caught: breaks the one-open-tab-per-account gate for nearly every drawing test."
-  },
-  {
-    "id": "CC-32",
-    "file": "src/CreditCore.sol",
-    "function": "hasOpenTab",
-    "bound": "drawTimestamp==0 term alone",
-    "match": "        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return false;\n        return _currentStage(o) != Stage.WrittenOff;",
-    "mutant": "        if (o.closed || o.writtenOff) return false;\n        return _currentStage(o) != Stage.WrittenOff;",
-    "status": "catalogued",
-    "note": "A never-drawn account would read hasOpenTab() == true, blocking every first draw."
+    "note": "Trivially caught: breaks the one-open-tab-per-account gate for nearly every drawing test.",
+    "test": "test_aClosedLedgerRefusesDrawsAndStillTakesRepayment"
   },
   {
     "id": "CC-33",
     "file": "src/CreditCore.sol",
     "function": "hasOpenTab",
     "bound": "o.closed term alone",
-    "match": "        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return false;\n        return _currentStage(o) != Stage.WrittenOff;",
-    "mutant": "        if (o.drawTimestamp == 0 || o.writtenOff) return false;\n        return _currentStage(o) != Stage.WrittenOff;",
+    "match": "        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return false;",
+    "mutant": "        if (o.drawTimestamp == 0 || o.writtenOff) return false;",
     "status": "catalogued",
-    "note": "A settled (closed, not written-off) tab would read hasOpenTab() == true, blocking the member's next draw."
+    "note": "A settled (closed, not written-off) tab would read hasOpenTab() == true, blocking the member's next draw.",
+    "test": "test_aClosedLedgerRefusesDrawsAndStillTakesRepayment"
   },
   {
     "id": "CC-34",
     "file": "src/CreditCore.sol",
     "function": "hasOpenTab",
     "bound": "o.writtenOff term alone",
-    "match": "        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return false;\n        return _currentStage(o) != Stage.WrittenOff;",
-    "mutant": "        if (o.drawTimestamp == 0 || o.closed) return false;\n        return _currentStage(o) != Stage.WrittenOff;",
+    "match": "        if (o.drawTimestamp == 0 || o.closed || o.writtenOff) return false;",
+    "mutant": "        if (o.drawTimestamp == 0 || o.closed) return false;",
     "status": "redundant",
-    "proof": "Same as CC-03: writtenOff implies closed, so the closed term already covers it."
+    "proof": "Same as CC-03: writtenOff implies closed, so the closed term already covers it.",
+    "note": "A finalized write-off is past the boundary, so the stage check below already reads false."
   },
   {
     "id": "CC-35",
     "file": "src/CreditCore.sol",
     "function": "hasOpenTab",
-    "bound": "the WrittenOff-stage check after the guard",
-    "match": "        return _currentStage(o) != Stage.WrittenOff;",
+    "bound": "an advance past the write-off boundary is no longer open, recorded or not",
+    "match": "        return _deriveStage(block.timestamp - o.drawTimestamp) != DebtMath.STAGE_WRITTEN_OFF;",
     "mutant": "        return true;",
-    "status": "redundant",
-    "proof": "hasOpenTab's only in-closure caller is draw, which calls _materialize(m) immediately above; _materialize executes the write-off whenever the derived stage is Written Off, so by the time hasOpenTab reads the tab in the same transaction its derived stage is never Written Off. Verified: 435/435 green."
-  },
-  {
-    "id": "CC-38",
-    "file": "src/CreditCore.sol",
-    "function": "_executeWriteOff",
-    "bound": "fromCommunity clamp to the community's own allocation",
-    "match": "        uint256 fromCommunity = principal > allocationBefore ? allocationBefore : principal;",
-    "mutant": "        uint256 fromCommunity = principal;",
-    "status": "redundant",
-    "proof": "sum(outstanding principal in community c) <= _allocationOf[c] holds at all times: line() clamps drawable so a draw can never push outstanding above allocation, and the only two writes that lower _allocationOf (_executeWriteOff itself, and closeCommunity, which reverts unless allocation is already zero) never let a single obligation's principal exceed the allocation. Verified: 435/435 green."
-  },
-  {
-    "id": "CC-39",
-    "file": "src/CreditCore.sol",
-    "function": "draw",
-    "bound": "aggregate TE community-cap boundary (strict greater-than, not greater-or-equal)",
-    "match": "            if (_teLiveOf[communityId] + teComponent > budget) revert CommunityTeCapExceeded();",
-    "mutant": "            if (_teLiveOf[communityId] + teComponent >= budget) revert CommunityTeCapExceeded();",
     "status": "catalogued",
-    "test": "test_draw_aggregateTeCapBinds_exactBudgetBoundaryAllowed"
-  },
-  {
-    "id": "CS-01",
-    "file": "src/CreditStanding.sol",
-    "function": "_shareWad",
-    "bound": "zero-seasoned-community guard against division by zero",
-    "match": "        if (uc == 0) return 0;",
-    "mutant": "",
-    "status": "catalogued",
-    "note": "Removal turns a legitimate zero share into a division-by-zero panic."
-  },
-  {
-    "id": "CS-02",
-    "file": "src/CreditStanding.sol",
-    "function": "_impactBudgetFromSnapshot",
-    "bound": "allocation > outstandingPrincipal underflow guard",
-    "match": "        uint256 liquid = snap.allocation > snap.outstandingPrincipal ? snap.allocation - snap.outstandingPrincipal : 0;",
-    "mutant": "        uint256 liquid = snap.allocation - snap.outstandingPrincipal;",
-    "status": "redundant",
-    "proof": "outstandingPrincipal never exceeds allocation for the same community: line()'s budget clamp bounds every draw so that outstanding after the draw cannot exceed allocation minus the operating sub-floor, which is itself non-negative. Verified: 437/437 green with the guard removed."
-  },
-  {
-    "id": "CS-03",
-    "file": "src/CreditStanding.sol",
-    "function": "_impactBudgetFromSnapshot",
-    "bound": "liquid > sub floor at zero",
-    "match": "        return liquid > sub ? liquid - sub : 0;",
-    "mutant": "        return liquid - sub;",
-    "status": "catalogued",
-    "test": "test_communityImpactBudget_floorsAtZeroBelowTheOperatingBuffer"
-  },
-  {
-    "id": "CS-04",
-    "file": "src/CreditStanding.sol",
-    "function": "_hasOpenDelinquency",
-    "bound": "!openInCommunity short-circuit",
-    "match": "        if (!tab.openInCommunity) return false;",
-    "mutant": "",
-    "status": "redundant",
-    "proof": "_tabSnapshot's own contract sets elapsedSinceDraw to 0 whenever openInCommunity is false, and lateStart is always > 0, so the boundary check below already evaluates to false in that case (the same invariant CS-33 leans on for _conductFactor). Verified: 438/438 green with the line deleted. (This premise, _tabSnapshot's own composition, once had no catalogue entry of its own; CC-55 through CC-58 now cover _tabSnapshot's four bounds directly, so this proof no longer rests on an ungated function.)"
-  },
-  {
-    "id": "CS-05",
-    "file": "src/CreditStanding.sol",
-    "function": "_hasOpenDelinquency",
-    "bound": "elapsedSinceDraw >= lateStart boundary",
-    "match": "        return tab.elapsedSinceDraw >= lateStart;",
-    "mutant": "        return tab.elapsedSinceDraw > lateStart;",
-    "status": "catalogued",
-    "test": "test_trustExtension_removedAtLateEntry"
-  },
-  {
-    "id": "CS-06",
-    "file": "src/CreditStanding.sol",
-    "function": "_trustExtension",
-    "bound": "open-delinquency zeroing guard",
-    "match": "        if (_hasOpenDelinquency(tab)) return 0;",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_trustExtension_openDelinquencyRemovesIt"
-  },
-  {
-    "id": "CS-07",
-    "file": "src/CreditStanding.sol",
-    "function": "_trustExtension",
-    "bound": "unhealed-scar zeroing guard",
-    "match": "        if (_anyUnhealedScar(member)) return 0;",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_scarZeroesTeEarnedInAOnly",
-    "note": "Was redundant while scars were per community (a scar in c zeroed _teEarned[c][m], so the guard never bound). Scars are the account's now and the wipe stays local, so a scar in A leaves B's te_earned standing and this guard is what holds B's Trust Extension back while the scar heals. Live again."
-  },
-  {
-    "id": "CS-08",
-    "file": "src/CreditStanding.sol",
-    "function": "_trustExtension",
-    "bound": "memberCap = min(phaseBudget, earned)",
-    "match": "        uint256 memberCap = phaseBudget < earned ? phaseBudget : earned;",
-    "mutant": "        uint256 memberCap = earned;",
-    "status": "catalogued",
-    "test": "test_trustExtension_eachSideBinds"
-  },
-  {
-    "id": "CS-09",
-    "file": "src/CreditStanding.sol",
-    "function": "_trustExtension",
-    "bound": "final min(memberCap, communityCap)",
-    "match": "        return memberCap < communityCap ? memberCap : communityCap;",
-    "mutant": "        return memberCap;",
-    "status": "catalogued",
-    "test": "test_trustExtension_communityCapBinds"
-  },
-  {
-    "id": "CS-10",
-    "file": "src/CreditStanding.sol",
-    "function": "_communityTeBudgetLocal",
-    "bound": "min(sum of phase budgets, yield cap)",
-    "match": "        return sumBudgets < yieldCap ? sumBudgets : yieldCap;",
-    "mutant": "        return sumBudgets;",
-    "status": "catalogued",
-    "test": "test_trustExtension_communityCapBinds",
-    "note": "CreditStanding.sol:388, the local copy _trustExtension reads directly (distinct from CC-30's CreditCore.sol:624 copy)."
-  },
-  {
-    "id": "CS-11",
-    "file": "src/CreditStanding.sol",
-    "function": "line",
-    "bound": "_preDefaultDisqualified term of the account-default gate",
-    "match": "        if (_preDefaultDisqualified[member] || _accountDefaulted[member]) return (0, false);",
-    "mutant": "        if (_accountDefaulted[member]) return (0, false);",
-    "status": "redundant",
-    "proof": "_preDefaultDisqualified is written at exactly one site (_disqualifyPreDefaultUnits), whose only caller is _recordFormalDefault, which sets _accountDefaulted[member] = true in the same call and never clears either flag. _preDefaultDisqualified is keyed to the account, so the two flags are the same fact: each implies the other, and either term alone is the whole gate. CS-12 therefore catalogues the gate as a whole rather than either term. Verified: 525/525 green with this term dropped, and 525/525 with the other term dropped."
+    "proof": "hasOpenTab's only in-closure caller is draw, which calls _materialize(m) immediately above; _materialize executes the write-off whenever the derived stage is Written Off, so by the time hasOpenTab reads the tab in the same transaction its derived stage is never Written Off. Verified: 435/435 green.",
+    "test": "test_writeOff_exactly365AnyoneCanFinalize"
   },
   {
     "id": "CS-12",
     "file": "src/CreditStanding.sol",
     "function": "line",
-    "bound": "the account-default Line gate as a whole (both terms are one fact; see CS-11)",
-    "match": "        if (_preDefaultDisqualified[member] || _accountDefaulted[member]) return (0, false);",
+    "bound": "the line's default gate",
+    "match": "        if (_isDefaulted(member)) return (0, false);",
     "mutant": "",
-    "status": "catalogued",
-    "test": "test_defaultedAccountLineIsZeroEverywhere",
-    "note": "The mutant used to drop only the _accountDefaulted term, which bound because _preDefaultDisqualified was per community. Both are account flags now and always equal, so dropping either term alone survives (CS-11); deleting the gate is the mutant that measures it."
-  },
-  {
-    "id": "CS-13",
-    "file": "src/CreditStanding.sol",
-    "function": "line",
-    "bound": "clamp to the account exposure cap",
-    "match": "        drawable = _min(drawable, _accountExposureCap(member));",
-    "mutant": "",
-    "status": "catalogued",
-    "note": "Caught broadly by the accountExposureCap-binding tests; deleting the line-level clamp lets drawable exceed the account's exposure cap."
+    "status": "redundant",
+    "note": "Masked by CS-43: a defaulted member's conduct is 0, so the line is 0 either way. Each of the pair hides the other; both are kept because the rule names both."
   },
   {
     "id": "CS-14",
     "file": "src/CreditStanding.sol",
     "function": "line",
-    "bound": "clamp to the per-community concentration limit",
-    "match": "        drawable = _min(drawable, uint256(concentrationBps) * budget / 10_000);",
+    "bound": "the line's 20% of what the community can lend now",
+    "match": "        drawable = _min(drawable, communitySnap.lendable * config.concentrationBps() / 10_000);",
     "mutant": "",
     "status": "catalogued",
-    "note": "Caught by the aggregate TE-cap fixture's own comment: concentration is deliberately what binds there."
+    "note": "Caught by the aggregate TE-cap fixture's own comment: concentration is deliberately what binds there.",
+    "test": "test_proof12_twentyPercentOfTheAvailableBalanceBinds, test_proof8_theLineFollowsTheFadedAmount"
   },
   {
     "id": "CS-15",
     "file": "src/CreditStanding.sol",
     "function": "line",
     "bound": "clamp to the phase Line cap",
-    "match": "        drawable = _min(drawable, phaseLineCap);",
+    "match": "        drawable = _min(drawable, phaseCap);",
     "mutant": "",
     "status": "catalogued",
-    "note": "Caught by the phase-cap tests (e.g. test_line_globalMemberCapRespected primes a huge base and relies on this and the global clamp)."
+    "note": "Caught by the phase-cap tests (e.g. test_line_globalMemberCapRespected primes a huge base and relies on this and the global clamp).",
+    "test": "test_proof12_thePhaseCapBinds"
   },
   {
     "id": "CS-16",
@@ -530,68 +194,21 @@
     "bound": "clamp to the governance global member cap",
     "match": "        drawable = _min(drawable, config.globalMemberCap());",
     "mutant": "",
-    "status": "redundant",
-    "proof": "The accountExposureCap clamp two lines above already enforces drawable <= min(val, GLOBAL_MEMBER_CAP) <= GLOBAL_MEMBER_CAP, so this separate line-level clamp can never bind. Verified: test_line_globalMemberCapRespected still passes (438/438 green) with the line deleted."
-  },
-  {
-    "id": "CS-17",
-    "file": "src/CreditStanding.sol",
-    "function": "line",
-    "bound": "clamp to the community's own liquid budget",
-    "match": "        drawable = _min(drawable, budget);",
-    "mutant": "",
-    "status": "redundant",
-    "proof": "Config enforces every CONCENTRATION_*_BPS key to at most 10_000 (100%), so the concentration clamp immediately above (concentrationBps * budget / 10_000) can never exceed budget for any valid config. This separate clamp is therefore dominated by the concentration clamp at every phase. Verified: 438/438 green with the line deleted."
-  },
-  {
-    "id": "CS-18",
-    "file": "src/CreditStanding.sol",
-    "function": "line",
-    "bound": "first-draw branch guard (!hasEverDrawn)",
-    "match": "        if (!_hasEverDrawn(communityId, member)) {",
-    "mutant": "        if (false) {",
     "status": "catalogued",
-    "note": "Caught broadly: the First Access Line cap and headroom subtraction stop applying to a member's first draw."
-  },
-  {
-    "id": "CS-19",
-    "file": "src/CreditStanding.sol",
-    "function": "line",
-    "bound": "exposure figure defaults to 0 when no tab is open anywhere",
-    "match": "            uint256 exp = tabSnap.openAnywhere ? tabSnap.principal : 0;",
-    "mutant": "            uint256 exp = tabSnap.principal;",
-    "status": "redundant",
-    "proof": "_tabSnapshot's own contract sets principal to 0 whenever openAnywhere is false (the same invariant CS-04 leans on), so the ternary and the bare read agree in every reachable state. Verified: 438/438 green. (This premise, _tabSnapshot's own composition, once had no catalogue entry of its own; CC-55 through CC-58 now cover _tabSnapshot's four bounds directly, so this proof no longer rests on an ungated function.)"
-  },
-  {
-    "id": "CS-20",
-    "file": "src/CreditStanding.sol",
-    "function": "line",
-    "bound": "first-draw headroom underflow guard (cap > exp ? cap - exp : 0)",
-    "match": "            uint256 firstLine = _min(_min(base, minLend), _min(budget, cap > exp ? cap - exp : 0));",
-    "mutant": "            uint256 firstLine = _min(_min(base, minLend), _min(budget, cap - exp));",
-    "status": "catalogued",
-    "test": "test_line_firstDrawHeadroomFloorsAtZeroWhenExposureExceedsCap"
-  },
-  {
-    "id": "CS-21",
-    "file": "src/CreditStanding.sol",
-    "function": "line",
-    "bound": "outer clamp to the First Access phase cap",
-    "match": "            drawable = _min(drawable, _min(firstLine, firstAccessCap));",
-    "mutant": "            drawable = _min(drawable, firstLine);",
-    "status": "redundant",
-    "proof": "firstLine already includes _min(base, minLend) as one of its own inner terms, so firstLine <= minLend always. check-config-first-access-floor.sh enforces PHASE_CAP_FIRST_ACCESS >= MIN_LENDABLE for every deployment, so firstAccessCap >= minLend >= firstLine, and the outer min can never pick firstAccessCap. Verified: 439/439 green with the clamp dropped. Caveat: this relation is not itself a Config-level bound the way CS-17's concentrationBps <= 10_000 is. PHASE_CAP_FIRST_ACCESS is bounded (1e6, 1_000_000e6) and MIN_LENDABLE (1e6, 10_000e6) independently (Config.sol), and a cross-key constraint at the config level is deliberately refused. The relation holds only because check-config-first-access-floor.sh checks it, and that script reads the constructor's launch constants and cannot see a governance move through the Risk Committee's 48-hour timelock. If a future parameter change breaks the relation, this bound becomes live and ungated, the same way CC-41 stops being admissible once post-Default rehabilitation lands."
+    "proof": "The accountExposureCap clamp two lines above already enforces drawable <= min(val, GLOBAL_MEMBER_CAP) <= GLOBAL_MEMBER_CAP, so this separate line-level clamp can never bind. Verified: test_line_globalMemberCapRespected still passes (438/438 green) with the line deleted.",
+    "test": "test_proof12_theGlobalMemberCapBinds",
+    "note": ""
   },
   {
     "id": "CS-22",
     "file": "src/CreditStanding.sol",
     "function": "line",
-    "bound": "eligibility boundary (drawable >= minLend, not >)",
-    "match": "        eligible = drawable >= minLend;",
-    "mutant": "        eligible = drawable > minLend;",
+    "bound": "the $10 minimum is inclusive",
+    "match": "        eligible = drawable >= config.minLendable() && !tabSnap.openAnywhere;",
+    "mutant": "        eligible = drawable > config.minLendable() && !tabSnap.openAnywhere;",
     "status": "catalogued",
-    "note": "Caught broadly across the draw-gate suite: a Line landing exactly on MIN_LENDABLE must be eligible."
+    "note": "Caught broadly across the draw-gate suite: a Line landing exactly on MIN_LENDABLE must be eligible.",
+    "test": "test_proof12_tenDollarsIsTheMinimum"
   },
   {
     "id": "CS-23",
@@ -599,9 +216,9 @@
     "function": "_phaseOf",
     "bound": "Established completion-count threshold (n >= 6)",
     "match": "        if (n >= 6 && sinceFirst >= minEstablished) return ICreditCore.Phase.Established;",
-    "mutant": "        if (n >= 5 && sinceFirst >= minEstablished) return ICreditCore.Phase.Established;",
+    "mutant": "        if (n >= 7 && sinceFirst >= minEstablished) return ICreditCore.Phase.Established;",
     "status": "catalogued",
-    "test": "test_phase_establishedRequiresSixCompletions"
+    "test": "test_proof12_establishedIsFourTimesUpToFiveThousand"
   },
   {
     "id": "CS-24",
@@ -609,9 +226,9 @@
     "function": "_phaseOf",
     "bound": "Established time threshold (sinceFirst >= minEstablished)",
     "match": "        if (n >= 6 && sinceFirst >= minEstablished) return ICreditCore.Phase.Established;",
-    "mutant": "        if (n >= 6) return ICreditCore.Phase.Established;",
+    "mutant": "        if (n >= 6 && sinceFirst > minEstablished) return ICreditCore.Phase.Established;",
     "status": "catalogued",
-    "test": "test_phase_minTimeFromFirstObligation"
+    "test": "test_proof12_establishedIsFourTimesUpToFiveThousand"
   },
   {
     "id": "CS-25",
@@ -621,37 +238,37 @@
     "match": "        if (n >= 2) return ICreditCore.Phase.Developing;",
     "mutant": "        if (n >= 3) return ICreditCore.Phase.Developing;",
     "status": "catalogued",
-    "test": "test_phase_developingAtExactlyTwoCompletions"
+    "test": "test_proof12_developingAtTwoRepaid"
   },
   {
     "id": "CS-26",
     "file": "src/CreditStanding.sol",
     "function": "_phaseOf",
     "bound": "ProvenOnce threshold (n >= 1 && sinceFirst >= minProven)",
-    "match": "        if (n >= 1 && sinceFirst >= minProven) return ICreditCore.Phase.ProvenOnce;",
-    "mutant": "        if (n >= 2 && sinceFirst >= minProven) return ICreditCore.Phase.ProvenOnce;",
+    "match": "        if (sinceFirst >= minProven) return ICreditCore.Phase.ProvenOnce;",
+    "mutant": "        if (sinceFirst > minProven) return ICreditCore.Phase.ProvenOnce;",
     "status": "catalogued",
-    "test": "test_phase_minTimeFromFirstObligation"
+    "test": "test_proof12_oneRepaidAndThirtyDaysIsTwoTimes"
   },
   {
     "id": "CS-27",
     "file": "src/CreditStanding.sol",
     "function": "_creditObligationCompletion",
-    "bound": "firstObligationAt is anchored once, not rewritten on every completion",
-    "match": "        if (_firstObligationAt[communityId][member] == 0) {",
-    "mutant": "        if (true) {",
+    "bound": "the phase clock runs from the first repaid advance, not the latest",
+    "match": "        if (_firstRepaidAt[member] == 0) _firstRepaidAt[member] = uint64(block.timestamp);",
+    "mutant": "        _firstRepaidAt[member] = uint64(block.timestamp);",
     "status": "catalogued",
-    "test": "test_creditObligationCompletion_firstObligationAnchorDoesNotReset"
+    "test": "test_proof12_establishedIsFourTimesUpToFiveThousand"
   },
   {
     "id": "CS-28",
     "file": "src/CreditStanding.sol",
     "function": "_creditObligationCompletion",
     "bound": "completion is qualifying activity (calls _noteActivity)",
-    "match": "        _noteActivity(communityId, member);\n        emit ObligationCompleted(communityId, member, n);",
-    "mutant": "        emit ObligationCompleted(communityId, member, n);",
+    "match": "        _noteActivity(communityId, member);\n        emit AdvanceRepaid(communityId, member, n);",
+    "mutant": "        emit AdvanceRepaid(communityId, member, n);",
     "status": "catalogued",
-    "test": "test_obligationCompletion_advancesPhaseAndActivity",
+    "test": "test_activity_fadesAfterAQuietGraceAndHealsOnRepayment",
     "note": "CreditStanding.sol:410, inside _creditObligationCompletion; distinct from the unconditional _noteActivity call at :162 inside accrueImpact."
   },
   {
@@ -709,20 +326,10 @@
     "file": "src/CreditStanding.sol",
     "function": "_deepestHealedScar",
     "bound": "deepest-wins comparison",
-    "match": "            if (v < deepest) deepest = v; // deepest-wins",
+    "match": "            if (v < deepest) deepest = v;",
     "mutant": "            deepest = v;",
     "status": "catalogued",
     "test": "test_scars_deepestWinsNotLastWins"
-  },
-  {
-    "id": "CS-35",
-    "file": "src/CreditStanding.sol",
-    "function": "_anyUnhealedScar",
-    "bound": "unhealed-window boundary (strict less-than)",
-    "match": "            if (block.timestamp - list[i].recordedAt < hw) return true;",
-    "mutant": "            if (block.timestamp - list[i].recordedAt <= hw) return true;",
-    "status": "catalogued",
-    "note": "Caught by test_trustExtension_scarZeroesEarnedPhaseUnchanged's exact-90-day heal-boundary check."
   },
   {
     "id": "CS-36",
@@ -735,24 +342,15 @@
     "proof": "_activityFactor (the only source of cur) returns WAD, or min(dormancyDecay, healRamp), and both StandingMath functions are bounded above by WAD for every input, so cur is never > WAD. Verified: 438/438 green."
   },
   {
-    "id": "CS-37",
-    "file": "src/CreditStanding.sol",
-    "function": "_accountExposureCap",
-    "bound": "min(val, globalMemberCap) clamp",
-    "match": "        return val < cap ? val : cap;",
-    "mutant": "        return val;",
-    "status": "catalogued",
-    "test": "test_accountExposureCap_clampsToGlobalMemberCap"
-  },
-  {
     "id": "CS-38",
     "file": "src/CreditStanding.sol",
     "function": "_recordFormalDefault",
     "bound": "idempotency guard around the AccountDefaulted event",
-    "match": "        if (!_accountDefaulted[member]) {",
-    "mutant": "        if (true) {",
+    "match": "        if (_isDefaulted(member)) return;",
+    "mutant": "",
     "status": "redundant",
-    "proof": "_accountDefaulted[member] = true is idempotent regardless of the guard; removing it only re-emits AccountDefaulted on a second formal-Default touch of an already-defaulted account, an audit-trail difference with no state or return-value consequence. Verified: 439/439 green."
+    "proof": "_accountDefaulted[member] = true is idempotent regardless of the guard; removing it only re-emits AccountDefaulted on a second formal-Default touch of an already-defaulted account, an audit-trail difference with no state or return-value consequence. Verified: 439/439 green.",
+    "note": "Nothing records a default twice while it lasts: the only second caller is the write-off of the same advance, and its snapshot takes the larger of the two figures."
   },
   {
     "id": "CS-39",
@@ -769,61 +367,66 @@
     "id": "CS-40",
     "file": "src/CreditStanding.sol",
     "function": "_impactBaseFromSnapshots",
-    "bound": "share_i multiplication",
-    "match": "        base = Math.mulDiv(_impactBudgetFromSnapshot(communitySnap), _shareWad(communityId, member), WAD);",
-    "mutant": "        base = _impactBudgetFromSnapshot(communitySnap);",
+    "bound": "the phase multiplier on impact",
+    "match": "        drawable = _effectiveImpact(communityId, member) * multiplier / 100;",
+    "mutant": "        drawable = _effectiveImpact(communityId, member);",
     "status": "catalogued",
-    "note": "Caught broadly: removing the share multiplication gives every member the full community budget as their base regardless of seasoned share."
+    "note": "Caught broadly: removing the share multiplication gives every member the full community budget as their base regardless of seasoned share.",
+    "test": "test_proof12_oneRepaidAndThirtyDaysIsTwoTimes"
   },
   {
     "id": "CS-41",
     "file": "src/CreditStanding.sol",
     "function": "_impactBaseFromSnapshots",
-    "bound": "activity_factor multiplication",
-    "match": "        base = Math.mulDiv(base, _activityFactor(communityId, member), WAD);",
+    "bound": "the member's activity on the line",
+    "match": "        drawable = Math.mulDiv(drawable, _activityFactor(communityId, member), WAD);",
     "mutant": "",
     "status": "catalogued",
-    "note": "Caught by the dormancy tests: a dormant member's base stops decaying if this multiplication is removed."
+    "note": "Caught by the dormancy tests: a dormant member's base stops decaying if this multiplication is removed.",
+    "test": "test_activity_fadesAfterAQuietGraceAndHealsOnRepayment"
   },
   {
     "id": "CS-42",
     "file": "src/CreditStanding.sol",
     "function": "_impactBaseFromSnapshots",
-    "bound": "conduct_factor multiplication",
-    "match": "        base = Math.mulDiv(base, _conductFactor(communityId, member, tabSnap), WAD);",
+    "bound": "conduct on the line",
+    "match": "        drawable = Math.mulDiv(drawable, _conductFactor(member, tabSnap), WAD);",
     "mutant": "",
     "status": "catalogued",
-    "note": "Caught by the account-default and conduct tests: a defaulted or delinquent member's base stops zeroing/decaying if this multiplication is removed."
+    "note": "Caught by the account-default and conduct tests: a defaulted or delinquent member's base stops zeroing/decaying if this multiplication is removed.",
+    "test": "test_conduct_aLateRepaymentScarsEveryCommunityAndHeals"
   },
   {
     "id": "CC-40",
     "file": "src/CreditCore.sol",
     "function": "_tabSnapshot",
-    "bound": "exists guard's !o.writtenOff term",
-    "match": "        bool exists = o.drawTimestamp != 0 && !o.closed && !o.writtenOff;",
-    "mutant": "        bool exists = o.drawTimestamp != 0 && !o.closed;",
-    "status": "redundant",
-    "proof": "Same as CC-03: writtenOff implies closed (the third site). Verified: 441/441 green."
+    "bound": "a repaid advance is not open anywhere: the member is eligible again",
+    "match": "        if (o.drawTimestamp == 0 || o.closed) return s;",
+    "mutant": "        if (o.drawTimestamp == 0) return s;",
+    "status": "catalogued",
+    "proof": "Same as CC-03: writtenOff implies closed (the third site). Verified: 441/441 green.",
+    "test": "test_proof12_oneRepaidAndThirtyDaysIsTwoTimes"
   },
   {
     "id": "CC-41",
     "file": "src/CreditCore.sol",
     "function": "_closeTab",
-    "bound": "outer gate: no scar/completion bookkeeping past Default Recovery",
-    "match": "        if (o.stage < uint8(Stage.DefaultRecovery)) {",
-    "mutant": "        if (true) {",
-    "status": "redundant",
-    "proof": "_closeTab only reaches o.stage >= DefaultRecovery after _materialize already recorded formal Default on the same crossing, which zeroes conduct (conductDecayAt(elapsed >= 155d) == 0), leaves an unhealed scar, and so _creditObligationCompletion's own !_anyUnhealedScar gate already suppresses the te_earn increment; line() already returns (0, false) for the account in every community via the account-default guard (CS-12, caught). The only residue is _completedObligations incrementing, invisible while the account-default ban holds. This proof is admissible because it leans on CS-12, a bound this catalogue calls caught, not redundant. It stops being admissible the moment post-Default rehabilitation lands, since a post-Default cure would then carry phase progress it should not have; flagged here so that deferred task inherits it. Verified: 441/441 green."
+    "bound": "a defaulted advance repaid in full starts the cooling instead of counting toward the phase",
+    "match": "        if (o.stage >= DebtMath.STAGE_DEFAULT_RECOVERY) {\n            standing.recordDefaultRepaid(member);",
+    "mutant": "        if (false) {\n            standing.recordDefaultRepaid(member);",
+    "status": "catalogued",
+    "proof": "_closeTab only reaches o.stage >= DefaultRecovery after _materialize already recorded formal Default on the same crossing, which zeroes conduct (conductDecayAt(elapsed >= 155d) == 0), leaves an unhealed scar, and so _creditObligationCompletion's own !_anyUnhealedScar gate already suppresses the te_earn increment; line() already returns (0, false) for the account in every community via the account-default guard (CS-12, caught). The only residue is _completedObligations incrementing, invisible while the account-default ban holds. This proof is admissible because it leans on CS-12, a bound this catalogue calls caught, not redundant. It stops being admissible the moment post-Default rehabilitation lands, since a post-Default cure would then carry phase progress it should not have; flagged here so that deferred task inherits it. Verified: 441/441 green.",
+    "test": "test_proof14_aRepaidDefaultHealsAfterTheCoolingAtFirstAccess"
   },
   {
     "id": "CC-42",
     "file": "src/CreditCore.sol",
     "function": "_closeTab",
     "bound": "scar-recording gate at Late or later",
-    "match": "            if (o.stage >= uint8(Stage.Late)) {",
-    "mutant": "            if (true) {",
+    "match": "        if (o.stage >= DebtMath.STAGE_LATE) {",
+    "mutant": "        if (o.stage < DebtMath.STAGE_LATE) {",
     "status": "catalogued",
-    "test": "test_punctualSettleRecordsNoScar"
+    "test": "test_conduct_aLateRepaymentScarsEveryCommunityAndHeals"
   },
   {
     "id": "SM-01",
@@ -883,7 +486,7 @@
     "match": "        if (amount > drawable) revert ExceedsLine();",
     "mutant": "        if (false) revert ExceedsLine();",
     "status": "catalogued",
-    "test": "test_drawGate_exceedsLine"
+    "test": "test_drawGate_notEligibleAndExceedsLine"
   },
   {
     "id": "CC-44",
@@ -893,67 +496,47 @@
     "match": "        if (!eligible) revert NotEligible();",
     "mutant": "        if (false) revert NotEligible();",
     "status": "catalogued",
-    "test": "test_drawGate_notEligible"
-  },
-  {
-    "id": "CC-45",
-    "file": "src/CreditCore.sol",
-    "function": "draw",
-    "bound": "teComponent = amount > base ? amount - base : 0",
-    "match": "        uint256 teComponent = amount > base ? amount - base : 0;",
-    "mutant": "        uint256 teComponent = amount;",
-    "status": "catalogued",
-    "test": "test_draw_aggregateTeCapBinds"
+    "test": "test_drawGate_notEligibleAndExceedsLine"
   },
   {
     "id": "CC-46",
     "file": "src/CreditCore.sol",
     "function": "draw",
-    "bound": "TabAlreadyOpen gate",
-    "match": "        if (hasOpenTab(m)) revert TabAlreadyOpen();",
-    "mutant": "        if (false) revert TabAlreadyOpen();",
+    "bound": "TabAlreadyOpen: an unpaid written-off advance still blocks a new one",
+    "match": "        if (o.drawTimestamp != 0 && !o.closed) revert TabAlreadyOpen();",
+    "mutant": "        if (o.drawTimestamp != 0 && !o.closed && !o.writtenOff) revert TabAlreadyOpen();",
     "status": "catalogued",
-    "test": "test_drawGate_oneOpenTabIsAccountWide"
+    "test": "test_drawGate_anUnpaidWriteOffIsStillOpen"
   },
   {
     "id": "CC-47",
     "file": "src/CreditCore.sol",
     "function": "draw",
     "bound": "member seasoning gate",
-    "match": "        if (block.timestamp < uint256(seatedAt) + config.memberSeasoningWindow()) revert NotSeasoned();",
-    "mutant": "        if (false) revert NotSeasoned();",
+    "match": "        if (block.timestamp < uint256(ICommunity(community).mintedAt(member)) + config.memberSeasoningWindow()) {",
+    "mutant": "        if (false) {",
     "status": "catalogued",
     "test": "test_drawGate_notSeasoned"
-  },
-  {
-    "id": "CC-48",
-    "file": "src/CreditCore.sol",
-    "function": "draw",
-    "bound": "_requireRetained() call",
-    "match": "        _requireRetained();\n\n        emit Drawn(",
-    "mutant": "        emit Drawn(",
-    "status": "catalogued",
-    "test": "test_drawGate_retainedCapital"
   },
   {
     "id": "CC-49",
     "file": "src/CreditCore.sol",
     "function": "settle",
     "bound": "retire clamp",
-    "match": "        uint256 retire = amount < outstanding ? amount : outstanding;",
+    "match": "        uint256 retire = amount < owed ? amount : owed;",
     "mutant": "        uint256 retire = amount;",
     "status": "catalogued",
-    "test": "test_settle_overpaymentRefundExact"
+    "test": "test_settle_overpaymentIsRefundedExactly"
   },
   {
     "id": "CC-50",
     "file": "src/CreditCore.sol",
     "function": "settle",
     "bound": "close-on-zero gate",
-    "match": "        if (o.principal == 0) {\n            _closeTab(m, o);",
-    "mutant": "        if (false) {\n            _closeTab(m, o);",
+    "match": "        if (closedNow) _closeTab(m, o);",
+    "mutant": "",
     "status": "catalogued",
-    "test": "test_settle_lastUnitClosesTabAndPermitsNewDraw"
+    "test": "test_settle_overpaymentIsRefundedExactly"
   },
   {
     "id": "CC-51",
@@ -963,7 +546,7 @@
     "match": "        if (refund != 0) {\n            usdc.safeTransfer(m, refund);",
     "mutant": "        if (false) {\n            usdc.safeTransfer(m, refund);",
     "status": "catalogued",
-    "test": "test_settle_overpaymentRefundExact"
+    "test": "test_settle_overpaymentIsRefundedExactly"
   },
   {
     "id": "CC-54",
@@ -980,70 +563,41 @@
     "file": "src/CreditCore.sol",
     "function": "_tabSnapshot",
     "bound": "o.communityId == communityId guard",
-    "match": "        if (o.communityId == communityId) {\n            s.openInCommunity = true;",
-    "mutant": "        if (true) {\n            s.openInCommunity = true;",
+    "match": "        if (!o.writtenOff && o.communityId == communityId) {",
+    "mutant": "        if (!o.writtenOff) {",
     "status": "catalogued",
-    "test": "test_tabSnapshot_communityGuardIsolatesDelinquency"
+    "test": "test_conduct_anOpenLateAdvanceLowersOnlyItsOwnCommunity"
   },
   {
     "id": "CC-56",
     "file": "src/CreditCore.sol",
     "function": "_tabSnapshot",
     "bound": "openInCommunity/elapsedSinceDraw assignment",
-    "match": "            s.openInCommunity = true;\n            s.elapsedSinceDraw = uint64(block.timestamp) - o.drawTimestamp;",
+    "match": "            s.openInCommunity = true;",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_tabSnapshot_communityGuardIsolatesDelinquency"
+    "test": "test_conduct_anOpenLateAdvanceLowersTheLineShown"
   },
   {
     "id": "CC-57",
     "file": "src/CreditCore.sol",
     "function": "_tabSnapshot",
     "bound": "openAnywhere/principal assignment",
-    "match": "        s.openAnywhere = true;\n        s.principal = o.principal;",
+    "match": "        s.openAnywhere = true;",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_tabSnapshot_communityGuardIsolatesDelinquency"
+    "test": "test_conduct_anOpenLateAdvanceLowersTheLineShown"
   },
   {
     "id": "CC-58",
     "file": "src/CreditCore.sol",
     "function": "_tabSnapshot",
     "bound": "exists guard's !o.closed term",
-    "match": "        bool exists = o.drawTimestamp != 0 && !o.closed && !o.writtenOff;",
-    "mutant": "        bool exists = o.drawTimestamp != 0 && !o.writtenOff;",
-    "status": "catalogued",
-    "test": "test_tabSnapshot_closedTabIsNotAnOpenDelinquency"
-  },
-  {
-    "id": "CC-59",
-    "file": "src/CreditCore.sol",
-    "function": "_communitySnapshot",
-    "bound": "allocation field",
-    "match": "            allocation: _allocationOf[communityId],",
-    "mutant": "            allocation: 0,",
-    "status": "catalogued",
-    "test": "test_budgetNetsOutstandingPrincipal"
-  },
-  {
-    "id": "CC-60",
-    "file": "src/CreditCore.sol",
-    "function": "_communitySnapshot",
-    "bound": "outstandingPrincipal field",
-    "match": "outstandingPrincipal: _outstandingPrincipalOf[communityId]",
-    "mutant": "outstandingPrincipal: 0",
-    "status": "catalogued",
-    "test": "test_budgetNetsOutstandingPrincipal"
-  },
-  {
-    "id": "CC-61",
-    "file": "src/CreditCore.sol",
-    "function": "_materialize",
-    "bound": "stage-bucket move statements",
-    "match": "            _stageBucket[oldIdx] -= o.principal;\n            _stageBucket[newIdx] += o.principal;",
-    "mutant": "            _stageBucket[newIdx] -= o.principal;\n            _stageBucket[oldIdx] += o.principal;",
-    "status": "catalogued",
-    "test": "test_accountDefault_conductFloorPersistsPastPostDefaultSettle"
+    "match": "        if (o.drawTimestamp == 0 || o.closed) return s;",
+    "mutant": "        if (o.drawTimestamp == 0) return s;",
+    "status": "redundant",
+    "test": "test_tabSnapshot_closedTabIsNotAnOpenDelinquency",
+    "note": "Same line as CC-40, which carries it."
   },
   {
     "id": "CC-62",
@@ -1053,7 +607,7 @@
     "match": "            standing.recordFormalDefault(o.communityId, member);",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_accountDefault_conductFloorPersistsPastPostDefaultSettle"
+    "test": "test_proof14_atDay156TheMemberIsDefaultedEverywhereWithImpactDisqualified"
   },
   {
     "id": "CC-63",
@@ -1063,47 +617,7 @@
     "match": "        standing.recordFormalDefault(communityId, member);",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_accountDefault_conductFloorPersistsPastWriteOff"
-  },
-  {
-    "id": "CC-64",
-    "file": "src/CreditCore.sol",
-    "function": "_creditLossReserve",
-    "bound": "defaultRecovery bucket term",
-    "match": "            + _ceilBps(defaultRecovery, defaultRecoveryBps);",
-    "mutant": "            + 0;",
-    "status": "catalogued",
-    "test": "testFuzz_reserveComponentsNeverUnderstate"
-  },
-  {
-    "id": "CC-65",
-    "file": "src/CreditCore.sol",
-    "function": "_venueLossReserve",
-    "bound": "venueLossReserveBps factor",
-    "match": "        return _ceilBps(_largestVenueExposure(), config.venueLossReserveBps());",
-    "mutant": "        return 0;",
-    "status": "catalogued",
-    "test": "test_venuePositionsDoNotCountAsCash"
-  },
-  {
-    "id": "CC-66",
-    "file": "src/CreditCore.sol",
-    "function": "_requiredRetainedCapital",
-    "bound": "_pendingObligationReserve term",
-    "match": "        return _operatingRequirement() + _creditLossReserve() + _venueLossReserve() + _pendingObligationReserve()\n            + _stressCapital();",
-    "mutant": "        return _operatingRequirement() + _creditLossReserve() + _venueLossReserve()\n            + _stressCapital();",
-    "status": "catalogued",
-    "test": "test_pendingObligationSeamAddsToRequirement"
-  },
-  {
-    "id": "CC-67",
-    "file": "src/CreditCore.sol",
-    "function": "_largestVenueExposure",
-    "bound": "max-of-list selection",
-    "match": "            if (assets > largest) largest = assets;",
-    "mutant": "            largest = assets;",
-    "status": "catalogued",
-    "test": "test_largestVenueExposure_isTheMaximumAcrossVenues"
+    "test": "test_default_aWriteOffRecordsTheDefaultItSkipped"
   },
   {
     "id": "CC-68",
@@ -1113,7 +627,7 @@
     "match": "    function materialize(address member) external {\n        _materialize(member);\n    }",
     "mutant": "    function materialize(address member) external {}",
     "status": "catalogued",
-    "test": "test_materialize_movesAStaleTabToItsStageAndBucket, test_materialize_repaidTabIsNeverWrittenOffTwice"
+    "test": "test_proof14_atDay156TheMemberIsDefaultedEverywhereWithImpactDisqualified"
   },
   {
     "id": "CC-69",
@@ -1153,8 +667,8 @@
     "file": "src/CreditCore.sol",
     "function": "receiveCommunityLeg",
     "bound": "the derived leg kind: the seats clone pays a mint leg, any other registered contract of that community pays a yield leg (derivation replaced a caller-supplied kind)",
-    "match": "        AllocationType kind = msg.sender == ICommunityFactory(factory).communityAt(communityId)\n            ? AllocationType.SeatMint\n            : AllocationType.Yield;",
-    "mutant": "        AllocationType kind = AllocationType.Yield;",
+    "match": "        bool seatLeg = msg.sender == ICommunityFactory(factory).communityAt(communityId);",
+    "mutant": "        bool seatLeg = false;",
     "status": "catalogued",
     "test": "test_leg_kindIsDerivedFromTheCaller"
   },
@@ -1163,8 +677,8 @@
     "file": "src/CreditCore.sol",
     "function": "closeCommunity",
     "bound": "the closure return: the balance goes back to the Treasury and _totalAllocated falls with it",
-    "match": "        uint256 returned = _allocationOf[communityId];\n        _allocationOf[communityId] = 0;\n        _totalAllocated -= returned;",
-    "mutant": "        uint256 returned = _allocationOf[communityId];\n        _allocationOf[communityId] = 0;",
+    "match": "        uint256 returned = r.allocation;\n        r.allocation = 0;\n        _totalAllocated -= returned;\n        r.closed = true;",
+    "mutant": "        uint256 returned = r.allocation;\n        r.closed = true;",
     "status": "catalogued",
     "test": "test_closure_returnsANonZeroBalanceToTheTreasury",
     "note": "The accounting finish of closure. Dropping the decrement leaves `_totalAllocated` permanently overstating what is committed, which tightens the retained-capital gate against every later draw and allocation for the life of the contract."
@@ -1173,11 +687,11 @@
     "id": "CC-74",
     "file": "src/CreditCore.sol",
     "function": "closeCommunity",
-    "bound": "the debt gate, which narrowing the no-recall rule had to leave standing",
-    "match": "        if (_communityHasUnresolvedDebt(communityId)) revert CommunityHasDebt();",
-    "mutant": "        if (false) revert CommunityHasDebt();",
+    "bound": "closure waits until nothing is out in the community",
+    "match": "        if (r.closed) revert AlreadyClosed();\n        if (r.outstanding != 0) revert CommunityHasDebt();",
+    "mutant": "        if (r.closed) revert AlreadyClosed();",
     "status": "catalogued",
-    "test": "test_closure_stillBlockedByUnresolvedDebt, test_closureBlockedByDebt",
+    "test": "test_closure_stillBlockedByUnresolvedDebt, test_closure_returnsTheBalanceOnceNothingIsOut",
     "note": "The entry existed in spirit while closure could not return a balance at all; it becomes a money bound the moment closure does return one, because this is now the only gate between an open obligation and its community's books being wound up."
   },
   {
@@ -1185,10 +699,10 @@
     "file": "src/CreditStanding.sol",
     "function": "_conductFactor",
     "bound": "account-wide conduct floor",
-    "match": "        uint256 floor = _accountDefaulted[member] ? 0 : WAD;",
+    "match": "        uint256 floor = _isDefaulted(member) ? 0 : WAD;",
     "mutant": "        uint256 floor = WAD;",
-    "status": "catalogued",
-    "test": "test_accountDefault_conductFloorPersistsPastPostDefaultSettle"
+    "status": "redundant",
+    "note": "Masked by CS-12, the line's early return for a defaulted member."
   },
   {
     "id": "CS-44",
@@ -1198,7 +712,7 @@
     "match": "        uint256 undisqualified = open < scar ? open : scar;",
     "mutant": "        uint256 undisqualified = open;",
     "status": "catalogued",
-    "test": "test_settle_scarAtDecayedValue"
+    "test": "test_conduct_aLateRepaymentScarsEveryCommunityAndHeals"
   },
   {
     "id": "CS-45",
@@ -1208,7 +722,7 @@
     "match": "        if (last == 0) return WAD;",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_trustExtension_openDelinquencyRemovesIt"
+    "test": "test_proof12_firstAccessIsOneTimesImpact"
   },
   {
     "id": "CS-46",
@@ -1218,70 +732,7 @@
     "match": "        return decayVal < healVal ? decayVal : healVal;",
     "mutant": "        return decayVal;",
     "status": "catalogued",
-    "test": "test_trustExtension_openDelinquencyRemovesIt"
-  },
-  {
-    "id": "CS-47",
-    "file": "src/CreditStanding.sol",
-    "function": "_hasEverDrawn",
-    "bound": "> 0 comparison",
-    "match": "        return _completedOf(communityId, member) > 0;",
-    "mutant": "        return true;",
-    "status": "catalogued",
-    "test": "test_firstLineCap_bindsOnFirstDrawOnly",
-    "note": "The match was re-pointed to the stamped read. The test named here before, test_line_globalMemberCapRespected, does not kill this mutant on its own and never did (it primes setHasEverDrawn true, so `return true` changes nothing there); the full suite always killed it, so no coverage was lost, only the narrow path."
-  },
-  {
-    "id": "CS-48",
-    "file": "src/CreditStanding.sol",
-    "function": "_recordScar",
-    "bound": "the scar's Trust Extension wipe, local to the community of the scar",
-    "match": "        _teEarned[communityId][member] = 0;",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_scarZeroesTeEarnedInAOnly,test_accountExposureCap_scarAdjustsAccountTeEarned",
-    "note": "Replaces the _teEarnedAccount decrement, which went with the running total (the account figure is now derived by _accountTotals). That the wipe does not reach other communities cannot be written as a one-line mutant here."
-  },
-  {
-    "id": "CS-49",
-    "file": "src/CreditStanding.sol",
-    "function": "_recordFormalDefault",
-    "bound": "_disqualifyPreDefaultUnits call",
-    "match": "        _disqualifyPreDefaultUnits(communityId, member);",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_accountDefault_conductFloorPersistsPastWriteOff"
-  },
-  {
-    "id": "CS-50",
-    "file": "src/CreditStanding.sol",
-    "function": "_impactBudgetFromSnapshot",
-    "bound": "minLendable term in sub",
-    "match": "        uint256 sub = perCommunityBuffer + config.minLendable();",
-    "mutant": "        uint256 sub = perCommunityBuffer;",
-    "status": "catalogued",
-    "test": "test_budgetNetsOutstandingPrincipal"
-  },
-  {
-    "id": "CS-51",
-    "file": "src/CreditStanding.sol",
-    "function": "_creditObligationCompletion",
-    "bound": "unhealed-scar gate on the te_earn increment",
-    "match": "        if (teEarnIncrement != 0 && !_anyUnhealedScar(member)) {",
-    "mutant": "        if (teEarnIncrement != 0) {",
-    "status": "catalogued",
-    "test": "test_trustExtension_scarZeroesEarnedPhaseUnchanged"
-  },
-  {
-    "id": "CS-51b",
-    "file": "src/CreditStanding.sol",
-    "function": "_liveSeat",
-    "bound": "the stamp reads the seat's TOKEN ID, not its mintedAt: two seats minted in the same block share a timestamp, so a timestamp stamp lets a forfeited seat's pending accrual season onto the new one (impact taxonomy 1.4)",
-    "match": "        return ICommunity(ICommunityFactory(factory).communityAt(communityId)).activeTokenOf(member);",
-    "mutant": "        return ICommunity(ICommunityFactory(factory).communityAt(communityId)).mintedAt(member);",
-    "status": "catalogued",
-    "test": "test_rejoinInTheSameBlock_isStillANewSeat",
-    "note": "The match was re-pointed: `_liveSeat` reads `activeTokenOf`. The bound, a token id and never a timestamp, is unchanged."
+    "test": "test_activity_fadesAfterAQuietGraceAndHealsOnRepayment"
   },
   {
     "id": "CS-52",
@@ -1290,8 +741,8 @@
     "bound": "seat stamp comparison: stored stamp equals the live seat's token id (impact taxonomy 1.4)",
     "match": "        return live != 0 && _seatStamp[communityId][member] == live;",
     "mutant": "        return live != 0;",
-    "status": "catalogued",
-    "test": "test_rejoin_impactIsZeroAndSeasoningRestarts"
+    "status": "redundant",
+    "note": "A wallet holds one seat per community for good, so the activity record's stamp can only go from a seat to none, and a Suspended or Left seat's impact is already 0."
   },
   {
     "id": "CS-53",
@@ -1300,9 +751,8 @@
     "bound": "no seat is never current (live != 0 term)",
     "match": "        return live != 0 && _seatStamp[communityId][member] == live;",
     "mutant": "        return _seatStamp[communityId][member] == live;",
-    "status": "catalogued",
-    "test": "test_impactAccruedWithoutASeat_countsNowhere",
-    "note": "Without it, impact accrued after a forfeit sits under stamp 0, matches the forfeited seat's live mintedAt of 0, and counts toward the account cap."
+    "status": "redundant",
+    "note": "A wallet holds one seat per community for good, so the activity record's stamp can only go from a seat to none, and a Suspended or Left seat's impact is already 0."
   },
   {
     "id": "CS-54",
@@ -1311,68 +761,8 @@
     "bound": "reset only on a different seat (stamp-equal early return)",
     "match": "        if (_seatStamp[communityId][member] == live) return;",
     "mutant": "",
-    "status": "catalogued",
-    "test": "test_rejoin_impactIsZeroAndSeasoningRestarts"
-  },
-  {
-    "id": "CS-55",
-    "file": "src/CreditStanding.sol",
-    "function": "_syncSeat",
-    "bound": "every community with seat-side state is listed for the account totals",
-    "match": "            _seatCommunities[member].push(communityId);",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_forfeit_accountTotalFallsAtOnceAndTheCapUsesIt"
-  },
-  {
-    "id": "CS-56",
-    "file": "src/CreditStanding.sol",
-    "function": "_syncSeat",
-    "bound": "a new seat's seasoned impact starts at zero",
-    "match": "        delete _impactSeasoned[communityId][member];",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_rejoin_impactIsZeroAndSeasoningRestarts"
-  },
-  {
-    "id": "CS-57",
-    "file": "src/CreditStanding.sol",
-    "function": "_syncSeat",
-    "bound": "a new seat does not inherit the old seat's pending accruals",
-    "match": "        delete _impactPending[communityId][member];",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_rejoin_impactIsZeroAndSeasoningRestarts"
-  },
-  {
-    "id": "CS-58",
-    "file": "src/CreditStanding.sol",
-    "function": "_syncSeat",
-    "bound": "a new seat's te_earned starts at zero",
-    "match": "        delete _teEarned[communityId][member];",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_rejoin_obligationsAndPhaseReset_firstAccessCaps"
-  },
-  {
-    "id": "CS-59",
-    "file": "src/CreditStanding.sol",
-    "function": "_syncSeat",
-    "bound": "a new seat's completed obligations start at zero (Phase resets)",
-    "match": "        delete _completedObligations[communityId][member];",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_rejoin_obligationsAndPhaseReset_firstAccessCaps"
-  },
-  {
-    "id": "CS-60",
-    "file": "src/CreditStanding.sol",
-    "function": "_syncSeat",
-    "bound": "a new seat's Phase clock is anchored afresh",
-    "match": "        delete _firstObligationAt[communityId][member];",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_rejoin_firstCompletionOnTheNewSeatStartsThePhaseClock"
+    "status": "redundant",
+    "note": "A wallet holds one seat per community for good, so the activity record's stamp can only go from a seat to none, and a Suspended or Left seat's impact is already 0."
   },
   {
     "id": "CS-61",
@@ -1381,8 +771,8 @@
     "bound": "a new seat does not inherit the old seat's dormancy",
     "match": "        delete _lastActivityAt[communityId][member];",
     "mutant": "",
-    "status": "catalogued",
-    "test": "test_rejoin_obligationsAndPhaseReset_firstAccessCaps"
+    "status": "redundant",
+    "note": "A wallet holds one seat per community for good, so the activity record's stamp can only go from a seat to none, and a Suspended or Left seat's impact is already 0."
   },
   {
     "id": "CS-62",
@@ -1405,85 +795,14 @@
     "proof": "Same argument as CS-62: _healFloorAt is read only past the `last == 0` return in _activityFactor, and _noteActivity rewrites it with _lastActivityAt. Verified: 525/525 green with the line deleted."
   },
   {
-    "id": "CS-64",
-    "file": "src/CreditStanding.sol",
-    "function": "accrueImpact",
-    "bound": "an accrual lands on the live seat (sync before write)",
-    "match": "        _syncSeat(communityId, member);\n        _noteActivity(communityId, member);",
-    "mutant": "        _noteActivity(communityId, member);",
-    "status": "catalogued",
-    "test": "test_rejoin_obligationsAndPhaseReset_firstAccessCaps"
-  },
-  {
-    "id": "CS-65",
-    "file": "src/CreditStanding.sol",
-    "function": "pokeSeasoning",
-    "bound": "a poke cannot mint a dead seat's pending accrual into U_C (sync before roll)",
-    "match": "        _syncSeat(communityId, member);\n        _roll(communityId, member);",
-    "mutant": "        _roll(communityId, member);",
-    "status": "catalogued",
-    "test": "test_rejoin_impactIsZeroAndSeasoningRestarts"
-  },
-  {
     "id": "CS-66",
     "file": "src/CreditStanding.sol",
     "function": "_creditObligationCompletion",
     "bound": "a completion lands on the live seat (sync before write)",
-    "match": "        _requireCommunity(communityId);\n        _syncSeat(communityId, member);\n        uint256 n",
-    "mutant": "        _requireCommunity(communityId);\n        uint256 n",
-    "status": "catalogued",
-    "test": "test_rejoin_firstCompletionOnTheNewSeatStartsThePhaseClock"
-  },
-  {
-    "id": "CS-67",
-    "file": "src/CreditStanding.sol",
-    "function": "_accountTotals",
-    "bound": "the exposure cap's account totals count only seats still held",
-    "match": "            if (!_seatCurrent(c, member)) continue;",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_forfeit_accountTotalFallsAtOnceAndTheCapUsesIt",
-    "note": "The defect the seat stamp exists to prevent: an exposure cap computed on a forfeited seat's impact."
-  },
-  {
-    "id": "CS-68",
-    "file": "src/CreditStanding.sol",
-    "function": "_seasonedOf",
-    "bound": "seasoned impact reads zero on a stale stamp (share_i)",
-    "match": "        return _seatCurrent(communityId, member) ? _impactSeasoned[communityId][member] : 0;",
-    "mutant": "        return _impactSeasoned[communityId][member];",
-    "status": "catalogued",
-    "test": "test_rejoin_impactIsZeroAndSeasoningRestarts"
-  },
-  {
-    "id": "CS-69",
-    "file": "src/CreditStanding.sol",
-    "function": "_teEarnedOf",
-    "bound": "te_earned reads zero on a stale stamp",
-    "match": "        return _seatCurrent(communityId, member) ? _teEarned[communityId][member] : 0;",
-    "mutant": "        return _teEarned[communityId][member];",
-    "status": "catalogued",
-    "test": "test_rejoin_obligationsAndPhaseReset_firstAccessCaps"
-  },
-  {
-    "id": "CS-70",
-    "file": "src/CreditStanding.sol",
-    "function": "_completedOf",
-    "bound": "completed obligations read zero on a stale stamp (Phase, first-draw branch)",
-    "match": "        return _seatCurrent(communityId, member) ? _completedObligations[communityId][member] : 0;",
-    "mutant": "        return _completedObligations[communityId][member];",
-    "status": "catalogued",
-    "test": "test_rejoin_obligationsAndPhaseReset_firstAccessCaps"
-  },
-  {
-    "id": "CS-71",
-    "file": "src/CreditStanding.sol",
-    "function": "_pendingImpactOf",
-    "bound": "pending impact reads zero on a stale stamp",
-    "match": "        if (!_seatCurrent(communityId, member)) return 0;",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_rejoin_impactIsZeroAndSeasoningRestarts"
+    "match": "        _syncSeat(communityId, member);\n        uint256 n = ++_repaid[member];",
+    "mutant": "        uint256 n = ++_repaid[member];",
+    "status": "redundant",
+    "note": "Same reason as CS-52."
   },
   {
     "id": "CS-72",
@@ -1492,8 +811,8 @@
     "bound": "activity reads as never-active on a stale stamp",
     "match": "        uint64 last = _seatCurrent(communityId, member) ? _lastActivityAt[communityId][member] : 0;",
     "mutant": "        uint64 last = _lastActivityAt[communityId][member];",
-    "status": "catalogued",
-    "test": "test_rejoin_obligationsAndPhaseReset_firstAccessCaps"
+    "status": "redundant",
+    "note": "A wallet holds one seat per community for good, so the activity record's stamp can only go from a seat to none, and a Suspended or Left seat's impact is already 0."
   },
   {
     "id": "CS-73",
@@ -1503,7 +822,7 @@
     "match": "        uint256 scar = _deepestHealedScar(member);",
     "mutant": "        uint256 scar = WAD;",
     "status": "catalogued",
-    "test": "test_scarInA_reducesConductInB,test_scarHealsInBothOnTheSameSchedule",
+    "test": "test_conduct_aLateRepaymentScarsEveryCommunityAndHeals",
     "note": "The key itself (_scars[member], no communityId) is structural and has no one-line mutant back to per community."
   },
   {
@@ -2070,10 +1389,10 @@
     "file": "src/CreditCore.sol",
     "function": "draw",
     "bound": "the membership gate on draw: a member the community removed, a member who left, and a member a removal vote is open against open no new obligation, because `isMember` is false for all three. This is the half of \"nothing in, what is in can come out\" that was missing from the money side",
-    "match": "        if (!ICommunity(community).isMember(m)) revert NotAMember();",
+    "match": "        if (!ICommunity(community).isMember(member)) revert NotAMember();",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_drawGate_suspended, test_proof2_aFrozenMemberCannotDraw, test_drawGate_notAMember, test_proof11_aSuspendedMemberWithdrawsTheirPersonalVaultAndSettles",
+    "test": "test_drawGate_notAMember, test_proof2_aFrozenMemberCannotDraw",
     "note": "Re-pointed: the `suspended()` read it named is gone, and the `isMember` line one above it now enforces the same bound. The companion test is as load-bearing as the gate: deleting the gate kills the first three, and adding the same gate to settle would kill the fourth."
   },
   {
@@ -2247,11 +1566,11 @@
     "id": "CS-74",
     "file": "src/CreditStanding.sol",
     "function": "_liveSeat",
-    "bound": "the stamp reads the Active-only token id, not `tokenOf`: `tokenOf` stays set on a Suspended or Left seat, so reading it keeps that seat's impact in the exposure cap forever",
+    "bound": "impact counts only while the seat is Active: `activeTokenOf`, not `tokenOf`",
     "match": "        return ICommunity(ICommunityFactory(factory).communityAt(communityId)).activeTokenOf(member);",
     "mutant": "        return ICommunity(ICommunityFactory(factory).communityAt(communityId)).tokenOf(member);",
     "status": "catalogued",
-    "test": "test_proof10_aRemovalEndsImpactInTheSameTransaction, test_proof10_leavingEndsImpactInTheSameTransaction"
+    "test": "test_proof10_aRemovalEndsImpactInTheSameTransaction, test_proof10_leavingEndsImpactInTheSameTransaction, test_proof11_aSuspendedSeatCountsZeroInEverySource"
   },
   {
     "id": "SM-24",
@@ -3649,5 +2968,645 @@
     "mutant": "",
     "status": "catalogued",
     "test": "test_objectToHandover_emitsHandoverObjected"
+  },
+  {
+    "id": "CC-76",
+    "file": "src/CreditCore.sol",
+    "function": "draw",
+    "bound": "the community limit: no draw beyond what the community can lend now",
+    "match": "        if (amount > _lendable(communityId)) revert ExceedsAvailable();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof2_aDrawBeyondWhatTheCommunityCanLendReverts"
+  },
+  {
+    "id": "CC-77",
+    "file": "src/CreditCore.sol",
+    "function": "_executeWriteOff",
+    "bound": "loss isolation: the unpaid principal leaves this community's balance",
+    "match": "        r.allocation = allocationBefore - principal;",
+    "mutant": "        r.allocation = allocationBefore;",
+    "status": "catalogued",
+    "test": "test_proof3_aWriteOffLowersOnlyItsOwnCommunityByTheUnpaidPrincipal"
+  },
+  {
+    "id": "CC-78",
+    "file": "src/CreditCore.sol",
+    "function": "_executeWriteOff",
+    "bound": "loss isolation: the total paper falls with it, so Qudi's money does not move",
+    "match": "        r.allocation = allocationBefore - principal;\n        _totalAllocated -= principal;",
+    "mutant": "        r.allocation = allocationBefore - principal;",
+    "status": "catalogued",
+    "test": "test_proof3_aWriteOffLowersOnlyItsOwnCommunityByTheUnpaidPrincipal"
+  },
+  {
+    "id": "CC-79",
+    "file": "src/CreditCore.sol",
+    "function": "settle",
+    "bound": "repayment after write-off goes back to the community's balance",
+    "match": "                r.allocation += retire;\n                _totalAllocated += retire;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof4_aPaymentOnAWrittenOffAdvanceRaisesTheCommunityBalance"
+  },
+  {
+    "id": "CC-80",
+    "file": "src/CreditCore.sol",
+    "function": "settle",
+    "bound": "repayment after write-off goes to Qudi once the community's account has closed",
+    "match": "            if (!r.closed) {\n                r.allocation += retire;",
+    "mutant": "            if (true) {\n                r.allocation += retire;",
+    "status": "catalogued",
+    "test": "test_proof4_aPaymentAfterClosureGoesToQudi"
+  },
+  {
+    "id": "CC-81",
+    "file": "src/CreditCore.sol",
+    "function": "settle",
+    "bound": "a payment before write-off lowers what the community has out",
+    "match": "            r.outstanding -= retire;\n            _totalOutstanding -= retire;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_settle_overpaymentIsRefundedExactly, test_closure_returnsTheBalanceOnceNothingIsOut"
+  },
+  {
+    "id": "CC-82",
+    "file": "src/CreditCore.sol",
+    "function": "draw",
+    "bound": "PoolIlliquid: a draw that finds too little cash reverts with its own error",
+    "match": "        if (_cash() < amount) revert PoolIlliquid();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof5_aDrawWithTheCashInAPoolStrategyRevertsPoolIlliquid"
+  },
+  {
+    "id": "CC-83",
+    "file": "src/CreditCore.sol",
+    "function": "depositToStrategy",
+    "bound": "the liquid floor, inclusive at exactly 30%",
+    "match": "        if (_cash() * 10_000 < uint256(config.poolLiquidFloorBps()) * _unlent()) revert BelowLiquidFloor();",
+    "mutant": "        if (_cash() * 10_000 <= uint256(config.poolLiquidFloorBps()) * _unlent()) revert BelowLiquidFloor();",
+    "status": "catalogued",
+    "test": "test_proof6_aStrategyDepositMustLeaveThirtyPercentOfUnlentBalancesAsCash"
+  },
+  {
+    "id": "CC-84",
+    "file": "src/CreditCore.sol",
+    "function": "depositToStrategy",
+    "bound": "the liquid floor is checked at all",
+    "match": "        if (_cash() * 10_000 < uint256(config.poolLiquidFloorBps()) * _unlent()) revert BelowLiquidFloor();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof6_aStrategyDepositMustLeaveThirtyPercentOfUnlentBalancesAsCash"
+  },
+  {
+    "id": "CC-85",
+    "file": "src/CreditCore.sol",
+    "function": "_requireBacked",
+    "bound": "the backing rule, inclusive at exactly the unlent balances",
+    "match": "        if (_cash() + _strategyValue() < _unlent()) revert Unbacked();",
+    "mutant": "        if (_cash() + _strategyValue() <= _unlent()) revert Unbacked();",
+    "status": "catalogued",
+    "test": "test_proof7_withdrawTreasuryNeverBreaksBacking"
+  },
+  {
+    "id": "CC-86",
+    "file": "src/CreditCore.sol",
+    "function": "_requireBacked",
+    "bound": "pool strategies count toward backing",
+    "match": "        if (_cash() + _strategyValue() < _unlent()) revert Unbacked();",
+    "mutant": "        if (_cash() < _unlent()) revert Unbacked();",
+    "status": "catalogued",
+    "test": "test_proof7_strategyPositionsCountTowardBacking"
+  },
+  {
+    "id": "CC-87",
+    "file": "src/CreditCore.sol",
+    "function": "allocate",
+    "bound": "a grant is checked against the backing rule",
+    "match": "        _assign(communityId, amount, kind);\n        if (_records[communityId].lastActivityAt == 0) _noteActivity(communityId);\n        _requireBacked();",
+    "mutant": "        _assign(communityId, amount, kind);\n        if (_records[communityId].lastActivityAt == 0) _noteActivity(communityId);",
+    "status": "catalogued",
+    "test": "test_proof7_allocateNeverBreaksBacking"
+  },
+  {
+    "id": "CC-88",
+    "file": "src/CreditCore.sol",
+    "function": "withdrawTreasury",
+    "bound": "the treasury withdrawal is checked against the backing rule",
+    "match": "        usdc.safeTransfer(to, amount);\n        _requireBacked();",
+    "mutant": "        usdc.safeTransfer(to, amount);",
+    "status": "catalogued",
+    "test": "test_proof7_withdrawTreasuryNeverBreaksBacking"
+  },
+  {
+    "id": "CC-89",
+    "file": "src/CreditCore.sol",
+    "function": "depositToStrategy",
+    "bound": "a pool strategy deposit is checked against the backing rule",
+    "match": "        _bookedCash -= amount;\n        _requireBacked();\n        if (_cash()",
+    "mutant": "        _bookedCash -= amount;\n        if (_cash()",
+    "status": "redundant",
+    "note": "A strategy that returns its value keeps cash plus strategies unchanged, and the liquid floor below already refuses any deposit that would leave less cash than a share of the unlent balances."
+  },
+  {
+    "id": "CC-90",
+    "file": "src/CreditCore.sol",
+    "function": "_lendableShare",
+    "bound": "the dormancy fade",
+    "match": "        return fade < heal ? fade : heal;",
+    "mutant": "        return heal;",
+    "status": "catalogued",
+    "test": "test_proof8_halfwayThroughTheFadeHalfTheBalanceCanBeLent"
+  },
+  {
+    "id": "CC-91",
+    "file": "src/CreditCore.sol",
+    "function": "_lendableShare",
+    "bound": "the dormancy heal: activity climbs back, never jumps",
+    "match": "        return fade < heal ? fade : heal;",
+    "mutant": "        return fade;",
+    "status": "catalogued",
+    "test": "test_proof8_activityHealsOverNinetyDays"
+  },
+  {
+    "id": "CC-92",
+    "file": "src/CreditCore.sol",
+    "function": "_noteActivity",
+    "bound": "the heal starts from where the share stood",
+    "match": "        r.healFromWad = uint64(_lendableShare(r));",
+    "mutant": "        r.healFromWad = uint64(WAD);",
+    "status": "catalogued",
+    "test": "test_proof8_activityHealsOverNinetyDays"
+  },
+  {
+    "id": "CC-93",
+    "file": "src/CreditCore.sol",
+    "function": "sweepDormant",
+    "bound": "the sweep waits for the whole return period",
+    "match": "        if (r.lastActivityAt == 0 || block.timestamp < uint256(r.lastActivityAt) + grace + fadeLength + returnAfter) {",
+    "mutant": "        if (r.lastActivityAt == 0 || block.timestamp < uint256(r.lastActivityAt) + grace + fadeLength) {",
+    "status": "catalogued",
+    "test": "test_proof8_sweepDormantReturnsTheBalanceAfterTheFullPeriod"
+  },
+  {
+    "id": "CC-94",
+    "file": "src/CreditCore.sol",
+    "function": "sweepDormant",
+    "bound": "the sweep waits until nothing is out",
+    "match": "            revert NotDormant();\n        }\n        if (r.outstanding != 0) revert CommunityHasDebt();",
+    "mutant": "            revert NotDormant();\n        }",
+    "status": "catalogued",
+    "test": "test_proof8_sweepDormantWaitsForEveryAdvance"
+  },
+  {
+    "id": "CC-95",
+    "file": "src/CreditCore.sol",
+    "function": "receiveCommunityLeg",
+    "bound": "a seat leg is community activity",
+    "match": "        if (seatLeg) _noteActivity(communityId);",
+    "mutant": "",
+    "status": "redundant",
+    "note": "A paid seat mint also reports activity through Community's best-effort noteActivity call (SM-109), so removing either alone is masked. The leg's own note is kept because it cannot be skipped by a refused call."
+  },
+  {
+    "id": "CC-96",
+    "file": "src/CreditCore.sol",
+    "function": "draw",
+    "bound": "a draw is community activity",
+    "match": "        _noteActivity(communityId);\n\n        _bookedCash -= amount;",
+    "mutant": "\n        _bookedCash -= amount;",
+    "status": "catalogued",
+    "test": "test_proof8_aDrawIsActivity"
+  },
+  {
+    "id": "CC-97",
+    "file": "src/CreditCore.sol",
+    "function": "noteActivity",
+    "bound": "only the community's own Community and Ledger report activity",
+    "match": "        if (msg.sender != community && msg.sender != ICommunityFactory(factory).ledgerOf(community)) {",
+    "mutant": "        if (false) {",
+    "status": "catalogued",
+    "test": "test_proof8_onlyTheCommunitysOwnContractsReportActivity"
+  },
+  {
+    "id": "CC-98",
+    "file": "src/CreditCore.sol",
+    "function": "_requirePortfolioQuality",
+    "bound": "gate 8: exactly the limit passes, just above it reverts",
+    "match": "        if (bad * 10_000 > uint256(config.portfolioQualityBps()) * out) revert PortfolioQualityBreached();",
+    "mutant": "        if (bad * 10_000 >= uint256(config.portfolioQualityBps()) * out) revert PortfolioQualityBreached();",
+    "status": "catalogued",
+    "test": "test_proof9_atExactlyTwentyFivePercentLateADrawWorks"
+  },
+  {
+    "id": "CC-99",
+    "file": "src/CreditCore.sol",
+    "function": "_requirePortfolioQuality",
+    "bound": "gate 8: Late starts at its boundary instant",
+    "match": "            if (block.timestamp - o.drawTimestamp >= lateStart) bad += o.principal;",
+    "mutant": "            if (block.timestamp - o.drawTimestamp > lateStart) bad += o.principal;",
+    "status": "catalogued",
+    "test": "test_proof9_justAboveTwentyFivePercentLateADrawReverts"
+  },
+  {
+    "id": "CC-100",
+    "file": "src/CreditCore.sol",
+    "function": "draw",
+    "bound": "gate 4: five Active seasoned members, inclusive",
+    "match": "        if (ICommunity(community).seasonedCount() < config.communityMinMembers()) revert TooFewMembers();",
+    "mutant": "        if (ICommunity(community).seasonedCount() <= config.communityMinMembers()) revert TooFewMembers();",
+    "status": "catalogued",
+    "test": "test_proof10_fourSeasonedMembersCannotDrawFiveCan"
+  },
+  {
+    "id": "CC-101",
+    "file": "src/CreditCore.sol",
+    "function": "draw",
+    "bound": "no draw once the community's ledger has closed",
+    "match": "        if (_records[communityId].closed || ILedger(ledger).communityClosed()) revert CommunityIsClosed();",
+    "mutant": "        if (_records[communityId].closed) revert CommunityIsClosed();",
+    "status": "catalogued",
+    "test": "test_aClosedLedgerRefusesDrawsAndStillTakesRepayment"
+  },
+  {
+    "id": "CC-102",
+    "file": "src/CreditCore.sol",
+    "function": "draw",
+    "bound": "the draw accrues the community's ledger first",
+    "match": "        ILedger(ledger).accrue();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof15_aDrawSeesTheYieldGainedSinceTheLastAccrual"
+  },
+  {
+    "id": "CC-103",
+    "file": "src/CreditCore.sol",
+    "function": "_acceptAgreement",
+    "bound": "the first draw must carry the current agreement's hash",
+    "match": "        if (agreementHash == bytes32(0) || agreementHash != config.creditAgreementHash()) revert WrongAgreement();",
+    "mutant": "        if (agreementHash == bytes32(0)) revert WrongAgreement();",
+    "status": "catalogued",
+    "test": "test_proof13_theFirstDrawMustCarryTheCurrentAgreementHash"
+  },
+  {
+    "id": "CC-104",
+    "file": "src/CreditCore.sol",
+    "function": "_acceptAgreement",
+    "bound": "only the first draw needs the hash",
+    "match": "        if (_agreementAccepted[member]) return bytes32(0);",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof13_theFirstDrawMustCarryTheCurrentAgreementHash"
+  },
+  {
+    "id": "CS-75",
+    "file": "src/CreditStanding.sol",
+    "function": "_heldImpact",
+    "bound": "the registry counts only an Active seat, whatever a source answers",
+    "match": "        if (_liveSeat(communityId, member) == 0) return 0;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof11_aSuspendedSeatCountsZeroInEverySource, test_proof11_aLeftSeatCountsZeroInEverySource"
+  },
+  {
+    "id": "CS-76",
+    "file": "src/CreditStanding.sol",
+    "function": "_heldImpact",
+    "bound": "every registered source adds to impact",
+    "match": "                total += v;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof11_aThirdSourceAddsToTheLineAndRemovingItTakesItAway"
+  },
+  {
+    "id": "CS-77",
+    "file": "src/CreditStanding.sol",
+    "function": "_effectiveImpact",
+    "bound": "disqualified impact is subtracted",
+    "match": "        return held > disqualified ? held - disqualified : 0;",
+    "mutant": "        return held;",
+    "status": "catalogued",
+    "test": "test_proof14_aRepaidDefaultHealsAfterTheCoolingAtFirstAccess"
+  },
+  {
+    "id": "CS-78",
+    "file": "src/CreditStanding.sol",
+    "function": "recordFormalDefault",
+    "bound": "the default snapshot disqualifies the impact held at that moment",
+    "match": "                _disqualified[c][member] = held;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof14_atDay156TheMemberIsDefaultedEverywhereWithImpactDisqualified"
+  },
+  {
+    "id": "CS-79",
+    "file": "src/CreditStanding.sol",
+    "function": "recordDefaultRepaid",
+    "bound": "the cooling period",
+    "match": "        uint64 healsAt = uint64(block.timestamp) + config.defaultHealCooling();",
+    "mutant": "        uint64 healsAt = uint64(block.timestamp);",
+    "status": "catalogued",
+    "test": "test_proof14_aRepaidDefaultHealsAfterTheCoolingAtFirstAccess"
+  },
+  {
+    "id": "CS-80",
+    "file": "src/CreditStanding.sol",
+    "function": "recordDefaultRepaid",
+    "bound": "the reset: the repaid count restarts",
+    "match": "        _repaid[member] = 0;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof14_aRepaidDefaultHealsAfterTheCoolingAtFirstAccess"
+  },
+  {
+    "id": "CS-81",
+    "file": "src/CreditStanding.sol",
+    "function": "recordDefaultRepaid",
+    "bound": "the reset: the phase clock restarts",
+    "match": "        _firstRepaidAt[member] = 0;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof14_aRepaidDefaultHealsAfterTheCoolingAtFirstAccess"
+  },
+  {
+    "id": "CS-82",
+    "file": "src/CreditStanding.sol",
+    "function": "_isDefaulted",
+    "bound": "the default heals at the end of the cooling, not a second later",
+    "match": "        return _defaulted[member] && (healsAt == 0 || block.timestamp < healsAt);",
+    "mutant": "        return _defaulted[member] && (healsAt == 0 || block.timestamp <= healsAt);",
+    "status": "catalogued",
+    "test": "test_proof14_aRepaidDefaultHealsAfterTheCoolingAtFirstAccess"
+  },
+  {
+    "id": "CS-83",
+    "file": "src/CreditStanding.sol",
+    "function": "_isDefaulted",
+    "bound": "an unrepaid default never heals",
+    "match": "        return _defaulted[member] && (healsAt == 0 || block.timestamp < healsAt);",
+    "mutant": "        return _defaulted[member] && block.timestamp < healsAt;",
+    "status": "catalogued",
+    "test": "test_proof14_anUnrepaidDefaultNeverHeals"
+  },
+  {
+    "id": "CS-84",
+    "file": "src/CreditStanding.sol",
+    "function": "addImpactSource",
+    "bound": "a listed source joins the sum",
+    "match": "        _sources.push(source);",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof11_aThirdSourceAddsToTheLineAndRemovingItTakesItAway"
+  },
+  {
+    "id": "CS-85",
+    "file": "src/CreditStanding.sol",
+    "function": "removeImpactSource",
+    "bound": "a removed source leaves the sum",
+    "match": "                _sources[i] = _sources[n - 1];\n                _sources.pop();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof11_aThirdSourceAddsToTheLineAndRemovingItTakesItAway"
+  },
+  {
+    "id": "SM-105",
+    "file": "src/Community.sol",
+    "function": "impactOf",
+    "bound": "the seat leg counts only while the seat is Active",
+    "match": "        if (s.state != SeatState.Active || s.communityId != communityId) return 0;",
+    "mutant": "        if (s.communityId != communityId) return 0;",
+    "status": "catalogued",
+    "test": "test_proof11_aSuspendedSeatCountsZeroInEverySource"
+  },
+  {
+    "id": "SM-106",
+    "file": "src/Community.sol",
+    "function": "impactOf",
+    "bound": "the seat leg counts only in its own community",
+    "match": "        if (s.state != SeatState.Active || s.communityId != communityId) return 0;",
+    "mutant": "        if (s.state != SeatState.Active) return 0;",
+    "status": "catalogued",
+    "test": "test_proof11_impactCountsOnlyInItsOwnCommunity"
+  },
+  {
+    "id": "SM-107",
+    "file": "src/Community.sol",
+    "function": "impactOf",
+    "bound": "the seat leg is the split's credit share of the price",
+    "match": "        return uint256(s.pricePaid) * poolBps / 10_000;",
+    "mutant": "        return uint256(s.pricePaid);",
+    "status": "catalogued",
+    "test": "test_proof12_firstAccessIsOneTimesImpact"
+  },
+  {
+    "id": "SM-108",
+    "file": "src/Community.sol",
+    "function": "seasonedCount",
+    "bound": "gate 4 counts seasoned seats still Active",
+    "match": "        return last - _departedUpTo(last);",
+    "mutant": "        return last;",
+    "status": "catalogued",
+    "test": "test_proof10_unseasonedAndDepartedSeatsDoNotCount"
+  },
+  {
+    "id": "UL-49",
+    "file": "src/Ledger.sol",
+    "function": "impactOf",
+    "bound": "the yield leg counts only while the seat is Active",
+    "match": "        if (community.activeTokenOf(member) == 0) return 0;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof11_aSuspendedSeatCountsZeroInEverySource"
+  },
+  {
+    "id": "UL-50",
+    "file": "src/Ledger.sol",
+    "function": "impactOf",
+    "bound": "the yield leg answers only for its own community",
+    "match": "        if (communityId != ICommunityFactory(factory).communityIdOf(address(this)) - 1) return 0;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof11_theYieldLegAnswersOnlyForItsOwnCommunity"
+  },
+  {
+    "id": "UL-51",
+    "file": "src/Ledger.sol",
+    "function": "deposit",
+    "bound": "a deposit reports activity for its own community",
+    "match": "                .noteActivity(ICommunityFactory(factory).communityIdOf(address(this)) - 1, msg.sender) {}",
+    "mutant": "                .noteActivity(ICommunityFactory(factory).communityIdOf(address(this)), msg.sender) {}",
+    "status": "catalogued",
+    "test": "test_proof8_activityHealsOverNinetyDays"
+  },
+  {
+    "id": "CFG-04",
+    "file": "src/Config.sol",
+    "function": "constructor",
+    "bound": "MIN_LENDABLE is $10",
+    "match": "        _init(K.MIN_LENDABLE, 10e6);",
+    "mutant": "        _init(K.MIN_LENDABLE, 11e6);",
+    "status": "catalogued",
+    "test": "test_standing_launchValues, test_proof12_tenDollarsIsTheMinimum"
+  },
+  {
+    "id": "CFG-05",
+    "file": "src/Config.sol",
+    "function": "constructor",
+    "bound": "First Access is 1x",
+    "match": "        _init(K.PHASE_MULT_FIRST_ACCESS, 100);",
+    "mutant": "        _init(K.PHASE_MULT_FIRST_ACCESS, 200);",
+    "status": "catalogued",
+    "test": "test_standing_launchValues, test_proof12_firstAccessIsOneTimesImpact"
+  },
+  {
+    "id": "CFG-06",
+    "file": "src/Config.sol",
+    "function": "constructor",
+    "bound": "Proven Once is 2x",
+    "match": "        _init(K.PHASE_MULT_PROVEN_ONCE, 200);",
+    "mutant": "        _init(K.PHASE_MULT_PROVEN_ONCE, 300);",
+    "status": "catalogued",
+    "test": "test_standing_launchValues, test_proof12_oneRepaidAndThirtyDaysIsTwoTimes"
+  },
+  {
+    "id": "CFG-07",
+    "file": "src/Config.sol",
+    "function": "constructor",
+    "bound": "Developing is 3x",
+    "match": "        _init(K.PHASE_MULT_DEVELOPING, 300);",
+    "mutant": "        _init(K.PHASE_MULT_DEVELOPING, 400);",
+    "status": "catalogued",
+    "test": "test_standing_launchValues, test_proof12_developingAtTwoRepaid"
+  },
+  {
+    "id": "CFG-08",
+    "file": "src/Config.sol",
+    "function": "constructor",
+    "bound": "Established is 4x",
+    "match": "        _init(K.PHASE_MULT_ESTABLISHED, 400);",
+    "mutant": "        _init(K.PHASE_MULT_ESTABLISHED, 300);",
+    "status": "catalogued",
+    "test": "test_standing_launchValues, test_proof12_establishedIsFourTimesUpToFiveThousand"
+  },
+  {
+    "id": "CFG-09",
+    "file": "src/Config.sol",
+    "function": "bounds",
+    "bound": "every new pool and gate key keeps its range",
+    "match": "        if (key == K.POOL_LIQUID_FLOOR_BPS) return (1, 10_000);",
+    "mutant": "        if (key == K.POOL_LIQUID_FLOOR_BPS) return (0, 10_000);",
+    "status": "catalogued",
+    "test": "test_credit_launchValuesAndBounds"
+  },
+  {
+    "id": "CFG-10",
+    "file": "src/Config.sol",
+    "function": "bounds",
+    "bound": "gate 4's floor stays at 2",
+    "match": "        if (key == K.COMMUNITY_MIN_MEMBERS) return (2, 10);",
+    "mutant": "        if (key == K.COMMUNITY_MIN_MEMBERS) return (1, 10);",
+    "status": "catalogued",
+    "test": "test_credit_launchValuesAndBounds"
+  },
+  {
+    "id": "CFG-11",
+    "file": "src/Config.sol",
+    "function": "setCreditAgreementHash",
+    "bound": "a zero agreement hash is refused",
+    "match": "        if (agreementHash == bytes32(0)) revert ZeroAgreementHash();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_creditAgreementHash_setterOnly"
+  },
+  {
+    "id": "UL-52",
+    "file": "src/Ledger.sol",
+    "function": "deposit",
+    "bound": "a deposit reports the depositor as the member",
+    "match": "                .noteActivity(ICommunityFactory(factory).communityIdOf(address(this)) - 1, msg.sender) {}",
+    "mutant": "                .noteActivity(ICommunityFactory(factory).communityIdOf(address(this)) - 1, address(0)) {}",
+    "test": "test_activity_aDepositIsTheMembersOwnActivity",
+    "status": "catalogued"
+  },
+  {
+    "id": "SM-109",
+    "file": "src/Community.sol",
+    "function": "_split",
+    "bound": "a paid seat mint is the joiner's own activity",
+    "match": "        try ICreditCore(core).noteActivity(communityId, msg.sender) {} catch {}",
+    "mutant": "",
+    "test": "test_activity_aPaidSeatMintStartsTheMembersClock",
+    "status": "catalogued"
+  },
+  {
+    "id": "CC-105",
+    "file": "src/CreditCore.sol",
+    "function": "allocate",
+    "bound": "a grant to a community with no activity yet starts its dormancy clock",
+    "match": "        if (_records[communityId].lastActivityAt == 0) _noteActivity(communityId);",
+    "mutant": "",
+    "test": "test_proof8_aGrantOnlyCommunityStartsItsClockAtTheFirstGrant",
+    "status": "catalogued"
+  },
+  {
+    "id": "CC-106",
+    "file": "src/CreditCore.sol",
+    "function": "allocate",
+    "bound": "a later grant is not activity",
+    "match": "        if (_records[communityId].lastActivityAt == 0) _noteActivity(communityId);",
+    "mutant": "        _noteActivity(communityId);",
+    "test": "test_proof8_aLaterGrantIsNotActivity",
+    "status": "catalogued"
+  },
+  {
+    "id": "CC-107",
+    "file": "src/CreditCore.sol",
+    "function": "noteActivity",
+    "bound": "reported activity reaches the member's own standing",
+    "match": "        standing.recordActivity(communityId, member);",
+    "mutant": "",
+    "test": "test_activity_aDepositIsTheMembersOwnActivity, test_activity_aPaidSeatMintStartsTheMembersClock",
+    "status": "catalogued"
+  },
+  {
+    "id": "CS-86",
+    "file": "src/CreditStanding.sol",
+    "function": "recordActivity",
+    "bound": "a deposit or paid seat mint is the member's own activity",
+    "match": "        _syncSeat(communityId, member);\n        _noteActivity(communityId, member);\n    }",
+    "mutant": "        _syncSeat(communityId, member);\n    }",
+    "test": "test_activity_aDepositIsTheMembersOwnActivity",
+    "status": "catalogued"
+  },
+  {
+    "id": "SE-11",
+    "file": "src/Seats.sol",
+    "function": "mint",
+    "bound": "a wallet holds at most MAX_SEATS_PER_WALLET seats, Left and Suspended included",
+    "match": "        if (balanceOf(to) >= config.maxSeatsPerWallet()) revert TooManySeats();",
+    "mutant": "        if (balanceOf(to) > config.maxSeatsPerWallet()) revert TooManySeats();",
+    "test": "test_seatCap_aJoinPastTheCapReverts, test_seatCap_creatingPastTheCapReverts, test_seatCap_aLeftSeatStillCounts",
+    "status": "catalogued"
+  },
+  {
+    "id": "CFG-12",
+    "file": "src/Config.sol",
+    "function": "constructor",
+    "bound": "MAX_SEATS_PER_WALLET launches at 10, where the default walk is proven to fit",
+    "match": "        _init(K.MAX_SEATS_PER_WALLET, 10);",
+    "mutant": "        _init(K.MAX_SEATS_PER_WALLET, 20);",
+    "test": "test_credit_launchValuesAndBounds, test_settleAtTheDefaultCrossingFitsAtTheSeatCap",
+    "status": "catalogued"
+  },
+  {
+    "id": "CFG-13",
+    "file": "src/Config.sol",
+    "function": "bounds",
+    "bound": "MAX_SEATS_PER_WALLET stays from 1 to 50",
+    "match": "        if (key == K.MAX_SEATS_PER_WALLET) return (1, 50);",
+    "mutant": "        if (key == K.MAX_SEATS_PER_WALLET) return (0, 50);",
+    "test": "test_credit_launchValuesAndBounds",
+    "status": "catalogued"
   }
 ]

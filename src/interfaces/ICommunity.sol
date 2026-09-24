@@ -142,6 +142,8 @@ interface ICommunity {
     function seatStateOf(address member) external view returns (SeatState);
     function mintedAt(address member) external view returns (uint64);
     function isSeasoned(address member) external view returns (bool);
+    /// Active seats held for at least the seasoning window. Credit reads it before any draw.
+    function seasonedCount() external view returns (uint256);
     function communityName() external view returns (string memory);
     function stewardVacant() external view returns (bool); // the approval freeze
 

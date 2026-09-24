@@ -3,12 +3,12 @@ pragma solidity 0.8.30;
 
 import {Math} from "openzeppelin-contracts/contracts/utils/math/Math.sol";
 
-/// The pure Line-sizing arithmetic for `CreditCore`'s Standing half. Every value is
-/// passed in; this library reads no state and no config. Split out as a deployed library so
-/// `CreditCore` keeps bytecode room. Every division rounds DOWN: a member is never
-/// shown more than the exact figure.
+/// The decay principle's arithmetic: a slow linear fade after a grace, and a linear heal back.
+/// Every value is passed in; this library reads no state and no config. `CreditStanding` uses it
+/// for conduct, scars and a member's activity, and `CreditCore` for a community's lendable share.
+/// Every division rounds DOWN: nobody is shown more than the exact figure.
 ///
-/// `WAD` (1e18) is the fixed-point scale for `share_i`, `activity_factor` and `conduct_factor`.
+/// `WAD` (1e18) is the fixed-point scale for every factor.
 library StandingMath {
     uint256 internal constant WAD = 1e18;
 
@@ -28,7 +28,8 @@ library StandingMath {
     }
 
     /// `d <= grace -> 1`, `grace < d < grace + w -> linear to floorWad`, `d >= grace + w ->
-    /// floorWad`. `floorWad` is above zero by config bound.
+    /// floorWad`. A member's activity fades to a floor above zero; a community's lendable share
+    /// fades to zero.
     function dormancyDecay(uint256 d, uint256 grace, uint256 w, uint256 floorWad) external pure returns (uint256) {
         if (d <= grace) return WAD;
         if (d >= grace + w) return floorWad;

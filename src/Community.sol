@@ -13,6 +13,7 @@ import {ICommunity} from "./interfaces/ICommunity.sol";
 import {ICreditCore} from "./interfaces/ICreditCore.sol";
 import {ILedger} from "./interfaces/ILedger.sol";
 import {ISeats} from "./interfaces/ISeats.sol";
+import {IImpactSource} from "./interfaces/IImpactSource.sol";
 
 /// A community's votes and settings. Its seats are tokens in the one `Seats` contract: this
 /// contract mints there at creation and at join(), and changes a seat's state there at forfeit()
@@ -34,13 +35,10 @@ import {ISeats} from "./interfaces/ISeats.sol";
 /// in both, so the app still finds the community and join()'s `AlreadyMember` line bars a second
 /// mint. Only an Active seat with no unresolved removal vote against it is a member.
 ///
-/// Standing (Impact Units, conduct, phases, Trust Extension) is the singleton `CreditCore`'s,
-/// not a per-community clone. A seat mint and its 40% Community leg
-/// are an Impact source. That leg pays `CreditCore` directly against this
-/// community's community id; it used to pay a per-community credit-pool
-/// clone with no path to pay any of it back out. Attribution of the leg to the minting member
-/// is later work; only the destination moved.
-contract Community is EIP712, ICommunity, ICommunityInit {
+/// A paid seat is an impact source. Its 40% community leg pays `CreditCore` against this
+/// community's id, and `impactOf` credits that same share of the price to the member who paid it,
+/// for as long as the seat is Active.
+contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     using SafeERC20 for IERC20;
 
     IConfig internal config;
@@ -328,12 +326,12 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     }
 
     /// The seat's `Seats` token id while it is Active, else 0. The id is unique across every
-    /// community and never reused. `CreditStanding` stamps a member's
-    /// impact against this, so a Suspended or Left seat's impact stops
-    /// counting in the same transaction that sets the state. **A frozen seat still reads its
-    /// id.** `CreditStanding._syncSeat` deletes every seat-side mapping once the stamp stops
-    /// matching, so a frozen member who settled during the vote would lose their impact for
-    /// good, and a vote that then failed would hand back a member with nothing.
+    /// community and never reused. `CreditStanding` counts a member's impact only while this is
+    /// non-zero, so a Suspended or Left seat's impact stops counting in the same transaction that
+    /// sets the state, and it stamps the member's activity record against it. **A frozen seat
+    /// still reads its id.** `CreditStanding._syncSeat` clears the activity record once the stamp
+    /// stops matching, so a frozen member who repaid during the vote would lose it for good, and a
+    /// vote that then failed would hand back a member with nothing.
     function activeTokenOf(address member) external view returns (uint256) {
         (uint256 tokenId, ISeats.Seat memory s) = _seat(member);
         return s.state == SeatState.Active ? tokenId : 0;
@@ -923,6 +921,8 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         usdc.safeTransfer(core, toPool);
         uint256 communityId = ICommunityFactory(factory).communityIdOf(address(this)) - 1;
         ICreditCore(core).receiveCommunityLeg(communityId, toPool);
+        // A paid seat is the joiner's own activity too. Best-effort: credit never blocks a join.
+        try ICreditCore(core).noteActivity(communityId, msg.sender) {} catch {}
         usdc.safeTransfer(config.protocolTreasury(), toProtocol);
     }
 
@@ -959,6 +959,23 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     /// its `mintedAt` but is never seasoned: it is not a member.
     function isSeasoned(address member) external view returns (bool) {
         return _isSeasoned(member);
+    }
+
+    /// Active seats held for at least the seasoning window, frozen ones included. Credit opens in a
+    /// community only once there are enough of them.
+    function seasonedCount() external view returns (uint256) {
+        uint256 last = _lastSeasonedId(config.memberSeasoningWindow(), block.timestamp);
+        return last - _departedUpTo(last);
+    }
+
+    /// The seat leg's impact: the community's share of what the member paid for the seat, at the
+    /// seat-fee split's credit share. Counts only while the seat is Active, and only in this
+    /// community.
+    function impactOf(uint256 communityId, address member) external view returns (uint256) {
+        (, ISeats.Seat memory s) = _seat(member);
+        if (s.state != SeatState.Active || s.communityId != communityId) return 0;
+        (, uint16 poolBps,) = config.mintSplit();
+        return uint256(s.pricePaid) * poolBps / 10_000;
     }
 
     function _isSeasoned(address member) internal view returns (bool) {

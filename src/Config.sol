@@ -24,6 +24,7 @@ contract Config is Ownable2Step {
     error ZeroAddress();
     error UnknownAddressKey();
     error TimelineOutOfOrder();
+    error ZeroAgreementHash();
 
     /// Absolute sanity ceiling for the last stage boundary, not a design value: the
     /// canonical write-off is 365 days, and any timeline that runs past this is a fat-finger.
@@ -47,7 +48,6 @@ contract Config is Ownable2Step {
         _init(K.MINT_SPLIT_HOST, 3000);
         _init(K.MINT_SPLIT_POOL, 4000);
         _init(K.MINT_SPLIT_PROTOCOL, 3000);
-        _init(K.EPOCH_LENGTH, 30 days);
         _init(K.HOST_VOTE_THRESHOLD_BPS, 6667);
         _init(K.HOST_VOTE_WINDOW, 7 days);
         _init(K.COMMUNITY_VOTE_THRESHOLD_BPS, 5001);
@@ -73,10 +73,6 @@ contract Config is Ownable2Step {
         _init(K.STAGE_DEFAULT_RECOVERY_START, 155 days);
         _init(K.STAGE_WRITTEN_OFF_AT, 365 days);
         _init(K.DORMANCY_GRACE, 90 days);
-        _init(K.ELIG_MIN_MEMBERS, 5);
-        _init(K.ELIG_CLEAN_EPOCHS, 1);
-        _init(K.ELIG_MEMBER_MONTHS, 3);
-        _init(K.ELIG_MAX_GAP_MONTHS, 1);
         _init(K.YIELD_SPLIT_MEMBER, 7000);
         _init(K.YIELD_SPLIT_POOL, 1500);
         _init(K.YIELD_SPLIT_PROTOCOL, 1500);
@@ -87,48 +83,41 @@ contract Config is Ownable2Step {
         _init(K.PROTOCOL_TREASURY, uint160(treasury_));
         _init(K.COMPLIANCE_REGISTRY, uint160(complianceRegistry_));
         _init(K.MEMBER_SEASONING_WINDOW, 14 days);
-        // Retained-capital launch values. USDC 6-decimal amounts; bps for percentages.
-        _init(K.OPERATING_BUFFER_PER_COMMUNITY, 2000e6);
-        _init(K.OPERATING_FLOOR_GLOBAL, 10_000e6);
-        _init(K.CREDIT_LOSS_RESERVE_CURRENT_BPS, 500);
-        _init(K.CREDIT_LOSS_RESERVE_LATE_BPS, 2500);
-        _init(K.CREDIT_LOSS_RESERVE_FINAL_CURE_BPS, 5000);
-        _init(K.CREDIT_LOSS_RESERVE_DEFAULT_RECOVERY_BPS, 10_000);
-        _init(K.VENUE_LOSS_RESERVE_BPS, 2000);
-        _init(K.VENUE_ALLOCATION_MAX_BPS, 5000); // 50% of liquid above buffer
-        _init(K.STRESS_CAPITAL_RATE_BPS, 1000);
-        _init(K.STRESS_CAPITAL_FLOOR, 100_000e6);
-        // Treasury Manager venue limits. Values are calibrated later.
-        _init(K.PER_VENUE_CAP_BPS, 2500); // 25% of total Treasury cash
-        // The redemption-delay limit is the pending-obligation window. That window
-        // had its own key until it was retired as unread, so the 7 days is written here
-        // directly. The number is unchanged and so is its reason; what is gone is a second
-        // parameter nothing consumed.
-        _init(K.MAX_VENUE_REDEMPTION_DELAY, 7 days);
-        _init(K.MAX_VENUE_SLIPPAGE_BPS, 50); // max negative deviation from an ERC-4626 preview
-        // Standing, the CreditCore half. Sanity ranges follow the contract's existing precedent.
-        _init(K.MIN_LENDABLE, 50e6);
+        // Standing. A line is the member's impact times the phase multiplier, capped by the phase
+        // cap, 20% of what the community can lend now, and the member cap.
+        _init(K.MIN_LENDABLE, 10e6);
         _init(K.GLOBAL_MEMBER_CAP, 5000e6);
-        _init(K.EXPOSURE_IMPACT_MULT_X100, 300); // 3x realized attributable impact
         _init(K.ACTIVITY_DECAY_LENGTH, 180 days); // W
         _init(K.ACTIVITY_FLOOR_BPS, 2500); // FLOOR 0.25
         _init(K.STANDING_HEAL_WINDOW, 90 days); // heal window
         _init(K.PHASE_CAP_FIRST_ACCESS, 100e6);
         _init(K.PHASE_CAP_PROVEN_ONCE, 300e6);
         _init(K.PHASE_CAP_DEVELOPING, 1000e6);
-        _init(K.CONCENTRATION_FIRST_ACCESS_BPS, 500);
-        _init(K.CONCENTRATION_PROVEN_ONCE_BPS, 800);
-        _init(K.CONCENTRATION_DEVELOPING_BPS, 1000);
-        _init(K.CONCENTRATION_ESTABLISHED_BPS, 1200);
-        _init(K.TE_BUDGET_PROVEN_ONCE, 200e6);
-        _init(K.TE_BUDGET_DEVELOPING, 700e6);
-        _init(K.TE_BUDGET_ESTABLISHED, 4000e6);
-        _init(K.TE_COMMUNITY_CAP_BPS, 2000); // 20% of cumulative attributed funding yield
+        _init(K.PHASE_CAP_ESTABLISHED, 5000e6);
+        // First Access is 1x because at 2x a host with fake members nets a tenth of the seat price
+        // per fake seat from honest members' balance, and at 1x loses three tenths.
+        _init(K.PHASE_MULT_FIRST_ACCESS, 100);
+        _init(K.PHASE_MULT_PROVEN_ONCE, 200);
+        _init(K.PHASE_MULT_DEVELOPING, 300);
+        _init(K.PHASE_MULT_ESTABLISHED, 400);
+        _init(K.CONCENTRATION_BPS, 2000);
         _init(K.PHASE_MIN_TIME_PROVEN_ONCE, 30 days);
         _init(K.PHASE_MIN_TIME_ESTABLISHED, 180 days);
-        // The debt half. CREDIT_CORE stays zero until the deployment that owns the
-        // CreditCore singleton sets it; te earn increment launch value pending calibration.
-        _init(K.TE_EARN_INCREMENT, 100e6);
+        // The pool keeps 30% of unlent balances as cash; the operator's own policy runs inside it.
+        _init(K.POOL_LIQUID_FLOOR_BPS, 3000);
+        _init(K.COMMUNITY_DORMANCY_GRACE, 90 days);
+        _init(K.COMMUNITY_FADE_LENGTH, 180 days);
+        _init(K.COMMUNITY_HEAL_LENGTH, 90 days);
+        _init(K.COMMUNITY_RETURN_AFTER, 365 days);
+        _init(K.PORTFOLIO_QUALITY_BPS, 2500);
+        _init(K.COMMUNITY_MIN_MEMBERS, 5);
+        _init(K.DEFAULT_HEAL_COOLING, 180 days);
+        // A formal default walks every seat the wallet holds, inside the repayment that crosses it.
+        // At 10 seats, each with a full list of shared vaults, that repayment was measured at under
+        // 9M gas. Raising this needs a cheaper walk and a new measurement first.
+        _init(K.MAX_SEATS_PER_WALLET, 10);
+        // CREDIT_AGREEMENT_HASH starts at zero, which no draw can match: credit stays shut until
+        // the owner sets the agreement members sign.
         // 20% a year, well above every venue's gross return, so each venue's own `maxRate` is
         // what binds and this only stops a fat-fingered one.
         _init(K.MAX_RATE_CEILING_BPS, 2000);
@@ -195,6 +184,13 @@ contract Config is Ownable2Step {
         _write(key, uint160(value));
     }
 
+    /// The Credit Agreement members sign. A hash, not a number, so it has its own setter; zero is
+    /// refused because no draw could ever match it.
+    function setCreditAgreementHash(bytes32 agreementHash) external onlyOwner {
+        if (agreementHash == bytes32(0)) revert ZeroAgreementHash();
+        _write(K.CREDIT_AGREEMENT_HASH, uint256(agreementHash));
+    }
+
     function _write(bytes32 key, uint256 v) internal {
         bytes32 old = bytes32(values[key]);
         values[key] = v;
@@ -214,7 +210,6 @@ contract Config is Ownable2Step {
         // At least 1 use and 1 day, or no invite could seat anyone.
         if (key == K.INVITE_MAX_USES) return (1, 150);
         if (key == K.INVITE_MAX_TTL) return (1 days, 90 days);
-        if (key == K.EPOCH_LENGTH) return (1 days, 90 days);
         if (key == K.HOST_VOTE_THRESHOLD_BPS) return (5001, 10_000);
         if (key == K.HOST_VOTE_WINDOW) return (1 days, 30 days);
         if (key == K.COMMUNITY_VOTE_THRESHOLD_BPS) return (5001, 10_000);
@@ -236,10 +231,6 @@ contract Config is Ownable2Step {
         if (key == K.QUALIFYING_CONTRIBUTOR_MIN_DEPOSIT) return (1e6, 10_000e6);
         if (key == K.QUALIFYING_CONTRIBUTOR_SEASONING) return (1 days, 90 days);
         if (key == K.DORMANCY_GRACE) return (0, 365 days);
-        if (key == K.ELIG_MIN_MEMBERS) return (2, 100);
-        if (key == K.ELIG_CLEAN_EPOCHS) return (0, 12);
-        if (key == K.ELIG_MEMBER_MONTHS) return (0, 24);
-        if (key == K.ELIG_MAX_GAP_MONTHS) return (0, 12);
         if (key == K.INSTANT_TIER_FLOOR_BPS) return (0, 10_000);
         if (key == K.SLOW_TIER_CEILING_BPS) return (0, 10_000);
         if (key == K.MAX_NOTICE_PERIOD) return (0, 30 days);
@@ -251,59 +242,45 @@ contract Config is Ownable2Step {
         // is the wrong bound): 25 bps is half the set fee, 1 day a third of the set delay.
         // The upper bounds are sanity ranges, not design values.
         if (key == K.GLOBAL_DEPOSIT_CAP) return (0, type(uint256).max);
-        // Retained-capital bounds. These are sanity ranges, not design values; they follow
-        // the contract's existing bps and dollar-amount precedent.
-        if (key == K.OPERATING_BUFFER_PER_COMMUNITY) return (0, 1_000_000e6);
-        if (key == K.OPERATING_FLOOR_GLOBAL) return (0, 100_000_000e6);
-        if (key == K.CREDIT_LOSS_RESERVE_CURRENT_BPS) return (0, 10_000);
-        if (key == K.CREDIT_LOSS_RESERVE_LATE_BPS) return (0, 10_000);
-        if (key == K.CREDIT_LOSS_RESERVE_FINAL_CURE_BPS) return (0, 10_000);
-        if (key == K.CREDIT_LOSS_RESERVE_DEFAULT_RECOVERY_BPS) return (0, 10_000);
-        if (key == K.VENUE_LOSS_RESERVE_BPS) return (0, 10_000);
-        // The launch value is 50%. The sanity range is not a design value; it
-        // follows the contract's other bps parameters.
-        if (key == K.VENUE_ALLOCATION_MAX_BPS) return (0, 10_000);
-        // Venue limits. These are sanity ranges, not design values. Both
-        // ends of each range matter: a floor of zero
-        // repeals the mechanism, and a ceiling at which the check can never fire does the same
-        // from the other end. The per-venue ceiling is 5000 (50%), not 10_000: at 10_000 a
-        // venue's own exposure, which is part of the cap's base, can never exceed the cap, so
-        // the concentration check would be dead while formally in range. The redemption-delay
-        // ceiling is the 30 days every other window in this contract gets; it used to be read
-        // off the pending-obligation window's ceiling, which was the same 30 days, before
-        // that key was retired. The slippage ceiling stays well under a level that would make the
-        // check meaningless.
-        if (key == K.PER_VENUE_CAP_BPS) return (1, 5000);
-        if (key == K.MAX_VENUE_REDEMPTION_DELAY) return (1, 30 days);
-        if (key == K.MAX_VENUE_SLIPPAGE_BPS) return (1, 1000);
-        if (key == K.STRESS_CAPITAL_RATE_BPS) return (0, 10_000);
-        if (key == K.STRESS_CAPITAL_FLOOR) return (0, 100_000_000e6);
         // Standing bounds. These are sanity ranges, not design values. Floors above zero
         // where a zero repeals the mechanism (ACTIVITY_FLOOR_BPS, and the same shape for
-        // MIN_LENDABLE and the multiplier). ACTIVITY_FLOOR_BPS also has a ceiling below 10_000: at exactly 1.0 a
+        // MIN_LENDABLE and the multipliers). ACTIVITY_FLOOR_BPS also has a ceiling below 10_000: at exactly 1.0 a
         // fully dormant member keeps a full Line and the decay is dead.
         if (key == K.MIN_LENDABLE) return (1e6, 10_000e6);
         if (key == K.GLOBAL_MEMBER_CAP) return (1e6, 1_000_000e6);
-        if (key == K.EXPOSURE_IMPACT_MULT_X100) return (100, 1000);
         if (key == K.ACTIVITY_DECAY_LENGTH) return (1 days, 730 days);
         if (key == K.ACTIVITY_FLOOR_BPS) return (1, 9999);
         if (key == K.STANDING_HEAL_WINDOW) return (1 days, 365 days);
         if (key == K.PHASE_CAP_FIRST_ACCESS) return (1e6, 1_000_000e6);
         if (key == K.PHASE_CAP_PROVEN_ONCE) return (1e6, 1_000_000e6);
         if (key == K.PHASE_CAP_DEVELOPING) return (1e6, 1_000_000e6);
-        if (key == K.CONCENTRATION_FIRST_ACCESS_BPS) return (1, 10_000);
-        if (key == K.CONCENTRATION_PROVEN_ONCE_BPS) return (1, 10_000);
-        if (key == K.CONCENTRATION_DEVELOPING_BPS) return (1, 10_000);
-        if (key == K.CONCENTRATION_ESTABLISHED_BPS) return (1, 10_000);
-        if (key == K.TE_BUDGET_PROVEN_ONCE) return (0, 1_000_000e6);
-        if (key == K.TE_BUDGET_DEVELOPING) return (0, 1_000_000e6);
-        if (key == K.TE_BUDGET_ESTABLISHED) return (0, 1_000_000e6);
-        if (key == K.TE_COMMUNITY_CAP_BPS) return (0, 10_000);
+        if (key == K.PHASE_CAP_ESTABLISHED) return (1e6, 1_000_000e6);
+        // From a hundredth of impact to 10x. A zero multiplier would shut every line in its phase.
+        if (key == K.PHASE_MULT_FIRST_ACCESS) return (1, 1000);
+        if (key == K.PHASE_MULT_PROVEN_ONCE) return (1, 1000);
+        if (key == K.PHASE_MULT_DEVELOPING) return (1, 1000);
+        if (key == K.PHASE_MULT_ESTABLISHED) return (1, 1000);
+        // A zero share would shut every line; the whole of what a community can lend is the most.
+        if (key == K.CONCENTRATION_BPS) return (1, 10_000);
         if (key == K.PHASE_MIN_TIME_PROVEN_ONCE) return (0, 730 days);
         if (key == K.PHASE_MIN_TIME_ESTABLISHED) return (0, 730 days);
-        // The calibrated value comes later; this sanity range follows the other
-        // Standing dollar-amount parameters.
-        if (key == K.TE_EARN_INCREMENT) return (0, 1_000_000e6);
+        // Above zero, so the pool always keeps some cash for draws; at most all of it.
+        if (key == K.POOL_LIQUID_FLOOR_BPS) return (1, 10_000);
+        // Every dormancy window is at least a day, so no change can make a community fade, heal or
+        // lose its balance at once, and at most two years.
+        if (key == K.COMMUNITY_DORMANCY_GRACE) return (1 days, 730 days);
+        if (key == K.COMMUNITY_FADE_LENGTH) return (1 days, 730 days);
+        if (key == K.COMMUNITY_HEAL_LENGTH) return (1 days, 730 days);
+        if (key == K.COMMUNITY_RETURN_AFTER) return (1 days, 730 days);
+        // Above zero, or one late dollar would stop every draw; at most the whole book.
+        if (key == K.PORTFOLIO_QUALITY_BPS) return (1, 10_000);
+        // At least 2, so no one-person community can lend to itself; at most the member cap's floor.
+        if (key == K.COMMUNITY_MIN_MEMBERS) return (2, 10);
+        // At least a day, so repaying cannot clear a default in the same breath; at most two years.
+        if (key == K.DEFAULT_HEAL_COOLING) return (1 days, 730 days);
+        // At least one seat, or nobody could join anything. The ceiling of 50 is room for a later,
+        // cheaper default walk, not a proven bound: today's walk is measured only at the launch value.
+        if (key == K.MAX_SEATS_PER_WALLET) return (1, 50);
         // Sanity ranges, not design values. The floor keeps a governed change from setting the
         // ceiling to zero, which would freeze every venue's price and every strategy's yield; the
         // ceiling is 100% a year, past which no savings rate is plausible.
@@ -347,10 +324,6 @@ contract Config is Ownable2Step {
                 uint16(values[K.MINT_SPLIT_POOL]),
                 uint16(values[K.MINT_SPLIT_PROTOCOL])
             );
-    }
-
-    function epochLength() external view returns (uint64) {
-        return uint64(values[K.EPOCH_LENGTH]);
     }
 
     function hostVote() external view returns (uint16 thresholdBps, uint64 window) {
@@ -411,19 +384,6 @@ contract Config is Ownable2Step {
         return uint64(values[K.DORMANCY_GRACE]);
     }
 
-    function eligibility()
-        external
-        view
-        returns (uint8 minMembers, uint8 cleanEpochs, uint8 memberMonths, uint8 maxGapMonths)
-    {
-        return (
-            uint8(values[K.ELIG_MIN_MEMBERS]),
-            uint8(values[K.ELIG_CLEAN_EPOCHS]),
-            uint8(values[K.ELIG_MEMBER_MONTHS]),
-            uint8(values[K.ELIG_MAX_GAP_MONTHS])
-        );
-    }
-
     function yieldSplit() external view returns (uint16 memberBps, uint16 poolBps, uint16 protocolBps) {
         return (
             uint16(values[K.YIELD_SPLIT_MEMBER]),
@@ -460,39 +420,6 @@ contract Config is Ownable2Step {
         return uint64(values[K.MEMBER_SEASONING_WINDOW]);
     }
 
-    // ---- retained-capital getters ----
-
-    function operatingRequirement() external view returns (uint256 perCommunityBuffer, uint256 globalFloor) {
-        return (values[K.OPERATING_BUFFER_PER_COMMUNITY], values[K.OPERATING_FLOOR_GLOBAL]);
-    }
-
-    function creditLossReserveBps()
-        external
-        view
-        returns (uint16 current, uint16 late, uint16 finalCure, uint16 defaultRecovery)
-    {
-        return (
-            uint16(values[K.CREDIT_LOSS_RESERVE_CURRENT_BPS]),
-            uint16(values[K.CREDIT_LOSS_RESERVE_LATE_BPS]),
-            uint16(values[K.CREDIT_LOSS_RESERVE_FINAL_CURE_BPS]),
-            uint16(values[K.CREDIT_LOSS_RESERVE_DEFAULT_RECOVERY_BPS])
-        );
-    }
-
-    function venueLossReserveBps() external view returns (uint16) {
-        return uint16(values[K.VENUE_LOSS_RESERVE_BPS]);
-    }
-
-    function venueAllocationMaxBps() external view returns (uint16) {
-        return uint16(values[K.VENUE_ALLOCATION_MAX_BPS]);
-    }
-
-    // ---- Treasury Manager venue limits ----
-
-    function perVenueCapBps() external view returns (uint16) {
-        return uint16(values[K.PER_VENUE_CAP_BPS]);
-    }
-
     // ---- Standing ----
 
     function minLendable() external view returns (uint256) {
@@ -501,10 +428,6 @@ contract Config is Ownable2Step {
 
     function globalMemberCap() external view returns (uint256) {
         return values[K.GLOBAL_MEMBER_CAP];
-    }
-
-    function exposureImpactMultX100() external view returns (uint256) {
-        return values[K.EXPOSURE_IMPACT_MULT_X100];
     }
 
     function activityDecayLength() external view returns (uint64) {
@@ -519,65 +442,71 @@ contract Config is Ownable2Step {
         return uint64(values[K.STANDING_HEAL_WINDOW]);
     }
 
-    function teCommunityCapBps() external view returns (uint16) {
-        return uint16(values[K.TE_COMMUNITY_CAP_BPS]);
-    }
-
-    /// Per-phase caps: `(lineCap, concentrationBps, trustExtensionBudget,
-    /// minTimeInPreviousPhase)`. `phase` is the `CreditCore.Phase` enum value (0..3).
-    /// Established's line cap is the Global Member Cap, and First Access / Developing
-    /// have no minimum time.
-    function phaseCaps(uint8 phase)
-        external
-        view
-        returns (uint256 lineCap, uint16 concentrationBps, uint256 trustExtensionBudget, uint64 minTime)
-    {
-        if (phase == 0) {
-            return (values[K.PHASE_CAP_FIRST_ACCESS], uint16(values[K.CONCENTRATION_FIRST_ACCESS_BPS]), 0, 0);
-        }
+    /// Per phase: the multiplier on impact in hundredths, the line cap, and the time since the
+    /// first repaid advance the phase needs. `phase` is the `ICreditCore.Phase` value (0 to 3).
+    /// First Access and Developing need no time.
+    function phaseTerms(uint8 phase) external view returns (uint256 multiplierX100, uint256 cap, uint64 minTime) {
+        if (phase == 0) return (values[K.PHASE_MULT_FIRST_ACCESS], values[K.PHASE_CAP_FIRST_ACCESS], 0);
         if (phase == 1) {
             return (
+                values[K.PHASE_MULT_PROVEN_ONCE],
                 values[K.PHASE_CAP_PROVEN_ONCE],
-                uint16(values[K.CONCENTRATION_PROVEN_ONCE_BPS]),
-                values[K.TE_BUDGET_PROVEN_ONCE],
                 uint64(values[K.PHASE_MIN_TIME_PROVEN_ONCE])
             );
         }
-        if (phase == 2) {
-            return (
-                values[K.PHASE_CAP_DEVELOPING],
-                uint16(values[K.CONCENTRATION_DEVELOPING_BPS]),
-                values[K.TE_BUDGET_DEVELOPING],
-                0
-            );
-        }
+        if (phase == 2) return (values[K.PHASE_MULT_DEVELOPING], values[K.PHASE_CAP_DEVELOPING], 0);
         return (
-            values[K.GLOBAL_MEMBER_CAP],
-            uint16(values[K.CONCENTRATION_ESTABLISHED_BPS]),
-            values[K.TE_BUDGET_ESTABLISHED],
+            values[K.PHASE_MULT_ESTABLISHED],
+            values[K.PHASE_CAP_ESTABLISHED],
             uint64(values[K.PHASE_MIN_TIME_ESTABLISHED])
         );
     }
 
-    function maxVenueRedemptionDelay() external view returns (uint64) {
-        return uint64(values[K.MAX_VENUE_REDEMPTION_DELAY]);
+    function concentrationBps() external view returns (uint16) {
+        return uint16(values[K.CONCENTRATION_BPS]);
     }
 
-    function maxVenueSlippageBps() external view returns (uint16) {
-        return uint16(values[K.MAX_VENUE_SLIPPAGE_BPS]);
+    function defaultHealCooling() external view returns (uint64) {
+        return uint64(values[K.DEFAULT_HEAL_COOLING]);
     }
 
-    function stressCapital() external view returns (uint16 rateBps, uint256 floor) {
-        return (uint16(values[K.STRESS_CAPITAL_RATE_BPS]), values[K.STRESS_CAPITAL_FLOOR]);
-    }
-
-    // ---- the debt half ----
+    // ---- the pool ----
 
     function creditCore() external view returns (address) {
         return address(uint160(values[K.CREDIT_CORE]));
     }
 
-    function teEarnIncrement() external view returns (uint256) {
-        return values[K.TE_EARN_INCREMENT];
+    function poolLiquidFloorBps() external view returns (uint16) {
+        return uint16(values[K.POOL_LIQUID_FLOOR_BPS]);
+    }
+
+    /// The four community dormancy windows, in seconds.
+    function communityDormancy()
+        external
+        view
+        returns (uint64 grace, uint64 fadeLength, uint64 healLength, uint64 returnAfter)
+    {
+        return (
+            uint64(values[K.COMMUNITY_DORMANCY_GRACE]),
+            uint64(values[K.COMMUNITY_FADE_LENGTH]),
+            uint64(values[K.COMMUNITY_HEAL_LENGTH]),
+            uint64(values[K.COMMUNITY_RETURN_AFTER])
+        );
+    }
+
+    function portfolioQualityBps() external view returns (uint16) {
+        return uint16(values[K.PORTFOLIO_QUALITY_BPS]);
+    }
+
+    function communityMinMembers() external view returns (uint256) {
+        return values[K.COMMUNITY_MIN_MEMBERS];
+    }
+
+    function maxSeatsPerWallet() external view returns (uint256) {
+        return values[K.MAX_SEATS_PER_WALLET];
+    }
+
+    function creditAgreementHash() external view returns (bytes32) {
+        return bytes32(values[K.CREDIT_AGREEMENT_HASH]);
     }
 }

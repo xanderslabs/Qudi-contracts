@@ -6,6 +6,7 @@ import {Community} from "../src/Community.sol";
 import {ICommunity} from "../src/interfaces/ICommunity.sol";
 import {ISeats} from "../src/interfaces/ISeats.sol";
 import {MembershipFixture} from "./helpers/MembershipFixture.sol";
+import {ConfigKeys as K} from "../src/ConfigKeys.sol";
 
 /// Every community's seats live in one soulbound ERC-721, so the app lists a wallet's communities
 /// from one address. A seat is minted only by its own community, changes state only by its own
@@ -205,5 +206,55 @@ contract SeatsTest is MembershipFixture {
             )
         );
         assertEq(seats.tokenURI(tokenId), string.concat("data:application/json;base64,", Base64.encode(bytes(json))));
+    }
+
+    // ---- the seat cap ----
+
+    /// A wallet holds at most `MAX_SEATS_PER_WALLET` seats. Joining past it reverts.
+    function test_seatCap_aJoinPastTheCapReverts() public {
+        config.set(K.MAX_SEATS_PER_WALLET, 2);
+        _join(_create(host, PRICE), ada);
+        _join(_create(bem, PRICE), ada);
+        Community third = _create(cy, PRICE);
+        _attest(ada);
+        usdc.mint(ada, PRICE);
+        vm.prank(ada);
+        usdc.approve(address(third), PRICE);
+        (address key, bytes memory sig) = _inviteFor(address(third), ada);
+        vm.prank(ada);
+        vm.expectRevert(ISeats.TooManySeats.selector);
+        third.join(key, sig);
+    }
+
+    /// Creating a community mints a founding seat, and that counts too.
+    function test_seatCap_creatingPastTheCapReverts() public {
+        config.set(K.MAX_SEATS_PER_WALLET, 2);
+        _create(bem, 0);
+        _create(bem, 0);
+        vm.prank(bem);
+        vm.expectRevert(ISeats.TooManySeats.selector);
+        factory.createCommunity("One Too Many", 0);
+    }
+
+    /// A Left seat still counts: the default walk reads every seat the wallet holds, so leaving
+    /// frees no place.
+    function test_seatCap_aLeftSeatStillCounts() public {
+        config.set(K.MAX_SEATS_PER_WALLET, 2);
+        Community a = _create(host, PRICE);
+        _join(a, ada);
+        _join(_create(bem, PRICE), ada);
+        vm.prank(ada);
+        a.forfeit();
+        assertEq(uint8(_state(seats.seatOf(address(a), ada))), uint8(ICommunity.SeatState.Left));
+
+        Community third = _create(cy, PRICE);
+        _attest(ada);
+        usdc.mint(ada, PRICE);
+        vm.prank(ada);
+        usdc.approve(address(third), PRICE);
+        (address key, bytes memory sig) = _inviteFor(address(third), ada);
+        vm.prank(ada);
+        vm.expectRevert(ISeats.TooManySeats.selector);
+        third.join(key, sig);
     }
 }

@@ -12,6 +12,7 @@ import {ICommunity} from "./interfaces/ICommunity.sol";
 import {ICommunityFactory} from "./interfaces/ICommunityFactory.sol";
 import {IComplianceRegistry} from "./interfaces/IComplianceRegistry.sol";
 import {ICreditCore} from "./interfaces/ICreditCore.sol";
+import {IImpactSource} from "./interfaces/IImpactSource.sol";
 import {VaultStatus, ProposalStatus} from "./VaultStatus.sol";
 
 /// One community's book: every vault, every venue, one contract, one clone per community.
@@ -37,7 +38,7 @@ import {VaultStatus, ProposalStatus} from "./VaultStatus.sol";
 /// **Withdrawals are pushed.** A personal withdrawal debits the units at once and asks the venue to
 /// pay the owner; a shared payout does the same for its recipient once the members vote it
 /// through. There is no claim step.
-contract Ledger is ILedger, ICommunityInit {
+contract Ledger is ILedger, ICommunityInit, IImpactSource {
     using SafeERC20 for IERC20;
 
     IConfig public config;
@@ -353,7 +354,7 @@ contract Ledger is ILedger, ICommunityInit {
         k.acc = acc;
     }
 
-    function impactOf(address member) external view override returns (uint256 total) {
+    function impactOf(address member) public view override returns (uint256 total) {
         total = _closedImpact[member];
         uint256[] storage ids = _vaultsOf[member];
         uint256 n = ids.length;
@@ -376,6 +377,14 @@ contract Ledger is ILedger, ICommunityInit {
             }
             total += k.impact + Math.mulDiv(k.raw, acc - k.acc, ACC);
         }
+    }
+
+    /// The yield leg as an impact source: `impactOf(member)`, counted only for this ledger's own
+    /// community and only while the member's seat there is Active.
+    function impactOf(uint256 communityId, address member) external view returns (uint256) {
+        if (communityId != ICommunityFactory(factory).communityIdOf(address(this)) - 1) return 0;
+        if (community.activeTokenOf(member) == 0) return 0;
+        return impactOf(member);
     }
 
     function totalImpact() external view override returns (uint256 total) {
@@ -579,6 +588,15 @@ contract Ledger is ILedger, ICommunityInit {
             personalUnitsOf[msg.sender] += units;
         }
         emit Deposited(vaultId, msg.sender, amount, units);
+
+        // A deposit keeps the community's credit, and the depositor's own standing, from going
+        // dormant. Credit never blocks saving, so a refusal is ignored.
+        address core = config.creditCore();
+        if (core != address(0)) {
+            try ICreditCore(core)
+                .noteActivity(ICommunityFactory(factory).communityIdOf(address(this)) - 1, msg.sender) {}
+                catch {}
+        }
     }
 
     // ---- money out ----

@@ -106,8 +106,6 @@ contract SeatHandler is InviteSigner {
         originalSteward = steward_;
         treasury = treasury_;
         owner = owner_;
-        // Every actor has a key, so whichever of them the community elects can sign invites.
-        _keyed("steward");
         for (uint256 i = 0; i < actors.length; i++) {
             actors[i] = _keyedFromSeed(uint256(keccak256(abi.encode("seat-actor", i))));
         }
@@ -136,8 +134,8 @@ contract SeatHandler is InviteSigner {
     // ---- handler surface ----
 
     // Every join carries a fresh single-use invite from the current host, so the gate itself is
-    // never what refuses a join here. With no host there is no key to sign with, and the join is
-    // sent with an empty invite, which the vacancy check refuses first. A wallet that already
+    // never what refuses a join here. With no host nobody can make an invite, and the join is
+    // sent with an empty one, which the vacancy check refuses first. A wallet that already
     // holds a seat is still sent through join(), because that is the rejoin the bar refuses.
     function join(uint256 actorSeed) external {
         address actor = _pickActor(actorSeed);
@@ -157,9 +155,9 @@ contract SeatHandler is InviteSigner {
         uint256 poolBefore = core.totalLegs();
         uint256 treasuryBefore = usdc.balanceOf(treasury);
 
-        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _signedInvite(actor);
+        (address inviteKey, bytes memory keySig) = _signedInvite(actor);
         vm.prank(actor);
-        try community.join(inv, hostSig, keySig) {
+        try community.join(inviteKey, keySig) {
             uint256 stewardAfter = usdc.balanceOf(stewardAtCall);
             uint256 poolAfter = core.totalLegs();
             uint256 treasuryAfter = usdc.balanceOf(treasury);
@@ -181,19 +179,16 @@ contract SeatHandler is InviteSigner {
         usdc.mint(actor, price);
         vm.prank(actor);
         usdc.approve(address(community), price);
-        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _signedInvite(actor);
+        (address inviteKey, bytes memory keySig) = _signedInvite(actor);
         vm.prank(actor);
-        try community.join(inv, hostSig, keySig) {
+        try community.join(inviteKey, keySig) {
             rejoinLanded = true;
             lands["rejoin"]++;
         } catch {}
     }
 
-    function _signedInvite(address actor)
-        internal
-        returns (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig)
-    {
-        if (community.stewardVacant()) return (inv, hostSig, keySig);
+    function _signedInvite(address actor) internal returns (address inviteKey, bytes memory keySig) {
+        if (community.stewardVacant()) return (inviteKey, keySig);
         return _inviteFor(address(community), actor);
     }
 
@@ -311,12 +306,12 @@ contract SeatHandler is InviteSigner {
         if (_ballot(voteId, actorSeed, support)) lands["voteOnSteward"]++;
     }
 
-    // Only reachable once the role is vacant: the role now vacates exclusively through a
-    // passing removal vote executed via executeRemoveSteward() below, so without this the
-    // fuzzer could never leave a seated steward and every vacancy-dependent path stayed dead.
+    // Only reachable once the role is vacant, by a passed removal vote or a resignation. A
+    // failed election leaves its id in the slot, so the handler does not skip on a non-zero id:
+    // the contract refuses a live one itself, and a community whose host resigned before anyone
+    // seasoned would otherwise never get another.
     function electSteward(uint256 candidateSeed) external {
         if (!community.stewardVacant()) return;
-        if (community.activeStewardVoteId() != 0) return;
         uint256 n = _members.length();
         if (n == 0) return;
         address candidate = _members.at(candidateSeed % n);
@@ -332,6 +327,74 @@ contract SeatHandler is InviteSigner {
         tries["executeRemoveSteward"]++;
         try community.executeRemoveSteward() {
             lands["executeRemoveSteward"]++;
+        } catch {}
+    }
+
+    // ---- handover: nominate (host) / accept (nominee) / object (members) / complete
+    // (permissionless) / cancel (host), and resignation (host) ----
+
+    function nominateSuccessor(uint256 nomineeSeed) external {
+        address steward = community.steward();
+        if (steward == address(0)) return;
+        uint256 n = _members.length();
+        if (n == 0) return;
+        tries["nominateSuccessor"]++;
+        vm.prank(steward);
+        try community.nominateSuccessor(_members.at(nomineeSeed % n)) {
+            lands["nominateSuccessor"]++;
+        } catch {}
+    }
+
+    function acceptNomination() external {
+        ICommunity.PendingHandover memory p = community.pendingHandover();
+        if (p.nominee == address(0) || p.acceptedAt != 0) return;
+        tries["acceptNomination"]++;
+        vm.prank(p.nominee);
+        try community.acceptNomination() {
+            lands["acceptNomination"]++;
+        } catch {}
+    }
+
+    /// One objection, from the first member in pool order from `seed` whose objection lands,
+    /// then the founding steward, for the reason `_ballot` gives.
+    function objectToHandover(uint256 seed) external {
+        if (community.pendingHandover().acceptedAt == 0) return;
+        tries["objectToHandover"]++;
+        for (uint256 i; i <= ACTORS; i++) {
+            address who = i == ACTORS ? originalSteward : actors[(seed % ACTORS + i) % ACTORS];
+            if (!community.isMember(who)) continue;
+            vm.prank(who);
+            try community.objectToHandover() {
+                lands["objectToHandover"]++;
+                return;
+            } catch {}
+        }
+    }
+
+    function completeHandover() external {
+        tries["completeHandover"]++;
+        try community.completeHandover() {
+            lands["completeHandover"]++;
+        } catch {}
+    }
+
+    function cancelNomination() external {
+        address steward = community.steward();
+        if (steward == address(0)) return;
+        tries["cancelNomination"]++;
+        vm.prank(steward);
+        try community.cancelNomination() {
+            lands["cancelNomination"]++;
+        } catch {}
+    }
+
+    function resignHost() external {
+        address steward = community.steward();
+        if (steward == address(0)) return;
+        tries["resignHost"]++;
+        vm.prank(steward);
+        try community.resignHost() {
+            lands["resignHost"]++;
         } catch {}
     }
 
@@ -501,6 +564,24 @@ contract SeatsInvariantTest is StdInvariant, Test {
         assertTrue(community.stewardVacant() || community.isMember(community.steward()));
     }
 
+    /// A handover past acceptance and a vote to remove the host are never live at once, so a
+    /// host facing removal cannot hand the seat on.
+    function invariant_neverALiveHandoverAndAHostRemovalVote() public view {
+        bool liveHandover = community.pendingHandover().acceptedAt != 0;
+        assertFalse(liveHandover && _hostRemovalOpen(), "a handover is live during a host removal vote");
+    }
+
+    /// A vote to remove the host is open until it fails at its deadline, or until it passes and
+    /// executes, which clears the slot.
+    function _hostRemovalOpen() internal view returns (bool) {
+        uint256 id = community.activeStewardVoteId();
+        if (id == 0) return false;
+        ICommunity.VoteTally memory t = community.voteTally(id);
+        if (t.kind != ICommunity.VoteKind.StewardRemoval) return false;
+        if (block.timestamp <= t.deadline) return true;
+        return t.yes >= t.minYes && uint256(t.yes) * 10_000 >= uint256(t.thresholdBps) * t.denominator;
+    }
+
     function invariant_priceInRangeAtExecution() public view {
         // seatPrice is sticky once set and the floor (see handler.raiseFloor()) can rise
         // independently afterward with no vote in flight, so "seatPrice in range" does not
@@ -561,6 +642,48 @@ contract SeatsInvariantTest is StdInvariant, Test {
         assertFalse(handler.forfeitWhileFrozenLanded(), "a frozen member left");
     }
 
+    function _assertAllInvariants() internal view {
+        invariant_soulbound();
+        invariant_splitConserves();
+        invariant_memberCountMatchesGhost();
+        invariant_stewardIsMemberOrVacant();
+        invariant_neverALiveHandoverAndAHostRemovalVote();
+        invariant_priceInRangeAtExecution();
+        invariant_seatsAndCommunityAgree();
+        invariant_seatStateOnlyByVoteOrForfeit();
+        invariant_aKeptSeatBarsRejoining();
+        invariant_aFrozenMemberCannotForfeit();
+    }
+
+    /// Six actors join and season, and the host nominates the first, who accepts.
+    function _acceptedHandover() internal {
+        for (uint256 i; i < 6; i++) {
+            handler.join(i);
+        }
+        handler.warp(config.memberSeasoningWindow());
+        handler.nominateSuccessor(0);
+        handler.acceptNomination();
+        assertGt(community.pendingHandover().acceptedAt, 0, "the handover is live");
+    }
+
+    /// The fuzzer reaches this ordering rarely, so it is driven here through the same handler:
+    /// a vote to remove the host proposed while a handover is live must end the handover.
+    function test_sequence_aHostRemovalVoteEndsALiveHandover() public {
+        _acceptedHandover();
+        handler.proposeRemoveSteward(1);
+        assertGt(community.activeStewardVoteId(), 0, "the removal vote is open");
+        _assertAllInvariants();
+    }
+
+    /// The same for completion: a nominee who left before the period ended never becomes host.
+    function test_sequence_aNomineeWhoLeftNeverBecomesHost() public {
+        _acceptedHandover();
+        handler.forfeit(0);
+        handler.warp(config.memberSeasoningWindow());
+        handler.completeHandover();
+        _assertAllInvariants();
+    }
+
     /// A fixed 3000-step deterministic replay, so the per-method landed counts are stable
     /// numbers (the CreditCoreDebt replay's precedent). Every
     /// invariant above is asserted at the end.
@@ -570,11 +693,13 @@ contract SeatsInvariantTest is StdInvariant, Test {
             uint256 a0 = uint256(keccak256(abi.encode(seed, step, 0)));
             uint256 a1 = uint256(keccak256(abi.encode(seed, step, 1)));
             uint256 a2 = uint256(keccak256(abi.encode(seed, step, 2)));
-            // Weights out of 32. Forfeit is one step in 128, because every landed forfeit retires
+            // Weights out of 40. Forfeit is one step in 160, because every landed forfeit retires
             // an actor for good. Host ballots get six buckets: a host vote needs two thirds of
             // the seasoned seats inside one window, and at fewer it never carried, so the
-            // election behind it never ran either.
-            uint256 pick = a0 % 32;
+            // election behind it never ran either. Cancelling and resigning are one step in 160
+            // each, and objecting one in 80, so most nominations run their course; at two
+            // buckets, objections blocked every handover before its period ended.
+            uint256 pick = a0 % 40;
             bool yes = a0 % 4 != 0; // three in four ballots are yes, so some votes carry
             if (pick < 3) {
                 handler.join(a1);
@@ -600,21 +725,27 @@ contract SeatsInvariantTest is StdInvariant, Test {
                 handler.voteOnRemoval(a1, a2, a0 % 2 == 0); // one in two: removals are rarer
             } else if (pick == 28) {
                 handler.executeRemoval(a1);
+            } else if (pick < 32) {
+                handler.warp(a1 % 1 days);
+            } else if (pick == 32) {
+                handler.nominateSuccessor(a1);
+            } else if (pick == 33) {
+                handler.acceptNomination();
+            } else if (pick == 34) {
+                if (a2 % 2 == 0) handler.objectToHandover(a1);
+            } else if (pick < 37) {
+                handler.completeHandover();
+            } else if (pick == 37) {
+                if (a2 % 4 == 0) handler.cancelNomination();
+            } else if (pick == 38) {
+                if (a2 % 4 == 0) handler.resignHost();
             } else {
                 handler.warp(a1 % 1 days);
             }
         }
-        invariant_soulbound();
-        invariant_splitConserves();
-        invariant_memberCountMatchesGhost();
-        invariant_stewardIsMemberOrVacant();
-        invariant_priceInRangeAtExecution();
-        invariant_seatsAndCommunityAgree();
-        invariant_seatStateOnlyByVoteOrForfeit();
-        invariant_aKeptSeatBarsRejoining();
-        invariant_aFrozenMemberCannotForfeit();
+        _assertAllInvariants();
 
-        string[14] memory names = [
+        string[20] memory names = [
             "join",
             "rejoin",
             "forfeit",
@@ -628,9 +759,15 @@ contract SeatsInvariantTest is StdInvariant, Test {
             "proposeRemoval",
             "voteOnRemoval",
             "executeRemoval",
+            "nominateSuccessor",
+            "acceptNomination",
+            "objectToHandover",
+            "completeHandover",
+            "cancelNomination",
+            "resignHost",
             "warp"
         ];
-        for (uint256 i; i < 14; i++) {
+        for (uint256 i; i < 20; i++) {
             bytes32 k = bytes32(bytes(names[i]));
             console.log(names[i], handler.lands(k), "/", handler.tries(k));
         }
@@ -645,6 +782,13 @@ contract SeatsInvariantTest is StdInvariant, Test {
         assertGt(handler.lands("executeSeatPriceVote"), 0, "a price vote carried");
         assertGt(handler.lands("executeRemoveSteward"), 0, "a host vote carried");
         assertGt(handler.lands("electSteward"), 0, "an election started");
+        // The handover paths, each landed at least once.
+        assertGt(handler.lands("nominateSuccessor"), 0, "nominations landed");
+        assertGt(handler.lands("acceptNomination"), 0, "acceptances landed");
+        assertGt(handler.lands("objectToHandover"), 0, "objections landed");
+        assertGt(handler.lands("completeHandover"), 0, "a handover completed or failed");
+        assertGt(handler.lands("cancelNomination"), 0, "a nomination was cancelled");
+        assertGt(handler.lands("resignHost"), 0, "a host resigned");
         assertGt(handler.tries("rejoin"), 0, "rejoins attempted");
         assertEq(handler.lands("rejoin"), 0, "and none landed");
     }

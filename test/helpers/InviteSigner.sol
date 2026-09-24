@@ -4,32 +4,25 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {ICommunity} from "../../src/interfaces/ICommunity.sol";
 
-/// Signs invites the way the host's app and the joiner's app do, from the typed data alone, so a
-/// test proves the scheme rather than reading hashes back out of the contract.
+/// Makes invites the way the host's app and the joiner's app do. The host registers the invite
+/// key onchain; the joiner's app signs `Join(community, joiner)` with the key, from the typed data
+/// alone, so a test proves the scheme rather than reading hashes back out of the contract.
 ///
-/// A host must be an address this helper holds a key for: `_keyed(name)` gives the same address
-/// `makeAddr(name)` does and remembers its key, so a fixture swaps one for the other with no
-/// address changing.
+/// `_keyed` and `_keyedFromSeed` name people. A host no longer signs anything, so neither keeps a
+/// key; they give the same addresses `makeAddr(name)` and `vm.addr(seed)` do.
 abstract contract InviteSigner is Test {
     bytes32 internal constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-    bytes32 internal constant INVITE_TYPEHASH = keccak256(
-        "Invite(address community,address inviteKey,uint64 issuedAt,uint64 expiry,uint32 maxUses,uint256 hostNonce)"
-    );
     bytes32 internal constant JOIN_TYPEHASH = keccak256("Join(address community,address joiner)");
 
-    mapping(address => uint256) internal _keyOf;
     uint256 internal _inviteSalt;
 
-    function _keyed(string memory name) internal returns (address who) {
-        uint256 pk;
-        (who, pk) = makeAddrAndKey(name);
-        _keyOf[who] = pk;
+    function _keyed(string memory name) internal returns (address) {
+        return makeAddr(name);
     }
 
-    function _keyedFromSeed(uint256 seed) internal returns (address who) {
-        who = vm.addr(seed);
-        _keyOf[who] = seed;
+    function _keyedFromSeed(uint256 seed) internal pure returns (address) {
+        return vm.addr(seed);
     }
 
     function _digest(address community, bytes32 structHash) internal view returns (bytes32) {
@@ -44,58 +37,38 @@ abstract contract InviteSigner is Test {
         return abi.encodePacked(r, s, v);
     }
 
-    function _invite(address community, address inviteKey, uint32 maxUses, uint64 ttl)
-        internal
-        view
-        returns (ICommunity.Invite memory)
-    {
-        return ICommunity.Invite({
-            community: community,
-            inviteKey: inviteKey,
-            issuedAt: uint64(block.timestamp),
-            expiry: uint64(block.timestamp) + ttl,
-            maxUses: maxUses,
-            hostNonce: ICommunity(community).hostNonce()
-        });
-    }
-
-    function _hostSign(uint256 hostPk, ICommunity.Invite memory inv) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                INVITE_TYPEHASH, inv.community, inv.inviteKey, inv.issuedAt, inv.expiry, inv.maxUses, inv.hostNonce
-            )
-        );
-        return _sign(hostPk, _digest(inv.community, structHash));
-    }
-
     function _keySign(uint256 inviteKeyPk, address community, address joiner) internal view returns (bytes memory) {
         return _sign(inviteKeyPk, _digest(community, keccak256(abi.encode(JOIN_TYPEHASH, community, joiner))));
     }
 
-    /// A fresh single-use invite from the community's current host, bound to `joiner`.
-    function _inviteFor(address community, address joiner)
-        internal
-        returns (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig)
-    {
-        uint256 hostPk = _keyOf[ICommunity(community).steward()];
-        require(hostPk != 0, "InviteSigner: no key for the host");
+    /// The community's current host registers `inviteKey`.
+    function _createInvite(address community, address inviteKey, uint16 maxUses, uint64 expiry) internal {
+        vm.prank(ICommunity(community).steward());
+        ICommunity(community).createInvite(inviteKey, maxUses, expiry);
+    }
+
+    /// A fresh single-use, seven-day invite from the community's current host, and the key's
+    /// signature for `joiner`.
+    function _inviteFor(address community, address joiner) internal returns (address inviteKey, bytes memory keySig) {
         uint256 keyPk = uint256(keccak256(abi.encode("invite key", community, joiner, ++_inviteSalt)));
-        inv = _invite(community, vm.addr(keyPk), 1, 7 days);
-        hostSig = _hostSign(hostPk, inv);
+        inviteKey = vm.addr(keyPk);
+        _createInvite(community, inviteKey, 1, uint64(block.timestamp + 7 days));
         keySig = _keySign(keyPk, community, joiner);
     }
 
     /// Joins `community` through a fresh invite bound to `joiner`, inside a `vm.startPrank(joiner)`
-    /// the caller already opened.
+    /// the caller already opened. The prank is paused while the host registers the invite.
     function _invitedJoin(address community, address joiner) internal {
-        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(community, joiner);
-        ICommunity(community).join(inv, hostSig, keySig);
+        vm.stopPrank();
+        (address inviteKey, bytes memory keySig) = _inviteFor(community, joiner);
+        vm.startPrank(joiner);
+        ICommunity(community).join(inviteKey, keySig);
     }
 
     /// `joiner` joins `community` through a fresh invite. The caller has funded and approved.
     function _joinAs(address community, address joiner) internal {
-        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(community, joiner);
+        (address inviteKey, bytes memory keySig) = _inviteFor(community, joiner);
         vm.prank(joiner);
-        ICommunity(community).join(inv, hostSig, keySig);
+        ICommunity(community).join(inviteKey, keySig);
     }
 }

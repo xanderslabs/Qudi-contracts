@@ -2965,8 +2965,8 @@
     "file": "src/Community.sol",
     "function": "castVote",
     "bound": "seasoned voters only, on every vote kind",
-    "match": "        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();",
-    "mutant": "",
+    "match": "        // stored, with the predicate its denominator used.\n        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();",
+    "mutant": "        // stored, with the predicate its denominator used.",
     "status": "catalogued",
     "test": "test_proof8_unseasonedSeatsCannotVote_removal, test_proof8_unseasonedSeatsCannotVote_hostVote, test_proof8_unseasonedSeatsCannotVote_priceVote",
     "note": "The match was re-pointed: the check now calls `_seasonedBy` with the window the vote stored."
@@ -2987,8 +2987,8 @@
     "file": "src/Community.sol",
     "function": "castVote",
     "bound": "eligibility is measured at the vote's start, not at the ballot: otherwise a seat minted after the proposal seasons into the electorate partway through the window",
-    "match": "        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();",
-    "mutant": "        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, block.timestamp)) revert VoteIneligible();",
+    "match": "        // stored, with the predicate its denominator used.\n        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();",
+    "mutant": "        // stored, with the predicate its denominator used.\n        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, block.timestamp)) revert VoteIneligible();",
     "status": "catalogued",
     "test": "test_proof8_unseasonedSeatsCannotVote_removal",
     "note": "The match was re-pointed to the `_seasonedBy` call."
@@ -3305,101 +3305,91 @@
     "id": "SM-34",
     "file": "src/Community.sol",
     "function": "_spendInvite",
-    "bound": "the host signature: an invite must be signed by the current host, so one signed by a former host dies at the handover",
-    "match": "        if (_signer(inviteHash, hostSig) != steward) revert BadHostSignature();",
+    "bound": "the host term: an invite made before a host change (handover, resignation, removal or election, even of the same address) seats nobody",
+    "match": "        if (inv.term != hostTerm) revert InviteStale();",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_proof5_joinWithoutAValidHostSignatureReverts, test_proof5_anInviteSignedByTheOldHostDiesAtTheHandover"
+    "test": "test_invite_aHandoverEndsTheOldTermsInvites, test_invite_reElectingTheSameHostStillEndsTheOldTermsInvites"
   },
   {
     "id": "SM-35",
     "file": "src/Community.sol",
     "function": "_spendInvite",
     "bound": "the joiner binding: the invite key signed this caller, so a watcher cannot spend the invite first",
-    "match": "        if (key == address(0) || key != invite.inviteKey) revert BadKeySignature();",
+    "match": "        if (key == address(0) || key != inviteKey) revert BadKeySignature();",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_proof6_aKeySignatureForAnotherJoinerReverts"
+    "test": "test_invite_aKeySignatureForAnotherJoinerReverts"
   },
   {
     "id": "SM-36",
     "file": "src/Community.sol",
     "function": "_spendInvite",
     "bound": "expiry: an invite is valid until its expiry, not at it",
-    "match": "        if (block.timestamp >= invite.expiry) revert InviteExpired();",
-    "mutant": "        if (block.timestamp > invite.expiry) revert InviteExpired();",
+    "match": "        if (block.timestamp >= inv.expiry) revert InviteExpired();",
+    "mutant": "        if (block.timestamp > inv.expiry) revert InviteExpired();",
     "status": "catalogued",
-    "test": "test_proof7_anExpiredInviteReverts"
-  },
-  {
-    "id": "SM-37",
-    "file": "src/Community.sol",
-    "function": "_spendInvite",
-    "bound": "an invite is not valid before it was issued",
-    "match": "        if (block.timestamp < invite.issuedAt) revert InviteNotYetValid();",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_proof7_anInviteIssuedInTheFutureReverts"
+    "test": "test_invite_anExpiredInviteReverts"
   },
   {
     "id": "SM-38",
     "file": "src/Community.sol",
-    "function": "_spendInvite",
-    "bound": "the TTL bound: an invite lives at most INVITE_MAX_TTL, even with the host's signature",
-    "match": "        if (invite.expiry - invite.issuedAt > maxTtl || invite.maxUses > maxUses) revert InviteOutOfBounds();",
-    "mutant": "        if (invite.maxUses > maxUses) revert InviteOutOfBounds();",
+    "function": "createInvite",
+    "bound": "the TTL bound: an invite lives at most INVITE_MAX_TTL from its creation",
+    "match": "        if (expiry - block.timestamp > maxTtl) revert InviteOutOfBounds();",
+    "mutant": "",
     "status": "catalogued",
-    "test": "test_proof7_anInviteLongerOrLargerThanTheConfigAllowsReverts"
+    "test": "test_invite_creatingOutsideTheBoundsReverts"
   },
   {
     "id": "SM-39",
     "file": "src/Community.sol",
-    "function": "_spendInvite",
-    "bound": "the uses bound: an invite seats at most INVITE_MAX_USES, even with the host's signature",
-    "match": "        if (invite.expiry - invite.issuedAt > maxTtl || invite.maxUses > maxUses) revert InviteOutOfBounds();",
-    "mutant": "        if (invite.expiry - invite.issuedAt > maxTtl) revert InviteOutOfBounds();",
+    "function": "createInvite",
+    "bound": "the uses bound: an invite seats at most INVITE_MAX_USES, and exactly that many is allowed",
+    "match": "        if (maxUses > usesCap) revert InviteOutOfBounds();",
+    "mutant": "        if (maxUses >= usesCap) revert InviteOutOfBounds();",
     "status": "catalogued",
-    "test": "test_proof7_anInviteLongerOrLargerThanTheConfigAllowsReverts"
+    "test": "test_invite_creatingOutsideTheBoundsReverts"
   },
   {
     "id": "SM-40",
     "file": "src/Community.sol",
     "function": "_spendInvite",
-    "bound": "the nonce: `revokeAllInvites` ends every invite signed before it",
-    "match": "        if (invite.hostNonce != hostNonce) revert InviteStaleNonce();",
+    "bound": "the revoke-all epoch: `revokeAllInvites` ends every invite made before it",
+    "match": "        if (inv.epoch != inviteEpoch) revert InviteStale();",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_proof7_everyInviteSignedBeforeANonceBumpReverts"
+    "test": "test_invite_revokeAllEndsEveryInviteSoFar"
   },
   {
     "id": "SM-41",
     "file": "src/Community.sol",
     "function": "_spendInvite",
     "bound": "a revoked invite seats nobody",
-    "match": "        if (inviteRevoked[invite.inviteKey]) revert InviteWasRevoked();",
+    "match": "        if (inv.revoked) revert InviteWasRevoked();",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_proof7_aRevokedInviteReverts"
+    "test": "test_invite_aRevokedInviteReverts"
   },
   {
     "id": "SM-42",
     "file": "src/Community.sol",
     "function": "_spendInvite",
     "bound": "the use count: an invite seats exactly `maxUses` members",
-    "match": "        if (inviteUses[invite.inviteKey] >= invite.maxUses) revert InviteUsedUp();",
-    "mutant": "        if (inviteUses[invite.inviteKey] > invite.maxUses) revert InviteUsedUp();",
+    "match": "        if (inv.uses >= inv.maxUses) revert InviteUsedUp();",
+    "mutant": "        if (inv.uses > inv.maxUses) revert InviteUsedUp();",
     "status": "catalogued",
-    "test": "test_proof8_aGroupInviteSeatsExactlyMaxUsesMembers, test_proof7_anOverUsedInviteReverts"
+    "test": "test_invite_aGroupInviteSeatsExactlyMaxUsesMembers"
   },
   {
     "id": "SM-43",
     "file": "src/Community.sol",
     "function": "_spendInvite",
     "bound": "each seat counts one use of its invite",
-    "match": "        inviteUses[invite.inviteKey]++;",
+    "match": "        inv.uses++;",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_proof8_aGroupInviteSeatsExactlyMaxUsesMembers, test_proof7_anOverUsedInviteReverts"
+    "test": "test_invite_aGroupInviteSeatsExactlyMaxUsesMembers"
   },
   {
     "id": "SM-44",
@@ -3499,7 +3489,7 @@
     "match": "    function revokeInvite(address inviteKey) external {\n        if (msg.sender != steward) revert NotSteward();",
     "mutant": "    function revokeInvite(address inviteKey) external {",
     "status": "catalogued",
-    "test": "test_proof7_aRevokedInviteReverts"
+    "test": "test_invite_onlyTheHostCreatesAndRevokes"
   },
   {
     "id": "SM-54",
@@ -3509,17 +3499,17 @@
     "match": "    function revokeAllInvites() external {\n        if (msg.sender != steward) revert NotSteward();",
     "mutant": "    function revokeAllInvites() external {",
     "status": "catalogued",
-    "test": "test_proof7_everyInviteSignedBeforeANonceBumpReverts"
+    "test": "test_invite_onlyTheHostCreatesAndRevokes"
   },
   {
     "id": "SM-55",
     "file": "src/Community.sol",
     "function": "_spendInvite",
-    "bound": "an invite names its community, and another community's invite seats nobody here",
-    "match": "        if (invite.community != address(this)) revert InviteWrongCommunity();",
-    "mutant": "",
+    "bound": "an invite is registered in this community: a key unknown here, or registered in another community, seats nobody",
+    "match": "        if (inv.expiry == 0) revert InviteNotRegistered();\n        if (inv.term != hostTerm) revert InviteStale();",
+    "mutant": "        if (inv.term != hostTerm) revert InviteStale();",
     "status": "catalogued",
-    "test": "test_anInviteForAnotherCommunityReverts"
+    "test": "test_invite_anUnregisteredKeySeatsNobody"
   },
   {
     "id": "SM-56",
@@ -3560,5 +3550,325 @@
     "mutant": "",
     "status": "catalogued",
     "test": "test_refusesASeatsWiredToAnotherFactory"
+  },
+  {
+    "id": "SM-60",
+    "file": "src/Community.sol",
+    "function": "createInvite",
+    "bound": "only the host creates an invite, so with the seat empty nobody does",
+    "match": "    function createInvite(address inviteKey, uint16 maxUses, uint64 expiry) external {\n        if (msg.sender != steward) revert NotSteward();",
+    "mutant": "    function createInvite(address inviteKey, uint16 maxUses, uint64 expiry) external {",
+    "status": "catalogued",
+    "test": "test_invite_onlyTheHostCreatesAndRevokes, test_invite_noHostMeansNoNewInvites"
+  },
+  {
+    "id": "SM-61",
+    "file": "src/Community.sol",
+    "function": "createInvite",
+    "bound": "a key is registered once, so a revoked or spent invite cannot be refilled under the same link",
+    "match": "        if (_invites[inviteKey].expiry != 0) revert InviteAlreadyRegistered();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_invite_creatingOutsideTheBoundsReverts"
+  },
+  {
+    "id": "SM-62",
+    "file": "src/Community.sol",
+    "function": "createInvite",
+    "bound": "an invite's expiry is in the future when it is made",
+    "match": "        if (expiry <= block.timestamp) revert InviteExpired();",
+    "mutant": "        if (expiry < block.timestamp) revert InviteExpired();",
+    "status": "catalogued",
+    "test": "test_invite_creatingOutsideTheBoundsReverts"
+  },
+  {
+    "id": "SM-63",
+    "file": "src/Community.sol",
+    "function": "revokeInvite",
+    "bound": "only a registered invite is revoked",
+    "match": "        if (inv.expiry == 0) revert InviteNotRegistered();\n        inv.revoked = true;",
+    "mutant": "        inv.revoked = true;",
+    "status": "catalogued",
+    "test": "test_invite_onlyTheHostCreatesAndRevokes"
+  },
+  {
+    "id": "SM-64",
+    "file": "src/Community.sol",
+    "function": "executeRemoveSteward",
+    "bound": "a removal and an election each start a new host term",
+    "match": "        steward = v.kind == VoteKind.Election ? v.target : address(0);\n        hostTerm++;",
+    "mutant": "        steward = v.kind == VoteKind.Election ? v.target : address(0);",
+    "status": "catalogued",
+    "test": "test_invite_aRemovalAndAnElectionEachEndTheOldTermsInvites"
+  },
+  {
+    "id": "SM-65",
+    "file": "src/Community.sol",
+    "function": "completeHandover",
+    "bound": "a completed handover starts a new host term",
+    "match": "        steward = nominee;\n        hostTerm++;",
+    "mutant": "        steward = nominee;",
+    "status": "catalogued",
+    "test": "test_invite_aHandoverEndsTheOldTermsInvites"
+  },
+  {
+    "id": "SM-66",
+    "file": "src/Community.sol",
+    "function": "resignHost",
+    "bound": "a resignation starts a new host term",
+    "match": "        steward = address(0);\n        hostTerm++;",
+    "mutant": "        steward = address(0);",
+    "status": "catalogued",
+    "test": "test_invite_aResignationEndsTheOldTermsInvites"
+  },
+  {
+    "id": "SM-67",
+    "file": "src/Community.sol",
+    "function": "nominateSuccessor",
+    "bound": "only the host nominates a successor",
+    "match": "    function nominateSuccessor(address nominee) external {\n        if (msg.sender != steward) revert NotSteward();",
+    "mutant": "    function nominateSuccessor(address nominee) external {",
+    "status": "catalogued",
+    "test": "test_proof2_onlyASeasonedActiveUnfrozenMemberOtherThanTheHostCanBeNominated"
+  },
+  {
+    "id": "SM-68",
+    "file": "src/Community.sol",
+    "function": "nominateSuccessor",
+    "bound": "the host cannot nominate themselves",
+    "match": "        if (nominee == steward || !_canHost(nominee)) revert NomineeIneligible();",
+    "mutant": "        if (!_canHost(nominee)) revert NomineeIneligible();",
+    "status": "catalogued",
+    "test": "test_proof2_onlyASeasonedActiveUnfrozenMemberOtherThanTheHostCanBeNominated"
+  },
+  {
+    "id": "SM-69",
+    "file": "src/Community.sol",
+    "function": "_canHost",
+    "bound": "a nominee, and a new host at completion, is an Active member no removal vote is open against",
+    "match": "        return _isMember(who) && _isSeasoned(who);",
+    "mutant": "        return _isSeasoned(who);",
+    "status": "catalogued",
+    "test": "test_proof2_onlyASeasonedActiveUnfrozenMemberOtherThanTheHostCanBeNominated, test_proof6_aNomineeFrozenBeforeCompletionFailsTheHandover"
+  },
+  {
+    "id": "SM-70",
+    "file": "src/Community.sol",
+    "function": "_canHost",
+    "bound": "a nominee is seasoned",
+    "match": "        return _isMember(who) && _isSeasoned(who);",
+    "mutant": "        return _isMember(who);",
+    "status": "catalogued",
+    "test": "test_proof2_onlyASeasonedActiveUnfrozenMemberOtherThanTheHostCanBeNominated"
+  },
+  {
+    "id": "SM-71",
+    "file": "src/Community.sol",
+    "function": "acceptNomination",
+    "bound": "the acceptance window: the nominee accepts until HANDOVER_ACCEPT_WINDOW after the nomination, and not a second after",
+    "match": "        if (block.timestamp > h.nominatedAt + config.handoverAcceptWindow()) revert NominationLapsed();",
+    "mutant": "        if (block.timestamp >= h.nominatedAt + config.handoverAcceptWindow()) revert NominationLapsed();",
+    "status": "catalogued",
+    "test": "test_proof3_theLastSecondOfTheWindowStillAccepts"
+  },
+  {
+    "id": "SM-72",
+    "file": "src/Community.sol",
+    "function": "acceptNomination",
+    "bound": "a lapsed nomination cannot be accepted",
+    "match": "        if (block.timestamp > h.nominatedAt + config.handoverAcceptWindow()) revert NominationLapsed();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof3_aNominationLapsesAfterSevenDaysWithNoCooldown"
+  },
+  {
+    "id": "SM-73",
+    "file": "src/Community.sol",
+    "function": "_handoverPending",
+    "bound": "a nomination not accepted in time lapses in place and blocks no new one",
+    "match": "        return h.voteId != 0 || block.timestamp <= h.nominatedAt + config.handoverAcceptWindow();",
+    "mutant": "        return true;",
+    "status": "catalogued",
+    "test": "test_proof3_aNominationLapsesAfterSevenDaysWithNoCooldown"
+  },
+  {
+    "id": "SM-74",
+    "file": "src/Community.sol",
+    "function": "_startVote",
+    "bound": "the host is not counted in the objection denominator",
+    "match": "            denominator -= _countedIn(steward, last) + _countedIn(target, last);",
+    "mutant": "            denominator -= _countedIn(target, last);",
+    "status": "catalogued",
+    "test": "test_proof1_aHandoverNobodyBlocksCompletes"
+  },
+  {
+    "id": "SM-75",
+    "file": "src/Community.sol",
+    "function": "_startVote",
+    "bound": "the nominee is not counted in the objection denominator",
+    "match": "            denominator -= _countedIn(steward, last) + _countedIn(target, last);",
+    "mutant": "            denominator -= _countedIn(steward, last);",
+    "status": "catalogued",
+    "test": "test_proof1_aHandoverNobodyBlocksCompletes"
+  },
+  {
+    "id": "SM-76",
+    "file": "src/Community.sol",
+    "function": "objectToHandover",
+    "bound": "neither the host nor the nominee objects",
+    "match": "        if (msg.sender == steward || msg.sender == v.target) revert VoteIneligible();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof4_eachCountedMemberObjectsOnceAndNoOneElse"
+  },
+  {
+    "id": "SM-77",
+    "file": "src/Community.sol",
+    "function": "objectToHandover",
+    "bound": "only a member seasoned at acceptance objects, as the denominator counts",
+    "match": "        if (msg.sender == steward || msg.sender == v.target) revert VoteIneligible();\n        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();",
+    "mutant": "        if (msg.sender == steward || msg.sender == v.target) revert VoteIneligible();",
+    "status": "catalogued",
+    "test": "test_proof4_eachCountedMemberObjectsOnceAndNoOneElse"
+  },
+  {
+    "id": "SM-78",
+    "file": "src/Community.sol",
+    "function": "objectToHandover",
+    "bound": "one objection each",
+    "match": "        if (v.voted[msg.sender]) revert AlreadyVoted();\n        v.voted[msg.sender] = true;\n        v.againstCount++;",
+    "mutant": "        v.voted[msg.sender] = true;\n        v.againstCount++;",
+    "status": "catalogued",
+    "test": "test_proof4_eachCountedMemberObjectsOnceAndNoOneElse"
+  },
+  {
+    "id": "SM-79",
+    "file": "src/Community.sol",
+    "function": "objectToHandover",
+    "bound": "the block is more than half: half exactly does not block",
+    "match": "        if (uint256(v.againstCount) * 10_000 > HANDOVER_BLOCK_BPS * v.denominator) _failHandover();",
+    "mutant": "        if (uint256(v.againstCount) * 10_000 >= HANDOVER_BLOCK_BPS * v.denominator) _failHandover();",
+    "status": "catalogued",
+    "test": "test_proof4_threeObjectionsOfSixDoNotBlock"
+  },
+  {
+    "id": "SM-80",
+    "file": "src/Community.sol",
+    "function": "objectToHandover",
+    "bound": "objections over half fail the handover",
+    "match": "        if (uint256(v.againstCount) * 10_000 > HANDOVER_BLOCK_BPS * v.denominator) _failHandover();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof4_fourObjectionsOfSixBlockAndStartTheCooldown"
+  },
+  {
+    "id": "SM-81",
+    "file": "src/Community.sol",
+    "function": "castVote",
+    "bound": "a handover's objection period takes no ballots, so nobody can vote yes on it",
+    "match": "        if (v.kind == VoteKind.Handover) revert NoActiveVote();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof4_eachCountedMemberObjectsOnceAndNoOneElse"
+  },
+  {
+    "id": "SM-82",
+    "file": "src/Community.sol",
+    "function": "nominateSuccessor",
+    "bound": "the handover cooldown: the host may nominate again at exactly the failure plus REMOVAL_REPROPOSE_COOLDOWN, and not a second before",
+    "match": "        if (failedAt != 0 && block.timestamp < failedAt + config.removalReproposeCooldown()) {",
+    "mutant": "        if (failedAt != 0 && block.timestamp <= failedAt + config.removalReproposeCooldown()) {",
+    "status": "catalogued",
+    "test": "test_proof4_fourObjectionsOfSixBlockAndStartTheCooldown"
+  },
+  {
+    "id": "SM-83",
+    "file": "src/Community.sol",
+    "function": "nominateSuccessor",
+    "bound": "a failed handover starts a cooldown at all",
+    "match": "        if (failedAt != 0 && block.timestamp < failedAt + config.removalReproposeCooldown()) {",
+    "mutant": "        if (false) {",
+    "status": "catalogued",
+    "test": "test_proof4_fourObjectionsOfSixBlockAndStartTheCooldown, test_proof6_aNomineeFrozenBeforeCompletionFailsTheHandover"
+  },
+  {
+    "id": "SM-84",
+    "file": "src/Community.sol",
+    "function": "_failHandover",
+    "bound": "the failure time is recorded, which is what the cooldown runs from",
+    "match": "        _handoverFailedAt = uint64(block.timestamp);",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof4_fourObjectionsOfSixBlockAndStartTheCooldown, test_proof6_aNomineeWhoLeftBeforeCompletionFailsTheHandover"
+  },
+  {
+    "id": "SM-85",
+    "file": "src/Community.sol",
+    "function": "proposeRemoveSteward",
+    "bound": "proposing to remove the host cancels a pending handover, so a host cannot escape a removal by handing the seat on",
+    "match": "        if (_handoverPending()) _cancelNomination();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof5_proposingARemovalCancelsAnAcceptedHandover, test_proof5_proposingARemovalCancelsANominationNotYetAccepted"
+  },
+  {
+    "id": "SM-86",
+    "file": "src/Community.sol",
+    "function": "nominateSuccessor",
+    "bound": "no nomination while a vote to remove the host is open",
+    "match": "        if (msg.sender != steward) revert NotSteward();\n        if (_hostVoteOpen()) revert HostVoteOpen();\n        if (_handoverPending()) revert NominationPending();\n        uint64 failedAt",
+    "mutant": "        if (msg.sender != steward) revert NotSteward();\n        if (_handoverPending()) revert NominationPending();\n        uint64 failedAt",
+    "status": "catalogued",
+    "test": "test_proof5_noNominationOrResignationWhileARemovalVoteIsOpen"
+  },
+  {
+    "id": "SM-87",
+    "file": "src/Community.sol",
+    "function": "resignHost",
+    "bound": "no resignation while a vote to remove the host is open",
+    "match": "    function resignHost() external {\n        if (msg.sender != steward) revert NotSteward();\n        if (_hostVoteOpen()) revert HostVoteOpen();",
+    "mutant": "    function resignHost() external {\n        if (msg.sender != steward) revert NotSteward();",
+    "status": "catalogued",
+    "test": "test_proof5_noNominationOrResignationWhileARemovalVoteIsOpen"
+  },
+  {
+    "id": "SM-88",
+    "file": "src/Community.sol",
+    "function": "resignHost",
+    "bound": "no resignation while a nomination is pending",
+    "match": "        if (_handoverPending()) revert NominationPending();\n        steward = address(0);",
+    "mutant": "        steward = address(0);",
+    "status": "catalogued",
+    "test": "test_proof7_noResignationWhileANominationIsPending"
+  },
+  {
+    "id": "SM-89",
+    "file": "src/Community.sol",
+    "function": "completeHandover",
+    "bound": "the nominee is checked again at completion: one who left or is frozen fails the handover",
+    "match": "        if (!_canHost(nominee)) {",
+    "mutant": "        if (false) {",
+    "status": "catalogued",
+    "test": "test_proof6_aNomineeFrozenBeforeCompletionFailsTheHandover, test_proof6_aNomineeWhoLeftBeforeCompletionFailsTheHandover"
+  },
+  {
+    "id": "SM-90",
+    "file": "src/Community.sol",
+    "function": "_thresholdFor",
+    "bound": "an election passes at the community vote threshold, more than half, no longer the host-vote threshold",
+    "match": "        if (kind == VoteKind.StewardRemoval) return config.hostVote();",
+    "mutant": "        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Election) return config.hostVote();",
+    "status": "catalogued",
+    "test": "test_proof8_sixVotersElectWithFourYesVotesAndNotThree"
+  },
+  {
+    "id": "SM-91",
+    "file": "src/Community.sol",
+    "function": "_thresholdFor",
+    "bound": "a vote to remove the host keeps the host-vote threshold",
+    "match": "        if (kind == VoteKind.StewardRemoval) return config.hostVote();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof8_removingTheHostOfSixStillNeedsFive"
   }
 ]

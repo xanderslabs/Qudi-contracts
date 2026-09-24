@@ -75,6 +75,8 @@ contract Config is Ownable2Step {
         // this long to propose removing the same member again, so a member is frozen at most one
         // week in a month.
         _init(K.REMOVAL_REPROPOSE_COOLDOWN, 30 days);
+        // A nominee has a week to take up the host role, the same length as a vote.
+        _init(K.HANDOVER_ACCEPT_WINDOW, 7 days);
         // Canonical stages, elapsed seconds from drawTimestamp.
         _init(K.STAGE_GRACE_START, 60 days);
         _init(K.STAGE_LATE_START, 65 days);
@@ -250,6 +252,9 @@ contract Config is Ownable2Step {
         // Both ends are set: at least 7 days so a timelocked change cannot make
         // it zero and let a steward re-freeze a member the moment a vote fails, at most 180.
         if (key == K.REMOVAL_REPROPOSE_COOLDOWN) return (7 days, 180 days);
+        // At least a day, so a nominee has time to see the nomination; at most the 30 days
+        // every other window in this contract gets.
+        if (key == K.HANDOVER_ACCEPT_WINDOW) return (1 days, 30 days);
         // The launch values are $10 and 14 days; these sanity ranges are not design
         // values. Both floors sit above zero because a floor must never repeal the mechanism: at zero either bar disappears
         // and a dust deposit made a second before the proposal would carry a vote, which is the
@@ -401,9 +406,9 @@ contract Config is Ownable2Step {
         return (uint16(values[K.HOST_VOTE_THRESHOLD_BPS]), uint64(values[K.HOST_VOTE_WINDOW]));
     }
 
-    /// Threshold and window for the community vote types (card-price approval, Line
-    /// suspension). Simple-majority default; the host removal/election vote keeps its own
-    /// higher two-thirds threshold in hostVote().
+    /// Threshold and window for the community vote types (card-price approval, member removal,
+    /// host election, and the handover's objection period). Simple-majority default; the host
+    /// removal vote keeps its own higher two-thirds threshold in hostVote().
     function communityVote() external view returns (uint16 thresholdBps, uint64 window) {
         return (uint16(values[K.COMMUNITY_VOTE_THRESHOLD_BPS]), uint64(values[K.COMMUNITY_VOTE_WINDOW]));
     }
@@ -433,6 +438,11 @@ contract Config is Ownable2Step {
     /// for removal again.
     function removalReproposeCooldown() external view returns (uint64) {
         return uint64(values[K.REMOVAL_REPROPOSE_COOLDOWN]);
+    }
+
+    /// Seconds a nominated successor has to accept the host role.
+    function handoverAcceptWindow() external view returns (uint64) {
+        return uint64(values[K.HANDOVER_ACCEPT_WINDOW]);
     }
 
     /// The five canonical stage boundaries, elapsed seconds from drawTimestamp.

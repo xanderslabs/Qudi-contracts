@@ -4,28 +4,32 @@ pragma solidity 0.8.30;
 import {ISeats} from "./ISeats.sol";
 
 /// A community's votes and settings: the host (steward) role, the seat price, the invite gate,
-/// and the removal and election votes. Its seats live in the one `Seats` contract, which holds
-/// every community's seats; this contract mints there at `join` and at creation, and changes a
-/// seat's state there at `forfeit` and `executeRemoval`.
+/// and the removal, election and handover votes. Its seats live in the one `Seats` contract, which
+/// holds every community's seats; this contract mints there at `join` and at creation, and changes
+/// a seat's state there at `forfeit` and `executeRemoval`.
 ///
-/// `join` needs an invite the current host signed, bound to the caller by the invite key's own
-/// signature, and it seats at most `MEMBER_CAP` Active members. A member leaves by forfeit(), or is
-/// removed by a vote the steward proposes and the members carry. Either way the seat stays in the
-/// wallet and carries its final state, and a defaulting steward faces the same consequences as any
-/// member: the role changes only by vote. Every paid mint splits the price, config-driven: 40% to
+/// `join` needs an invite the current host registered onchain, bound to the caller by the invite
+/// key's own signature, and it seats at most `MEMBER_CAP` Active members. A member leaves by
+/// forfeit(), or is removed by a vote the steward proposes and the members carry. Either way the
+/// seat stays in the wallet and carries its final state. The host role changes four ways: a
+/// handover the members do not block, a resignation, a removal vote, and an election while the
+/// seat is empty. Every paid mint splits the price, config-driven: 40% to
 /// the Community Credit Account, 30% to the host's wallet (paid directly, no vault calls), 30% to
 /// the protocol treasury. A $0 seat moves no money. The founding seat is minted unpaid inside
 /// initialize().
 interface ICommunity {
     /// StewardRemoval and Election drive proposeRemoveSteward/electSteward; Price drives
     /// proposeSeatPrice/executeSeatPriceVote; Removal drives proposeRemoval/executeRemoval.
-    /// Removal keeps the ordinal the retired Suspension kind had: `VoteStarted` emits the kind
-    /// as a `uint8`, so moving it would silently change what the indexer reads.
+    /// Handover is the objection period of an accepted nomination, driven by objectToHandover and
+    /// completeHandover. Removal keeps the ordinal the retired Suspension kind had: `VoteStarted`
+    /// emits the kind as a `uint8`, so moving it would silently change what the indexer reads.
+    /// New kinds go at the end for the same reason.
     enum VoteKind {
         StewardRemoval,
         Election,
         Price,
-        Removal
+        Removal,
+        Handover
     }
 
     /// What a seat is. None is a wallet that never minted here. Active to
@@ -38,17 +42,32 @@ interface ICommunity {
         Left
     }
 
-    /// An invite, as EIP-712 typed data in this community's domain. The host signs it once, off
-    /// chain, and it seats up to `maxUses` callers from `issuedAt` until `expiry`. `inviteKey` is
-    /// the address of a throwaway key pair the host's app made for this invite; the link carries
-    /// the private key, and each joiner's app signs `Join(community, joiner)` with it.
-    struct Invite {
-        address community;
-        address inviteKey;
-        uint64 issuedAt;
+    /// An invite the host registered with `createInvite`, keyed by the address of a throwaway
+    /// key pair the host's app made. The link carries the private key, and each joiner's app signs
+    /// `Join(community, joiner)` with it. It seats up to `maxUses` callers until one second before
+    /// `expiry`, and only while `term` is the current `hostTerm` and `epoch` the current
+    /// `inviteEpoch`. An `expiry` of 0 means the key was never registered here.
+    struct InviteRecord {
+        uint64 term;
+        uint64 epoch;
         uint64 expiry;
-        uint32 maxUses;
-        uint256 hostNonce;
+        uint16 maxUses;
+        uint16 uses;
+        bool revoked;
+    }
+
+    /// A nomination that has not completed, failed, been cancelled or lapsed, or all zeros.
+    /// `acceptedAt` is 0 until the nominee accepts; from then `voteId` is the objection period's
+    /// vote, `voteTally(voteId).no` is the objection count, and `denominator` is the seasoned
+    /// Active headcount at acceptance less the host and the nominee.
+    struct PendingHandover {
+        address nominee;
+        uint64 nominatedAt;
+        uint64 acceptedAt;
+        uint64 objectionDeadline;
+        uint32 objections;
+        uint256 denominator;
+        uint256 voteId;
     }
 
     /// A vote's tally and the bars it must clear, as `_passed` reads them: yes votes at least
@@ -64,14 +83,15 @@ interface ICommunity {
         uint256 minYes;
     }
 
-    /// Mints at the current price and splits it 40/30/30. `hostSig` is the current host's
-    /// signature over `invite`; `keySig` is the invite key's signature over (community, caller).
-    function join(Invite calldata invite, bytes calldata hostSig, bytes calldata keySig) external;
+    /// Mints at the current price and splits it 40/30/30. `keySig` is the invite key's EIP-712
+    /// signature over (community, caller).
+    function join(address inviteKey, bytes calldata keySig) external;
+    function createInvite(address inviteKey, uint16 maxUses, uint64 expiry) external; // host only
     function revokeInvite(address inviteKey) external; // host only; ends one invite
-    function revokeAllInvites() external; // host only; bumps hostNonce, ending every invite signed before
-    function hostNonce() external view returns (uint256);
-    function inviteUses(address inviteKey) external view returns (uint256);
-    function inviteRevoked(address inviteKey) external view returns (bool);
+    function revokeAllInvites() external; // host only; bumps inviteEpoch, ending every invite so far
+    function inviteOf(address inviteKey) external view returns (InviteRecord memory);
+    function hostTerm() external view returns (uint64); // bumped at every host change
+    function inviteEpoch() external view returns (uint64); // bumped by revokeAllInvites
     function forfeit() external; // sets Left; blocked by an open tab, a personal vault, or a removal vote
     function steward() external view returns (address);
     function isMember(address wallet) external view returns (bool); // an Active seat, not frozen
@@ -81,8 +101,17 @@ interface ICommunity {
     // steward replacement
     function proposeRemoveSteward() external; // any member; starts the 7-day vote
     function castVote(uint256 voteId, bool support) external;
-    function executeRemoveSteward() external; // needs two thirds at window close
+    function executeRemoveSteward() external; // a removal needs over two thirds, an election over half
     function electSteward(address candidate) external; // same vote shape, when the role is vacant
+
+    // handover and resignation
+    function nominateSuccessor(address nominee) external; // host only
+    function acceptNomination() external; // nominee only; starts the objection period
+    function objectToHandover() external; // once, by a member counted in the denominator
+    function completeHandover() external; // permissionless after the objection period
+    function cancelNomination() external; // host only; no cooldown
+    function resignHost() external; // host only; the seat empties and the host stays a member
+    function pendingHandover() external view returns (PendingHandover memory);
 
     // card-price vote
     function proposeSeatPrice(uint256 newPrice) external; // steward only; floor applies; starts the vote
@@ -117,8 +146,15 @@ interface ICommunity {
     event SeatPriceSet(uint256 price);
     event VoteStarted(uint256 indexed voteId, uint8 indexed kind, address indexed target);
     event StewardChanged(address indexed oldSteward, address indexed newSteward);
+    event InviteCreated(address indexed inviteKey, uint64 term, uint16 maxUses, uint64 expiry);
     event InviteRevoked(address indexed inviteKey);
-    event AllInvitesRevoked(uint256 hostNonce);
+    event AllInvitesRevoked(uint64 inviteEpoch);
+    event SuccessorNominated(address indexed nominee);
+    event NominationAccepted(address indexed nominee, uint256 voteId);
+    event NominationCancelled(address indexed nominee);
+    /// Objections went over half, or the nominee no longer qualified at completion. The host
+    /// waits `REMOVAL_REPROPOSE_COOLDOWN` before nominating again.
+    event HandoverFailed(address indexed nominee);
 
     error NotSteward();
     error NotMember();
@@ -134,17 +170,17 @@ interface ICommunity {
     error AboveCeiling();
     /// `join` while the community holds `MEMBER_CAP` Active seats.
     error CommunityFull();
-    error InviteWrongCommunity();
-    error InviteNotYetValid();
+    /// The key is not an invite of this community.
+    error InviteNotRegistered();
+    error InviteAlreadyRegistered();
+    /// At `createInvite`, an expiry not in the future; at `join`, an invite past its expiry.
     error InviteExpired();
-    /// The invite runs longer than `INVITE_MAX_TTL` or allows more than `INVITE_MAX_USES` uses.
+    /// The invite would run longer than `INVITE_MAX_TTL` or allow more than `INVITE_MAX_USES` uses.
     error InviteOutOfBounds();
     error InviteUsedUp();
     error InviteWasRevoked();
-    /// Signed under a host nonce `revokeAllInvites` has since moved past.
-    error InviteStaleNonce();
-    /// `hostSig` does not recover the current host.
-    error BadHostSignature();
+    /// Created in an earlier host term, or before a `revokeAllInvites`.
+    error InviteStale();
     /// `keySig` does not recover the invite key for this caller.
     error BadKeySignature();
     error NotAttested(); // seat mint by an account that has not self-attested
@@ -176,4 +212,12 @@ interface ICommunity {
     error VoteWindowClosed(); // a ballot cast after the vote's deadline
     error CandidateNotMember(); // election execution: the candidate is no longer a member
     error VoteIneligible(); // seat not seasoned when the vote started
+
+    // handover errors
+    error NominationPending(); // a nomination is live, or already accepted
+    error NoNomination();
+    error NotNominee();
+    error NominationLapsed(); // accepted after HANDOVER_ACCEPT_WINDOW
+    error NomineeIneligible(); // not a seasoned Active unfrozen member other than the host
+    error HandoverCooldown(); // inside REMOVAL_REPROPOSE_COOLDOWN of a failed handover
 }

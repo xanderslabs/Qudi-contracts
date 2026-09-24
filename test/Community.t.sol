@@ -133,12 +133,11 @@ contract CommunityTest is InviteSigner {
         usdc.mint(ada, price);
         vm.prank(ada);
         usdc.approve(address(freshCommunity), price);
-        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) =
-            _inviteFor(address(freshCommunity), ada);
+        (address inviteKey, bytes memory keySig) = _inviteFor(address(freshCommunity), ada);
         vm.expectEmit(true, false, false, false);
         emit ICommunity.SeatMinted(ada, 0, 0, 0, 0);
         vm.prank(ada);
-        freshCommunity.join(inv, hostSig, keySig);
+        freshCommunity.join(inviteKey, keySig);
         (uint16 sBps, uint16 pBps, uint16 protBps) = config.mintSplit();
         uint256 toSteward = price * sBps / 10_000;
         uint256 toPool = price * pBps / 10_000;
@@ -250,24 +249,24 @@ contract CommunityTest is InviteSigner {
         usdc.mint(carl, 50e6);
         vm.prank(carl);
         usdc.approve(address(community), 50e6);
-        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(address(community), carl);
+        (address inviteKey, bytes memory keySig) = _inviteFor(address(community), carl);
 
         // Unattested: cannot mint.
         vm.prank(carl);
         vm.expectRevert(ICommunity.NotAttested.selector);
-        community.join(inv, hostSig, keySig);
+        community.join(inviteKey, keySig);
 
         // Attested but screener-blocked: still cannot mint.
         _attest(carl);
         registry.setBlocked(carl, true); // test contract holds the screener role
         vm.prank(carl);
         vm.expectRevert(ICommunity.AccountBlocked.selector);
-        community.join(inv, hostSig, keySig);
+        community.join(inviteKey, keySig);
 
         // Unblocked: mints.
         registry.setBlocked(carl, false);
         vm.prank(carl);
-        community.join(inv, hostSig, keySig);
+        community.join(inviteKey, keySig);
         assertTrue(community.isMember(carl));
     }
 
@@ -276,10 +275,10 @@ contract CommunityTest is InviteSigner {
         usdc.mint(ada, 50e6);
         vm.prank(ada);
         usdc.approve(address(community), 50e6);
-        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(address(community), ada);
+        (address inviteKey, bytes memory keySig) = _inviteFor(address(community), ada);
         vm.prank(ada);
         vm.expectRevert(ICommunity.AlreadyMember.selector);
-        community.join(inv, hostSig, keySig);
+        community.join(inviteKey, keySig);
     }
 
     /// `forfeit()` moves no money. It has a gate (a member
@@ -369,15 +368,14 @@ contract CommunityTest is InviteSigner {
         community.executeRemoveSteward();
         assertTrue(community.stewardVacant());
 
-        // With no host there is nobody whose signature makes an invite; the vacancy refuses first.
+        // With no host there is nobody to make an invite; the vacancy refuses first.
         address dara = makeAddr("dara");
         usdc.mint(dara, 50e6);
         vm.prank(dara);
         usdc.approve(address(community), 50e6);
-        ICommunity.Invite memory none;
         vm.prank(dara);
         vm.expectRevert(ICommunity.StewardVacant.selector);
-        community.join(none, "", "");
+        community.join(address(0), "");
 
         assertFalse(community.isMember(dara));
     }

@@ -430,10 +430,10 @@ contract RemovalTest is InviteSigner {
         vm.prank(ada);
         try community.forfeit() {} catch {}
 
-        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(address(community), ada);
+        (address inviteKey, bytes memory keySig) = _inviteFor(address(community), ada);
         vm.expectRevert(ICommunity.AlreadyMember.selector);
         vm.prank(ada);
-        community.join(inv, hostSig, keySig);
+        community.join(inviteKey, keySig);
 
         assertEq(_state(ada), SUSPENDED, "carried for life on that wallet");
         assertFalse(community.isMember(ada));
@@ -457,10 +457,10 @@ contract RemovalTest is InviteSigner {
         assertEq(community.memberCount(), 4);
         assertFalse(community.isMember(ada));
 
-        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(address(community), ada);
+        (address inviteKey, bytes memory keySig) = _inviteFor(address(community), ada);
         vm.expectRevert(ICommunity.AlreadyMember.selector);
         vm.prank(ada);
-        community.join(inv, hostSig, keySig);
+        community.join(inviteKey, keySig);
     }
 
     // =============================================================================
@@ -624,8 +624,8 @@ contract RemovalTest is InviteSigner {
         Community[2] memory both = [community, communityB];
         for (uint256 i; i < 2; i++) {
             probe.exec(address(usdc), abi.encodeCall(IERC20.approve, (address(both[i]), type(uint256).max)));
-            (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(address(both[i]), p);
-            probe.exec(address(both[i]), abi.encodeCall(ICommunity.join, (inv, hostSig, keySig)));
+            (address inviteKey, bytes memory keySig) = _inviteFor(address(both[i]), p);
+            probe.exec(address(both[i]), abi.encodeCall(ICommunity.join, (inviteKey, keySig)));
         }
         standing.primeImpact(0, p, 100e6, 1000e6);
         standing.primeImpact(1, p, 400e6, 1000e6);

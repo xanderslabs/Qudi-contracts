@@ -24,6 +24,7 @@ interface IConfig {
     /// Seconds after a failed removal vote's deadline before the same member may be proposed
     /// again.
     function removalReproposeCooldown() external view returns (uint64);
+    function handoverAcceptWindow() external view returns (uint64);
     function stageBoundaries()
         external
         view

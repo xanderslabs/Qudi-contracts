@@ -17,7 +17,7 @@ library ConfigKeys {
     bytes32 constant MINT_SPLIT_PROTOCOL = keccak256("qudi.MINT_SPLIT_PROTOCOL");
     bytes32 constant EPOCH_LENGTH = keccak256("qudi.EPOCH_LENGTH");
     bytes32 constant WITHDRAW_TERM_CORE = keccak256("qudi.WITHDRAW_TERM_CORE");
-    // The host removal/election vote (was STEWARD_VOTE_*).
+    // The host removal vote (was STEWARD_VOTE_*). An election uses the community vote.
     bytes32 constant HOST_VOTE_THRESHOLD_BPS = keccak256("qudi.HOST_VOTE_THRESHOLD_BPS");
     bytes32 constant HOST_VOTE_WINDOW = keccak256("qudi.HOST_VOTE_WINDOW");
     bytes32 constant COMMUNITY_VOTE_THRESHOLD_BPS = keccak256("qudi.COMMUNITY_VOTE_THRESHOLD_BPS");
@@ -157,4 +157,6 @@ library ConfigKeys {
     // same member again. Without it a steward could
     // re-propose each time a vote fails and keep a member frozen indefinitely.
     bytes32 constant REMOVAL_REPROPOSE_COOLDOWN = keccak256("qudi.REMOVAL_REPROPOSE_COOLDOWN");
+    // How long a nominated successor has to accept the host role before the nomination lapses.
+    bytes32 constant HANDOVER_ACCEPT_WINDOW = keccak256("qudi.HANDOVER_ACCEPT_WINDOW");
 }

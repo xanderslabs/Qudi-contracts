@@ -101,4 +101,52 @@ abstract contract MembershipFixture is InviteSigner {
     function _pastWindow() internal {
         vm.warp(block.timestamp + 7 days + 1);
     }
+
+    // ---- the four ways the host changes ----
+
+    /// The host nominates `nominee`, who accepts; nobody objects, and the handover completes.
+    function _handOver(Community c, address nominee) internal {
+        vm.prank(c.steward());
+        c.nominateSuccessor(nominee);
+        vm.prank(nominee);
+        c.acceptNomination();
+        _pastWindow();
+        c.completeHandover();
+    }
+
+    function _resign(Community c) internal {
+        vm.prank(c.steward());
+        c.resignHost();
+    }
+
+    /// `voters[0]` proposes removing the host, every voter votes yes, and it executes.
+    function _removeHost(Community c, address[] memory voters) internal {
+        vm.prank(voters[0]);
+        c.proposeRemoveSteward();
+        _carry(c, voters);
+        c.executeRemoveSteward();
+    }
+
+    /// `voters[0]` stands `candidate`, every voter votes yes, and it executes.
+    function _elect(Community c, address candidate, address[] memory voters) internal {
+        vm.prank(voters[0]);
+        c.electSteward(candidate);
+        _carry(c, voters);
+        c.executeRemoveSteward();
+    }
+
+    function _carry(Community c, address[] memory voters) private {
+        uint256 voteId = c.activeStewardVoteId();
+        for (uint256 i; i < voters.length; i++) {
+            _vote(c, voteId, voters[i], true);
+        }
+        _pastWindow();
+    }
+
+    function _people(address a, address b, address d) internal pure returns (address[] memory m) {
+        m = new address[](3);
+        m[0] = a;
+        m[1] = b;
+        m[2] = d;
+    }
 }

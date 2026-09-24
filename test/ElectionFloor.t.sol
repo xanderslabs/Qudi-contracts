@@ -150,12 +150,12 @@ contract ElectionFloorTest is MembershipFixture {
         assertTrue(_execute(c, voteId), "three of four elect");
     }
 
-    /// Three voters under the lowest host threshold config allows: two yes votes clear the
-    /// threshold, and only the floor of 3 refuses them.
+    /// Three voters under the lowest threshold config allows, which an election uses: two yes
+    /// votes clear the threshold, and only the floor of 3 refuses them.
     function test_proof11_threeVotersNeedThreeEvenWhenTheThresholdWouldTakeTwo() public {
         Community c = _vacated(_four());
         _leave(c, cy);
-        config.set(K.HOST_VOTE_THRESHOLD_BPS, 5001);
+        config.set(K.COMMUNITY_VOTE_THRESHOLD_BPS, 5001);
 
         uint256 voteId = _elect(c, ada);
         assertEq(c.voteTally(voteId).minYes, 3);
@@ -226,7 +226,7 @@ contract ElectionFloorTest is MembershipFixture {
         _vote(c, voteId, ada, true);
         _vote(c, voteId, bem, false);
         ICommunity.VoteTally memory t = c.voteTally(voteId);
-        (uint16 thresholdBps, uint64 window) = config.hostVote();
+        (uint16 thresholdBps, uint64 window) = config.communityVote();
         assertEq(uint8(t.kind), uint8(ICommunity.VoteKind.Election));
         assertEq(t.target, ada);
         assertEq(t.deadline, block.timestamp + window);

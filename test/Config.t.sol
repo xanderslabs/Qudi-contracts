@@ -121,7 +121,7 @@ contract ConfigTest is Test {
     function test_noChargeParameterIsReachable() public {
         bytes32[] memory all = _allConfigKeys();
         // Count pinned to ConfigKeys.sol by check-config-key-enumeration.sh (CI).
-        assertEq(all.length, 81, "ConfigKeys count changed: update _allConfigKeys and re-audit");
+        assertEq(all.length, 82, "ConfigKeys count changed: update _allConfigKeys and re-audit");
 
         bytes32[] memory chargeShaped = _chargeShapedKeys();
         for (uint256 c; c < chargeShaped.length; c++) {
@@ -168,7 +168,7 @@ contract ConfigTest is Test {
     /// The complete ConfigKeys set, maintained in lockstep with ConfigKeys.sol. The count
     /// assertion in test_noChargeParameterIsReachable forces this to stay complete.
     function _allConfigKeys() internal pure returns (bytes32[] memory k) {
-        k = new bytes32[](81);
+        k = new bytes32[](82);
         uint256 i;
         k[i++] = K.SEAT_PRICE_FLOOR;
         k[i++] = K.SEAT_PRICE_CEILING;
@@ -276,6 +276,7 @@ contract ConfigTest is Test {
         // same member again after a failed vote. It is never read on any repayment path and
         // cannot add anything to what a member owes.
         k[i++] = K.REMOVAL_REPROPOSE_COOLDOWN;
+        k[i++] = K.HANDOVER_ACCEPT_WINDOW;
         require(i == k.length, "key list length mismatch");
     }
 
@@ -604,6 +605,12 @@ contract ConfigTest is Test {
         cfg.set(K.REMOVAL_REPROPOSE_COOLDOWN, 7 days - 1);
         vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.REMOVAL_REPROPOSE_COOLDOWN));
         cfg.set(K.REMOVAL_REPROPOSE_COOLDOWN, 180 days + 1);
+    }
+
+    /// A nominee has a week to accept, and the window runs from a day to 30 days.
+    function test_handoverAcceptWindowBounds() public {
+        assertEq(cfg.handoverAcceptWindow(), 7 days, "launch value");
+        _assertRange(K.HANDOVER_ACCEPT_WINDOW, 1 days, 30 days);
     }
 
     /// A free seat is allowed, so the floor may be 0. Each key's range holds at both ends.

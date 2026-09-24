@@ -110,10 +110,10 @@ contract SeatsTest is MembershipFixture {
             usdc.mint(who, PRICE);
             vm.prank(who);
             usdc.approve(address(a), PRICE);
-            (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(address(a), who);
+            (address inviteKey, bytes memory keySig) = _inviteFor(address(a), who);
             vm.prank(who);
             vm.expectRevert(ICommunity.AlreadyMember.selector);
-            a.join(inv, hostSig, keySig);
+            a.join(inviteKey, keySig);
 
             _join(b, who);
             assertTrue(b.isMember(who), "a kept seat elsewhere does not bar another community");

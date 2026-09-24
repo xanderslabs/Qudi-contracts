@@ -20,13 +20,14 @@ import {ISeats} from "./interfaces/ISeats.sol";
 /// every seat read here answers from it. The only seat index kept here is the departed-seat tree
 /// the vote arithmetic needs, keyed by seat number.
 ///
-/// join() needs an invite the current host signed and the invite key bound to the caller, from a
-/// wallet that has attested for itself and is not screener-blocked, while a steward exists and
-/// the community is under `MEMBER_CAP` Active seats. It mints at the current price, which the
+/// join() needs an invite the current host registered onchain and the invite key bound to the
+/// caller, from a wallet that has attested for itself and is not screener-blocked, while a steward
+/// exists and the community is under `MEMBER_CAP` Active seats. It mints at the current price, which the
 /// host sets from `SEAT_PRICE_FLOOR` to `SEAT_PRICE_CEILING` and the members change by vote. A
 /// paid seat splits, config-driven: 40% to the Community Credit Account, 30% to the host's
 /// wallet, 30% to the protocol treasury. A $0 seat moves no money. A member leaves by forfeit()
-/// or is removed by a vote the steward proposes; a steward is replaced only by vote. The mint
+/// or is removed by a vote the steward proposes. The host role changes by a handover the members
+/// do not block, a resignation, a removal vote, or an election while the seat is empty. The mint
 /// timestamp is the sole source of truth for member seasoning.
 ///
 /// A seat is Active, Suspended or Left, and the last two are final. The seat stays in the wallet
@@ -56,23 +57,23 @@ contract Community is EIP712, ICommunity, ICommunityInit {
 
     bool internal _initialized;
 
-    /// The invite gate. `revokeAllInvites` bumps `hostNonce`, which every invite signs, so one
-    /// transaction ends every invite signed before it. `inviteUses` counts the seats each invite
-    /// key has given, and `inviteRevoked` ends one invite.
-    uint256 public hostNonce;
-    mapping(address => uint256) public inviteUses;
-    mapping(address => bool) public inviteRevoked;
+    /// The invite gate. Each invite is stamped with the host term and the revoke-all epoch it was
+    /// made in, and is valid only while both are current. Every host change bumps `hostTerm`, so
+    /// the invites of a host who is gone die with the role, even if the same address takes it
+    /// again: whoever holds the role answers for every open invite. `revokeAllInvites` bumps
+    /// `inviteEpoch`, so one transaction ends every invite made before it.
+    uint64 public hostTerm;
+    uint64 public inviteEpoch;
+    mapping(address => InviteRecord) internal _invites;
 
-    bytes32 internal constant INVITE_TYPEHASH = keccak256(
-        "Invite(address community,address inviteKey,uint64 issuedAt,uint64 expiry,uint32 maxUses,uint256 hostNonce)"
-    );
     bytes32 internal constant JOIN_TYPEHASH = keccak256("Join(address community,address joiner)");
 
     /// One vote per slot, keyed by kind: `target` is the candidate for an election vote, the
     /// steward-at-proposal-time for a steward removal vote (informational only, execution always
     /// vacates on a passing removal), the member for a member removal vote, and unused for a
     /// price vote. `newPrice` is Price-kind only. `activeStewardVoteId` is 0 when no steward
-    /// removal/election vote is live.
+    /// removal/election vote is live. A handover's objection period is a Handover vote whose
+    /// `target` is the nominee and whose `againstCount` is the objections.
     ///
     /// `denominator` is fixed when the vote starts: the Active seats
     /// seasoned at `startedAt` under `seasoningWindow`, less a removal's target when the target is
@@ -119,6 +120,25 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     /// new id's node is filled in at mint from the nodes below it, so the tree grows with the ids.
     mapping(uint256 => uint256) internal _departedTree;
 
+    /// The host's nomination of a successor. `voteId` is 0 until the nominee accepts, and then
+    /// the objection period's vote. Cleared when it completes, fails or is cancelled; a
+    /// nomination not accepted in time lapses in place, with no transaction.
+    struct Handover {
+        address nominee;
+        uint64 nominatedAt;
+        uint256 voteId;
+    }
+
+    Handover internal _handover;
+    /// When the last handover failed. The host waits `REMOVAL_REPROPOSE_COOLDOWN` from here
+    /// before nominating again, as after any failed vote, so members who blocked a nominee are
+    /// not asked again the next day.
+    uint64 internal _handoverFailedAt;
+
+    /// A handover is blocked when objections are more than half its denominator. Half exactly
+    /// does not block: a nominee the host chose and half the members accept takes the role.
+    uint256 internal constant HANDOVER_BLOCK_BPS = 5000;
+
     /// A floor of 3 votes: a vote passes only with at least this many yes votes as well as the
     /// threshold. A seasoned denominator can be 0, which the threshold alone passes with no
     /// ballots, or the host alone. A fixed constant, not a config key. An election's floor is
@@ -156,16 +176,16 @@ contract Community is EIP712, ICommunity, ICommunityInit {
 
     // ---- membership ----
 
-    function join(Invite calldata invite, bytes calldata hostSig, bytes calldata keySig) external {
-        // No steward means no one whose signature makes an invite, and no destination for the
-        // 30% host leg. Joining reopens once the community elects a new steward.
+    function join(address inviteKey, bytes calldata keySig) external {
+        // No steward means no one to answer for an invite, and no destination for the 30% host
+        // leg. Joining reopens once the community has a host again.
         if (stewardVacant()) revert StewardVacant();
         _requireMintable(msg.sender);
         // The bar on rejoining. A seat is never burned and `Seats` keeps it in the wallet, so this
         // refuses a wallet whose seat is Active, Suspended or Left alike.
         if (seats.seatOf(address(this), msg.sender) != 0) revert AlreadyMember();
         if (memberCount() >= config.memberCap()) revert CommunityFull();
-        _spendInvite(invite, hostSig, keySig);
+        _spendInvite(inviteKey, keySig);
 
         // checks-effects-interactions: the seat exists before any sibling or token call runs,
         // so a sibling that re-entered would see the final membership state, not a stale one.
@@ -182,41 +202,24 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         emit SeatMinted(msg.sender, price, toSteward, toPool, toProtocol);
     }
 
-    /// Checks an invite and counts one use of it. The host signs the invite once, off chain; the
-    /// invite key, whose private half travels in the link, signs this caller. Binding the key's
-    /// signature to the caller means a watcher who copies a join from the mempool cannot spend
-    /// the invite first: the copy comes from the wrong address.
-    ///
-    /// `hostSig` must recover the current steward. An invite signed by a former host is dead the
-    /// moment the role changes hands, even if it is unexpired and unused, because the community
-    /// now answers to someone else.
-    function _spendInvite(Invite calldata invite, bytes calldata hostSig, bytes calldata keySig) internal {
-        if (invite.community != address(this)) revert InviteWrongCommunity();
-        if (block.timestamp < invite.issuedAt) revert InviteNotYetValid();
-        if (block.timestamp >= invite.expiry) revert InviteExpired();
-        (uint32 maxUses, uint64 maxTtl) = config.inviteLimits();
-        if (invite.expiry - invite.issuedAt > maxTtl || invite.maxUses > maxUses) revert InviteOutOfBounds();
-        if (invite.hostNonce != hostNonce) revert InviteStaleNonce();
-        if (inviteRevoked[invite.inviteKey]) revert InviteWasRevoked();
-        if (inviteUses[invite.inviteKey] >= invite.maxUses) revert InviteUsedUp();
+    /// Checks an invite and counts one use of it. The host registered the invite key; the key,
+    /// whose private half travels in the link, signs this caller. Binding the key's signature to
+    /// the caller means a watcher who copies a join from the mempool cannot spend the invite
+    /// first: the copy comes from the wrong address.
+    function _spendInvite(address inviteKey, bytes calldata keySig) internal {
+        InviteRecord storage inv = _invites[inviteKey];
+        if (inv.expiry == 0) revert InviteNotRegistered();
+        if (inv.term != hostTerm) revert InviteStale();
+        if (inv.epoch != inviteEpoch) revert InviteStale();
+        if (inv.revoked) revert InviteWasRevoked();
+        if (block.timestamp >= inv.expiry) revert InviteExpired();
+        if (inv.uses >= inv.maxUses) revert InviteUsedUp();
 
-        bytes32 inviteHash = keccak256(
-            abi.encode(
-                INVITE_TYPEHASH,
-                invite.community,
-                invite.inviteKey,
-                invite.issuedAt,
-                invite.expiry,
-                invite.maxUses,
-                invite.hostNonce
-            )
-        );
-        if (_signer(inviteHash, hostSig) != steward) revert BadHostSignature();
         bytes32 joinHash = keccak256(abi.encode(JOIN_TYPEHASH, address(this), msg.sender));
         address key = _signer(joinHash, keySig);
-        if (key == address(0) || key != invite.inviteKey) revert BadKeySignature();
+        if (key == address(0) || key != inviteKey) revert BadKeySignature();
 
-        inviteUses[invite.inviteKey]++;
+        inv.uses++;
     }
 
     /// The EIP-712 signer of `structHash` in this community's domain, or 0 for a malformed
@@ -225,17 +228,40 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         (signer,,) = ECDSA.tryRecover(_hashTypedDataV4(structHash), signature);
     }
 
+    /// Registers an invite of this host term. The config bounds hold here, when the invite is
+    /// made: it seats at most `INVITE_MAX_USES` and lives at most `INVITE_MAX_TTL`. Only the host
+    /// calls it, so with the seat empty nobody does. A key is registered once, so a revoked or
+    /// spent invite cannot be refilled under the same link.
+    function createInvite(address inviteKey, uint16 maxUses, uint64 expiry) external {
+        if (msg.sender != steward) revert NotSteward();
+        if (_invites[inviteKey].expiry != 0) revert InviteAlreadyRegistered();
+        if (expiry <= block.timestamp) revert InviteExpired();
+        (uint32 usesCap, uint64 maxTtl) = config.inviteLimits();
+        if (maxUses > usesCap) revert InviteOutOfBounds();
+        if (expiry - block.timestamp > maxTtl) revert InviteOutOfBounds();
+        uint64 term = hostTerm;
+        _invites[inviteKey] =
+            InviteRecord({term: term, epoch: inviteEpoch, expiry: expiry, maxUses: maxUses, uses: 0, revoked: false});
+        emit InviteCreated(inviteKey, term, maxUses, expiry);
+    }
+
+    function inviteOf(address inviteKey) external view returns (InviteRecord memory) {
+        return _invites[inviteKey];
+    }
+
     /// Ends one invite, whatever uses it has left.
     function revokeInvite(address inviteKey) external {
         if (msg.sender != steward) revert NotSteward();
-        inviteRevoked[inviteKey] = true;
+        InviteRecord storage inv = _invites[inviteKey];
+        if (inv.expiry == 0) revert InviteNotRegistered();
+        inv.revoked = true;
         emit InviteRevoked(inviteKey);
     }
 
-    /// Ends every invite signed so far, in one transaction.
+    /// Ends every invite made so far, in one transaction.
     function revokeAllInvites() external {
         if (msg.sender != steward) revert NotSteward();
-        emit AllInvitesRevoked(++hostNonce);
+        emit AllInvitesRevoked(++inviteEpoch);
     }
 
     // ---- seat reads, all from `Seats` ----
@@ -354,12 +380,13 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         return steward == address(0);
     }
 
-    /// StewardRemoval and Election share the steward-vote threshold; Price and Removal share
-    /// the community-vote threshold.
+    /// Only a vote to remove the host takes the host-vote threshold, more than two thirds,
+    /// because it overrides the one role the community chose. Every other kind is a community
+    /// vote at more than half. That includes an election: a seat left empty should be easy to
+    /// fill, since with no host nobody can join and no shared vault can pay out. A handover's
+    /// objection period takes only the community vote's window from here.
     function _thresholdFor(VoteKind kind) internal view returns (uint16 thresholdBps, uint64 window) {
-        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Election) {
-            return config.hostVote();
-        }
+        if (kind == VoteKind.StewardRemoval) return config.hostVote();
         return config.communityVote();
     }
 
@@ -389,9 +416,20 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         if (kind == VoteKind.Removal) {
             (, ISeats.Seat memory t) = _seat(target);
             if (t.seatNumber <= last) denominator--;
+        } else if (kind == VoteKind.Handover) {
+            // Neither the host nor the nominee is counted: whether to accept the change is the
+            // other members' call.
+            denominator -= _countedIn(steward, last) + _countedIn(target, last);
         }
         v.denominator = denominator;
         emit VoteStarted(voteId, uint8(kind), target);
+    }
+
+    /// 1 if `who` holds an Active seat numbered 1 to `last`, which is exactly a seat the seasoned
+    /// count includes, else 0.
+    function _countedIn(address who, uint256 last) internal view returns (uint256) {
+        (, ISeats.Seat memory s) = _seat(who);
+        return s.state == SeatState.Active && s.seatNumber <= last ? 1 : 0;
     }
 
     /// The one seasoning predicate a vote uses, for its denominator and for every ballot, so the
@@ -457,10 +495,13 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         return d == 0 ? 1 : d;
     }
 
-    /// A vote's tally and the bars it must clear, exactly as `_passed` reads them.
+    /// A vote's tally and the bars it must clear, exactly as `_passed` reads them. A handover's
+    /// objection period has no yes side: `no` is the objections, and they block the handover
+    /// when `no * 10_000 > thresholdBps * denominator`.
     function voteTally(uint256 voteId) external view returns (VoteTally memory t) {
         Vote storage v = votes[voteId];
         (uint16 thresholdBps,) = _thresholdFor(v.kind);
+        bool handover = v.kind == VoteKind.Handover;
         t = VoteTally({
             kind: v.kind,
             target: v.target,
@@ -468,8 +509,8 @@ contract Community is EIP712, ICommunity, ICommunityInit {
             denominator: v.denominator,
             yes: v.forCount,
             no: v.againstCount,
-            thresholdBps: thresholdBps,
-            minYes: _minYes(v)
+            thresholdBps: handover ? uint16(HANDOVER_BLOCK_BPS) : thresholdBps,
+            minYes: handover ? 0 : _minYes(v)
         });
     }
 
@@ -512,6 +553,9 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         uint256 voteId = _startVote(VoteKind.StewardRemoval, steward, 0);
         activeStewardVoteId = voteId;
         lastHostRemovalVoteId = voteId;
+        // A host facing removal cannot hand the seat on to escape it: the vote cancels any
+        // nomination, and none can be made until it resolves.
+        if (_handoverPending()) _cancelNomination();
     }
 
     function electSteward(address candidate) external {
@@ -596,6 +640,9 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     function castVote(uint256 voteId, bool support) external {
         Vote storage v = votes[voteId];
         if (v.deadline == 0) revert NoActiveVote(); // never started
+        // A handover's objection period has no ballot to cast; objections go through
+        // objectToHandover.
+        if (v.kind == VoteKind.Handover) revert NoActiveVote();
         if (!_isMember(msg.sender)) revert NotMember();
 
         // The window is a real window: without this, a vote that closed short of the threshold
@@ -636,7 +683,143 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         if (v.kind == VoteKind.StewardRemoval) lastHostRemovalVoteId = 0;
         address old = steward;
         steward = v.kind == VoteKind.Election ? v.target : address(0);
+        hostTerm++;
         emit StewardChanged(old, steward);
+    }
+
+    // ---- handover and resignation ----
+
+    /// A vote to remove the host is open until it fails at its deadline, or passes and executes.
+    function _hostVoteOpen() internal view returns (bool) {
+        uint256 id = lastHostRemovalVoteId;
+        return id != 0 && !_resolvedAsFailed(id);
+    }
+
+    /// A nomination is pending from the moment it is made until it completes, fails or is
+    /// cancelled, or, while the nominee has not accepted, until `HANDOVER_ACCEPT_WINDOW` after it.
+    /// A lapsed one needs no transaction to clear.
+    function _handoverPending() internal view returns (bool) {
+        Handover storage h = _handover;
+        if (h.nominee == address(0)) return false;
+        return h.voteId != 0 || block.timestamp <= h.nominatedAt + config.handoverAcceptWindow();
+    }
+
+    /// Who may be nominated, and who may take the role at completion: a seasoned Active member
+    /// that no removal vote is open against.
+    function _canHost(address who) internal view returns (bool) {
+        return _isMember(who) && _isSeasoned(who);
+    }
+
+    /// The host names a successor. Nothing changes until the nominee accepts and the members
+    /// have had the objection period; the host keeps every power meanwhile.
+    function nominateSuccessor(address nominee) external {
+        if (msg.sender != steward) revert NotSteward();
+        if (_hostVoteOpen()) revert HostVoteOpen();
+        if (_handoverPending()) revert NominationPending();
+        uint64 failedAt = _handoverFailedAt;
+        if (failedAt != 0 && block.timestamp < failedAt + config.removalReproposeCooldown()) {
+            revert HandoverCooldown();
+        }
+        if (nominee == steward || !_canHost(nominee)) revert NomineeIneligible();
+        _handover = Handover({nominee: nominee, nominatedAt: uint64(block.timestamp), voteId: 0});
+        emit SuccessorNominated(nominee);
+    }
+
+    /// The nominee takes the nomination up, and the objection period starts. Its denominator is
+    /// fixed here, as any vote's is at its start: the seasoned Active seats, less the host and
+    /// the nominee.
+    function acceptNomination() external {
+        Handover storage h = _handover;
+        if (h.nominee == address(0)) revert NoNomination();
+        if (msg.sender != h.nominee) revert NotNominee();
+        if (h.voteId != 0) revert NominationPending();
+        if (block.timestamp > h.nominatedAt + config.handoverAcceptWindow()) revert NominationLapsed();
+        uint256 voteId = _startVote(VoteKind.Handover, msg.sender, 0);
+        h.voteId = voteId;
+        emit NominationAccepted(msg.sender, voteId);
+    }
+
+    /// One objection from a member the denominator counts: seasoned when the nominee accepted,
+    /// and neither the host nor the nominee.
+    function objectToHandover() external {
+        uint256 voteId = _handover.voteId;
+        if (voteId == 0) revert NoActiveVote();
+        Vote storage v = votes[voteId];
+        if (block.timestamp > v.deadline) revert VoteWindowClosed();
+        if (!_isMember(msg.sender)) revert NotMember();
+        if (msg.sender == steward || msg.sender == v.target) revert VoteIneligible();
+        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();
+        if (v.voted[msg.sender]) revert AlreadyVoted();
+        v.voted[msg.sender] = true;
+        v.againstCount++;
+        // Objections only grow, so once they are over half the handover can never complete. It
+        // fails here and the cooldown starts now; waiting for the deadline would let the host
+        // cancel first, which starts no cooldown, and nominate again the same day.
+        if (uint256(v.againstCount) * 10_000 > HANDOVER_BLOCK_BPS * v.denominator) _failHandover();
+    }
+
+    /// Permissionless once the objection period is over. The nominee is checked again: one who
+    /// left, or whom a removal vote now freezes, cannot take the role, and the handover fails.
+    function completeHandover() external {
+        uint256 voteId = _handover.voteId;
+        if (voteId == 0) revert NoActiveVote();
+        if (block.timestamp <= votes[voteId].deadline) revert VoteWindowOpen();
+        address nominee = _handover.nominee;
+        if (!_canHost(nominee)) {
+            _failHandover();
+            return;
+        }
+        delete _handover;
+        address old = steward;
+        steward = nominee;
+        hostTerm++;
+        emit StewardChanged(old, nominee);
+    }
+
+    /// The host withdraws a nomination before it completes. Nothing failed, so no cooldown.
+    function cancelNomination() external {
+        if (msg.sender != steward) revert NotSteward();
+        if (!_handoverPending()) revert NoNomination();
+        _cancelNomination();
+    }
+
+    function _cancelNomination() internal {
+        emit NominationCancelled(_handover.nominee);
+        delete _handover;
+    }
+
+    function _failHandover() internal {
+        emit HandoverFailed(_handover.nominee);
+        delete _handover;
+        _handoverFailedAt = uint64(block.timestamp);
+    }
+
+    /// The host steps down. The seat empties and an election can follow; the old host keeps
+    /// their own seat as an ordinary member. Not while members are voting on removing them,
+    /// since the vote is theirs to finish, and not with a nomination pending, which the host
+    /// cancels first.
+    function resignHost() external {
+        if (msg.sender != steward) revert NotSteward();
+        if (_hostVoteOpen()) revert HostVoteOpen();
+        if (_handoverPending()) revert NominationPending();
+        steward = address(0);
+        hostTerm++;
+        emit StewardChanged(msg.sender, address(0));
+    }
+
+    function pendingHandover() external view returns (PendingHandover memory p) {
+        if (!_handoverPending()) return p;
+        Handover storage h = _handover;
+        p.nominee = h.nominee;
+        p.nominatedAt = h.nominatedAt;
+        p.voteId = h.voteId;
+        if (h.voteId != 0) {
+            Vote storage v = votes[h.voteId];
+            p.acceptedAt = v.startedAt;
+            p.objectionDeadline = v.deadline;
+            p.objections = v.againstCount;
+            p.denominator = v.denominator;
+        }
     }
 
     // ---- pool opening ----
@@ -705,6 +888,10 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     /// `config.memberSeasoningWindow()`. Half-open and in seconds. A Suspended or Left seat keeps
     /// its `mintedAt` but is never seasoned: it is not a member.
     function isSeasoned(address member) external view returns (bool) {
+        return _isSeasoned(member);
+    }
+
+    function _isSeasoned(address member) internal view returns (bool) {
         (, ISeats.Seat memory s) = _seat(member);
         return s.state == SeatState.Active && block.timestamp - s.mintedAt >= config.memberSeasoningWindow();
     }

@@ -121,16 +121,16 @@ contract SeatPriceAndCapTest is MembershipFixture {
 
         address extra = makeAddr("extra");
         _attest(extra);
-        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(address(c), extra);
+        (address inviteKey, bytes memory keySig) = _inviteFor(address(c), extra);
         vm.prank(extra);
         vm.expectRevert(ICommunity.CommunityFull.selector);
-        c.join(inv, hostSig, keySig);
+        c.join(inviteKey, keySig);
 
         vm.prank(makeAddr("member2"));
         c.forfeit();
         assertEq(c.memberCount(), 149);
         vm.prank(extra);
-        c.join(inv, hostSig, keySig);
+        c.join(inviteKey, keySig);
         assertEq(c.memberCount(), 150, "the place the leaver freed is taken");
     }
 }

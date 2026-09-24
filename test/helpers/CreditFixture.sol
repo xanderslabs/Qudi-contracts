@@ -18,6 +18,7 @@ import {ICreditCore} from "../../src/interfaces/ICreditCore.sol";
 import {CreditStanding} from "../../src/CreditStanding.sol";
 import {ICreditStanding} from "../../src/interfaces/ICreditStanding.sol";
 import {CloneImpactSource} from "../../src/CloneImpactSource.sol";
+import {PauseGuard} from "../../src/PauseGuard.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockStrategy} from "../mocks/MockStrategy.sol";
 import {MockImpactSource} from "../mocks/MockImpactSource.sol";
@@ -26,8 +27,8 @@ import {VenueIds} from "./VenueIds.sol";
 
 /// The whole credit stack as a deployment wires it: the real factory, `Seats`, `Community` and
 /// `Ledger` clones, one Flex `Venue` over a `MockStrategy` so a test can make yield, `CreditStanding`
-/// with the seat and yield sources registered, and `CreditCore`. This contract is the owner of
-/// everything, which stands in for the timelock.
+/// with the seat and yield sources registered, `CreditCore`, and a `PauseGuard` with every flag off.
+/// This contract is the owner of everything, which stands in for the timelock.
 ///
 /// Nothing here funds `CreditCore` with Qudi money. A community's balance comes from its seat legs,
 /// its yield legs, or an explicit `_grant`, so a test that lends shows where every dollar came from.
@@ -44,11 +45,13 @@ abstract contract CreditFixture is InviteSigner {
     CloneImpactSource seatSource;
     CloneImpactSource yieldSource;
     MockImpactSource extra;
+    PauseGuard guard;
 
     address treasury = makeAddr("treasury");
     address operator = makeAddr("operator");
     address allocator = makeAddr("allocator");
     address stranger = makeAddr("stranger");
+    address pauser = makeAddr("pauser");
 
     bytes32 constant AGREEMENT = keccak256("qudi credit agreement v1");
 
@@ -92,6 +95,8 @@ abstract contract CreditFixture is InviteSigner {
         standing.setCreditCore(address(core));
         config.setAddress(K.CREDIT_CORE, address(core));
         config.setCreditAgreementHash(AGREEMENT);
+        guard = new PauseGuard(address(this), pauser);
+        config.setAddress(K.PAUSE_GUARD, address(guard));
 
         seatSource = new CloneImpactSource(ICommunityFactory(address(factory)), false);
         yieldSource = new CloneImpactSource(ICommunityFactory(address(factory)), true);

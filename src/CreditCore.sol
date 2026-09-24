@@ -8,6 +8,7 @@ import {Ownable2Step, Ownable} from "openzeppelin-contracts/contracts/access/Own
 import {ICreditCore} from "./interfaces/ICreditCore.sol";
 import {ICreditStanding} from "./interfaces/ICreditStanding.sol";
 import {IConfig} from "./interfaces/IConfig.sol";
+import {IPauseGuard} from "./interfaces/IPauseGuard.sol";
 import {ICommunityFactory} from "./interfaces/ICommunityFactory.sol";
 import {ICommunity} from "./interfaces/ICommunity.sol";
 import {ILedger} from "./interfaces/ILedger.sol";
@@ -53,6 +54,7 @@ contract CreditCore is ICreditCore, Ownable2Step {
 
     address public override operator;
     address public override allocationMultisig;
+    address public override strategyLister;
 
     uint256 internal constant WAD = 1e18;
 
@@ -120,6 +122,8 @@ contract CreditCore is ICreditCore, Ownable2Step {
         allocationMultisig = allocationMultisig_;
         emit OperatorSet(address(0), operator_);
         emit AllocationMultisigSet(address(0), allocationMultisig_);
+        strategyLister = owner_;
+        emit StrategyListerSet(address(0), owner_);
     }
 
     // ---- roles (owner only) ----
@@ -315,9 +319,17 @@ contract CreditCore is ICreditCore, Ownable2Step {
 
     // ---- pool strategies ----
 
-    /// The timelock lists a strategy with this contract as its one depositor. The pool invests
-    /// only here, never in member venues.
-    function addStrategy(address strategy) external onlyOwner {
+    function setStrategyLister(address next) external {
+        if (msg.sender != strategyLister) revert NotStrategyLister();
+        if (next == address(0)) revert ZeroAddress();
+        emit StrategyListerSet(strategyLister, next);
+        strategyLister = next;
+    }
+
+    /// The strategy lister, the slower timelock, lists a strategy with this contract as its one
+    /// depositor. The pool invests only here, never in member venues.
+    function addStrategy(address strategy) external {
+        if (msg.sender != strategyLister) revert NotStrategyLister();
         if (isStrategy[strategy]) revert DuplicateStrategy();
         if (IStrategy(strategy).asset() != address(usdc)) revert StrategyAssetMismatch();
         isStrategy[strategy] = true;
@@ -342,6 +354,12 @@ contract CreditCore is ICreditCore, Ownable2Step {
         emit StrategyRemoved(strategy);
     }
 
+    /// The pause stops new credit and money into a strategy. Repayment, write-offs and every
+    /// return from a strategy never read it, so a pause traps nothing.
+    function _whenOpen(IPauseGuard.Flag flag) internal view {
+        if (IPauseGuard(config.pauseGuard()).paused(flag)) revert IPauseGuard.Paused();
+    }
+
     function _onlyOperatorOn(address strategy, uint256 amount) internal view {
         if (msg.sender != operator) revert NotOperator();
         if (!isStrategy[strategy]) revert UnknownStrategy();
@@ -353,6 +371,7 @@ contract CreditCore is ICreditCore, Ownable2Step {
     /// backing rule must hold, and the cash left must be at least the liquid floor.
     function depositToStrategy(address strategy, uint256 amount) external {
         _onlyOperatorOn(strategy, amount);
+        _whenOpen(IPauseGuard.Flag.VENUES);
         usdc.forceApprove(strategy, amount);
         IStrategy(strategy).deposit(amount);
         usdc.forceApprove(strategy, 0);
@@ -512,6 +531,7 @@ contract CreditCore is ICreditCore, Ownable2Step {
     /// ledger is accrued so the member's yield impact is current; the book is not going bad; the
     /// community can lend this much now; the member's line covers it; and the cash is here.
     function draw(uint256 communityId, uint256 amount, bytes32 agreementHash) external {
+        _whenOpen(IPauseGuard.Flag.DRAWS);
         _requireCommunity(communityId);
         if (amount == 0) revert ZeroAmount();
         address community = ICommunityFactory(factory).communityAt(communityId);

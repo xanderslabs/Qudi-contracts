@@ -3,14 +3,14 @@ pragma solidity 0.8.30;
 
 import {ISeats} from "./ISeats.sol";
 
-/// A community's votes and settings: the host (steward) role, the seat price, the invite gate,
+/// A community's votes and settings: the host role, the seat price, the invite gate,
 /// and the removal, election and handover votes. Its seats live in the one `Seats` contract, which
 /// holds every community's seats; this contract mints there at `join` and at creation, and changes
 /// a seat's state there at `forfeit` and `executeRemoval`.
 ///
 /// `join` needs an invite the current host registered onchain, bound to the caller by the invite
 /// key's own signature, and it seats at most `MEMBER_CAP` Active members. A member leaves by
-/// forfeit(), or is removed by a vote the steward proposes and the members carry. Either way the
+/// forfeit(), or is removed by a vote the host proposes and the members carry. Either way the
 /// seat stays in the wallet and carries its final state. The host role changes four ways: a
 /// handover the members do not block, a resignation, a removal vote, and an election while the
 /// seat is empty. Every paid mint splits the price, config-driven: 40% to
@@ -18,14 +18,22 @@ import {ISeats} from "./ISeats.sol";
 /// the protocol treasury. A $0 seat moves no money. The founding seat is minted unpaid inside
 /// initialize().
 interface ICommunity {
-    /// StewardRemoval and Election drive proposeRemoveSteward/electSteward; Price drives
+    /// The four ways the host changes. Numbered in this order for event readers.
+    enum HostChange {
+        Handover,
+        Election,
+        Removal,
+        Resignation
+    }
+
+    /// HostRemoval and Election drive proposeRemoveHost/electHost; Price drives
     /// proposeSeatPrice/executeSeatPriceVote; Removal drives proposeRemoval/executeRemoval.
     /// Handover is the objection period of an accepted nomination, driven by objectToHandover and
     /// completeHandover. Removal keeps the ordinal the retired Suspension kind had: `VoteStarted`
     /// emits the kind as a `uint8`, so moving it would silently change what the indexer reads.
     /// New kinds go at the end for the same reason. Closure drives proposeClosure/executeClosure.
     enum VoteKind {
-        StewardRemoval,
+        HostRemoval,
         Election,
         Price,
         Removal,
@@ -94,16 +102,16 @@ interface ICommunity {
     function hostTerm() external view returns (uint64); // bumped at every host change
     function inviteEpoch() external view returns (uint64); // bumped by revokeAllInvites
     function forfeit() external; // sets Left; blocked by an open tab, a personal vault, or a removal vote
-    function steward() external view returns (address);
+    function host() external view returns (address);
     function isMember(address wallet) external view returns (bool); // an Active seat, not frozen
     function memberCount() external view returns (uint256); // Active seats, frozen ones included
     function seatPrice() external view returns (uint256);
 
-    // steward replacement
-    function proposeRemoveSteward() external; // any member; starts the 7-day vote
+    // host replacement
+    function proposeRemoveHost() external; // any member; starts the 7-day vote
     function castVote(uint256 voteId, bool support) external;
-    function executeRemoveSteward() external; // a removal needs over two thirds, an election over half
-    function electSteward(address candidate) external; // same vote shape, when the role is vacant
+    function executeRemoveHost() external; // a removal needs over two thirds, an election over half
+    function electHost(address candidate) external; // same vote shape, when the role is vacant
 
     // handover and resignation
     function nominateSuccessor(address nominee) external; // host only
@@ -121,15 +129,15 @@ interface ICommunity {
     function closed() external view returns (bool);
 
     // card-price vote
-    function proposeSeatPrice(uint256 newPrice) external; // steward only; floor applies; starts the vote
+    function proposeSeatPrice(uint256 newPrice) external; // host only; floor applies; starts the vote
     function executeSeatPriceVote() external; // permissionless after the window; re-checks the floor live
 
     // member removal vote
-    function proposeRemoval(address member) external; // steward only; per-target slot; freezes the member
+    function proposeRemoval(address member) external; // host only; per-target slot; freezes the member
     function executeRemoval(address member) external; // permissionless after the window, if passed
     function isFrozen(address member) external view returns (bool);
 
-    function activeStewardVoteId() external view returns (uint256);
+    function activeHostVoteId() external view returns (uint256);
     function activePriceVoteId() external view returns (uint256);
     function activeRemovalVoteId(address member) external view returns (uint256);
 
@@ -145,16 +153,26 @@ interface ICommunity {
     /// Active seats held for at least the seasoning window. Credit reads it before any draw.
     function seasonedCount() external view returns (uint256);
     function communityName() external view returns (string memory);
-    function stewardVacant() external view returns (bool); // the approval freeze
+    function hostVacant() external view returns (bool); // the approval freeze
 
-    event SeatMinted(address indexed member, uint256 price, uint256 toSteward, uint256 toPool, uint256 toProtocol);
+    /// `inviteKey` is the invite the seat spent, or 0 for the founding seat, which needs none.
+    event SeatMinted(
+        address indexed member,
+        address indexed inviteKey,
+        uint256 price,
+        uint256 toHost,
+        uint256 toPool,
+        uint256 toProtocol
+    );
     /// The seat is Left. It stays in the member's wallet, so no burn `Transfer` accompanies it.
     event SeatForfeited(address indexed member, uint256 indexed tokenId);
     /// The seat is Suspended by an executed removal vote. It stays in the member's wallet.
     event SeatSuspended(address indexed member, uint256 indexed tokenId);
     event SeatPriceSet(uint256 price);
-    event VoteStarted(uint256 indexed voteId, uint8 indexed kind, address indexed target);
-    event StewardChanged(address indexed oldSteward, address indexed newSteward);
+    /// `newPrice` is the proposed seat price on a Price vote and 0 on every other kind.
+    event VoteStarted(uint256 indexed voteId, uint8 indexed kind, address indexed target, uint256 newPrice);
+    /// `reason` is a `HostChange`, so a reader never has to infer which path changed the host.
+    event HostChanged(address indexed oldHost, address indexed newHost, uint8 reason);
     event InviteCreated(address indexed inviteKey, uint64 term, uint16 maxUses, uint64 expiry);
     event InviteRevoked(address indexed inviteKey);
     event AllInvitesRevoked(uint64 inviteEpoch);
@@ -171,7 +189,7 @@ interface ICommunity {
     /// Every objection to a handover, in the objection period's vote.
     event HandoverObjected(uint256 indexed voteId, address indexed member);
 
-    error NotSteward();
+    error NotHost();
     error NotMember();
     error OpenTabBlocks();
     /// `forfeit()` by a member who still holds units in one of their own personal vaults
@@ -201,28 +219,28 @@ interface ICommunity {
     error NotAttested(); // seat mint by an account that has not self-attested
     error AccountBlocked(); // seat mint by a screener-blocked account
     error TargetNotMember(); // removal proposal against a seat that is not Active
-    error CannotRemoveSteward(); // removal proposal against the steward; the host vote is for that
+    error CannotRemoveHost(); // removal proposal against the host; the host vote is for that
     /// A removal of this member inside `REMOVAL_REPROPOSE_COOLDOWN` of their last failed one.
     error RemovalCooldown();
     /// `forfeit()` while a removal vote against the caller is unresolved.
     error MemberFrozen();
-    /// A removal proposal while a vote to remove the steward is unresolved.
+    /// A removal proposal while a vote to remove the host is unresolved.
     error HostVoteOpen();
-    /// A steward removal proposal inside `REMOVAL_REPROPOSE_COOLDOWN` of the last failed one.
+    /// A host removal proposal inside `REMOVAL_REPROPOSE_COOLDOWN` of the last failed one.
     error HostVoteCooldown();
 
     error AlreadyMember();
     error NotSibling();
     error AlreadyInitialized();
-    error StewardCannotForfeit();
+    error HostCannotForfeit();
 
-    // steward vote errors
+    // host vote errors
     error VoteActive();
     error VoteWindowOpen();
     error NotPassed();
     error AlreadyVoted();
-    error StewardNotVacant();
-    error StewardVacant(); // join(), proposeRemoveSteward() and proposeRemoval() while the role is empty
+    error HostNotVacant();
+    error HostVacant(); // join(), proposeRemoveHost() and proposeRemoval() while the role is empty
     error NoActiveVote();
     error VoteWindowClosed(); // a ballot cast after the vote's deadline
     error CandidateNotMember(); // election execution: the candidate is no longer a member

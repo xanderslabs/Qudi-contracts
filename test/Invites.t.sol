@@ -133,7 +133,7 @@ contract InvitesTest is MembershipFixture {
         uint64 term = c.hostTerm();
 
         _handOver(c, ada);
-        assertEq(c.steward(), ada);
+        assertEq(c.host(), ada);
         assertEq(c.hostTerm(), term + 1);
         _try(dee, ICommunity.InviteStale.selector);
 
@@ -176,7 +176,7 @@ contract InvitesTest is MembershipFixture {
 
         _removeHost(c, _people(ada, bem, cy));
         _elect(c, host, _people(ada, bem, cy));
-        assertEq(c.steward(), host);
+        assertEq(c.host(), host);
         _try(dee, ICommunity.InviteStale.selector);
     }
 
@@ -215,15 +215,15 @@ contract InvitesTest is MembershipFixture {
     function test_invite_onlyTheHostCreatesAndRevokes() public {
         _join(c, ada);
         vm.startPrank(ada);
-        vm.expectRevert(ICommunity.NotSteward.selector);
+        vm.expectRevert(ICommunity.NotHost.selector);
         c.createInvite(inviteKey, 5, uint64(block.timestamp + 7 days));
         vm.stopPrank();
 
         _group(5, 7 days);
         vm.startPrank(ada);
-        vm.expectRevert(ICommunity.NotSteward.selector);
+        vm.expectRevert(ICommunity.NotHost.selector);
         c.revokeInvite(inviteKey);
-        vm.expectRevert(ICommunity.NotSteward.selector);
+        vm.expectRevert(ICommunity.NotHost.selector);
         c.revokeAllInvites();
         vm.stopPrank();
         assertFalse(c.inviteOf(inviteKey).revoked);
@@ -239,7 +239,7 @@ contract InvitesTest is MembershipFixture {
         _join(c, ada);
         _resign(c);
         vm.prank(host);
-        vm.expectRevert(ICommunity.NotSteward.selector);
+        vm.expectRevert(ICommunity.NotHost.selector);
         c.createInvite(inviteKey, 5, uint64(block.timestamp + 7 days));
     }
 

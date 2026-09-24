@@ -1399,18 +1399,18 @@
     "id": "SM-08",
     "file": "src/Community.sol",
     "function": "proposeRemoval",
-    "bound": "only the steward proposes a removal. With any member able to, anyone could freeze anyone for a week (1.3)",
-    "match": "        if (stewardVacant()) revert StewardVacant();\n        if (msg.sender != steward) revert NotSteward();\n        if (member == steward) revert CannotRemoveSteward();",
-    "mutant": "        if (stewardVacant()) revert StewardVacant();\n        if (member == steward) revert CannotRemoveSteward();",
+    "bound": "only the host proposes a removal. With any member able to, anyone could freeze anyone for a week (1.3)",
+    "match": "        if (hostVacant()) revert HostVacant();\n        if (msg.sender != host) revert NotHost();\n        if (member == host) revert CannotRemoveHost();",
+    "mutant": "        if (hostVacant()) revert HostVacant();\n        if (member == host) revert CannotRemoveHost();",
     "status": "catalogued",
     "test": "test_proof1_aMemberWhoIsNotTheHostCannotProposeARemoval",
-    "note": "Multi-line match because `proposeSeatPrice` carries the same NotSteward line."
+    "note": "Multi-line match because `proposeSeatPrice` carries the same NotHost line."
   },
   {
     "id": "SM-09",
     "file": "src/Community.sol",
     "function": "proposeRemoval",
-    "bound": "the cooldown comparison: the steward may propose the same member again at exactly the failed vote's deadline plus REMOVAL_REPROPOSE_COOLDOWN, and not a second before",
+    "bound": "the cooldown comparison: the host may propose the same member again at exactly the failed vote's deadline plus REMOVAL_REPROPOSE_COOLDOWN, and not a second before",
     "match": "            if (block.timestamp < votes[last].deadline + config.removalReproposeCooldown()) revert RemovalCooldown();",
     "mutant": "            if (block.timestamp <= votes[last].deadline + config.removalReproposeCooldown()) revert RemovalCooldown();",
     "status": "catalogued",
@@ -1420,7 +1420,7 @@
     "id": "SM-10",
     "file": "src/Community.sol",
     "function": "proposeRemoval",
-    "bound": "the cooldown exists at all: without it a steward re-proposes each time a vote fails and keeps the member frozen indefinitely",
+    "bound": "the cooldown exists at all: without it a host re-proposes each time a vote fails and keeps the member frozen indefinitely",
     "match": "            if (block.timestamp < votes[last].deadline + config.removalReproposeCooldown()) revert RemovalCooldown();",
     "mutant": "",
     "status": "catalogued",
@@ -1639,7 +1639,7 @@
     "id": "SM-30",
     "file": "src/Community.sol",
     "function": "proposeRemoval",
-    "bound": "no removal while a vote to remove the steward is unresolved",
+    "bound": "no removal while a vote to remove the host is unresolved",
     "match": "        if (hostVote != 0 && !_resolvedAsFailed(hostVote)) revert HostVoteOpen();",
     "mutant": "",
     "status": "catalogued",
@@ -1648,7 +1648,7 @@
   {
     "id": "SM-31",
     "file": "src/Community.sol",
-    "function": "proposeRemoveSteward",
+    "function": "proposeRemoveHost",
     "bound": "the host-vote cooldown comparison: a failed host vote may be proposed again at exactly its deadline plus REMOVAL_REPROPOSE_COOLDOWN",
     "match": "        if (lastHostVote != 0 && block.timestamp < votes[lastHostVote].deadline + config.removalReproposeCooldown()) {",
     "mutant": "        if (lastHostVote != 0 && block.timestamp <= votes[lastHostVote].deadline + config.removalReproposeCooldown()) {",
@@ -1658,9 +1658,9 @@
   {
     "id": "SM-32",
     "file": "src/Community.sol",
-    "function": "executeRemoveSteward",
+    "function": "executeRemoveHost",
     "bound": "a passed host vote starts no cooldown and stops blocking removals",
-    "match": "        if (v.kind == VoteKind.StewardRemoval) lastHostRemovalVoteId = 0;",
+    "match": "        if (v.kind == VoteKind.HostRemoval) lastHostRemovalVoteId = 0;",
     "mutant": "",
     "status": "catalogued",
     "test": "test_fix7_noRemovalWhileAHostVoteIsOpen_thenItPasses"
@@ -1702,8 +1702,8 @@
     "file": "src/Ledger.sol",
     "function": "proposeWithdrawal",
     "bound": "no payout request on a shared vault before its unlock date",
-    "match": "        if (msg.sender != community.steward()) revert NotHost();\n        if (block.timestamp < v.lockedUntil) revert VaultLocked();",
-    "mutant": "        if (msg.sender != community.steward()) revert NotHost();",
+    "match": "        if (msg.sender != community.host()) revert NotHost();\n        if (block.timestamp < v.lockedUntil) revert VaultLocked();",
+    "mutant": "        if (msg.sender != community.host()) revert NotHost();",
     "status": "catalogued",
     "test": "test_onlyTheHostRequests_onAnUnlockedSharedVault, test_lockedSharedVault_blocksClosureUntilItsDate",
     "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
@@ -2004,7 +2004,7 @@
     "file": "src/Community.sol",
     "function": "revokeInvite",
     "bound": "only the host revokes an invite",
-    "match": "    function revokeInvite(address inviteKey) external {\n        if (msg.sender != steward) revert NotSteward();",
+    "match": "    function revokeInvite(address inviteKey) external {\n        if (msg.sender != host) revert NotHost();",
     "mutant": "    function revokeInvite(address inviteKey) external {",
     "status": "catalogued",
     "test": "test_invite_onlyTheHostCreatesAndRevokes"
@@ -2014,7 +2014,7 @@
     "file": "src/Community.sol",
     "function": "revokeAllInvites",
     "bound": "only the host revokes every invite",
-    "match": "    function revokeAllInvites() external {\n        if (msg.sender != steward) revert NotSteward();",
+    "match": "    function revokeAllInvites() external {\n        if (msg.sender != host) revert NotHost();",
     "mutant": "    function revokeAllInvites() external {",
     "status": "catalogued",
     "test": "test_invite_onlyTheHostCreatesAndRevokes"
@@ -2074,7 +2074,7 @@
     "file": "src/Community.sol",
     "function": "createInvite",
     "bound": "only the host creates an invite, so with the seat empty nobody does",
-    "match": "    function createInvite(address inviteKey, uint16 maxUses, uint64 expiry) external {\n        if (msg.sender != steward) revert NotSteward();",
+    "match": "    function createInvite(address inviteKey, uint16 maxUses, uint64 expiry) external {\n        if (msg.sender != host) revert NotHost();",
     "mutant": "    function createInvite(address inviteKey, uint16 maxUses, uint64 expiry) external {",
     "status": "catalogued",
     "test": "test_invite_onlyTheHostCreatesAndRevokes, test_invite_noHostMeansNoNewInvites"
@@ -2112,10 +2112,10 @@
   {
     "id": "SM-64",
     "file": "src/Community.sol",
-    "function": "executeRemoveSteward",
+    "function": "executeRemoveHost",
     "bound": "a removal and an election each start a new host term",
-    "match": "        steward = v.kind == VoteKind.Election ? v.target : address(0);\n        hostTerm++;",
-    "mutant": "        steward = v.kind == VoteKind.Election ? v.target : address(0);",
+    "match": "        host = v.kind == VoteKind.Election ? v.target : address(0);\n        hostTerm++;",
+    "mutant": "        host = v.kind == VoteKind.Election ? v.target : address(0);",
     "status": "catalogued",
     "test": "test_invite_aRemovalAndAnElectionEachEndTheOldTermsInvites"
   },
@@ -2124,8 +2124,8 @@
     "file": "src/Community.sol",
     "function": "completeHandover",
     "bound": "a completed handover starts a new host term",
-    "match": "        steward = nominee;\n        hostTerm++;",
-    "mutant": "        steward = nominee;",
+    "match": "        host = nominee;\n        hostTerm++;",
+    "mutant": "        host = nominee;",
     "status": "catalogued",
     "test": "test_invite_aHandoverEndsTheOldTermsInvites"
   },
@@ -2134,8 +2134,8 @@
     "file": "src/Community.sol",
     "function": "resignHost",
     "bound": "a resignation starts a new host term",
-    "match": "        steward = address(0);\n        hostTerm++;",
-    "mutant": "        steward = address(0);",
+    "match": "        host = address(0);\n        hostTerm++;",
+    "mutant": "        host = address(0);",
     "status": "catalogued",
     "test": "test_invite_aResignationEndsTheOldTermsInvites"
   },
@@ -2144,7 +2144,7 @@
     "file": "src/Community.sol",
     "function": "nominateSuccessor",
     "bound": "only the host nominates a successor",
-    "match": "    function nominateSuccessor(address nominee) external {\n        if (closed) revert CommunityIsClosed();\n        if (msg.sender != steward) revert NotSteward();",
+    "match": "    function nominateSuccessor(address nominee) external {\n        if (closed) revert CommunityIsClosed();\n        if (msg.sender != host) revert NotHost();",
     "mutant": "    function nominateSuccessor(address nominee) external {\n        if (closed) revert CommunityIsClosed();",
     "status": "catalogued",
     "test": "test_proof2_onlyASeasonedActiveUnfrozenMemberOtherThanTheHostCanBeNominated"
@@ -2154,7 +2154,7 @@
     "file": "src/Community.sol",
     "function": "nominateSuccessor",
     "bound": "the host cannot nominate themselves",
-    "match": "        if (nominee == steward || !_canHost(nominee)) revert NomineeIneligible();",
+    "match": "        if (nominee == host || !_canHost(nominee)) revert NomineeIneligible();",
     "mutant": "        if (!_canHost(nominee)) revert NomineeIneligible();",
     "status": "catalogued",
     "test": "test_proof2_onlyASeasonedActiveUnfrozenMemberOtherThanTheHostCanBeNominated"
@@ -2214,7 +2214,7 @@
     "file": "src/Community.sol",
     "function": "_startVote",
     "bound": "the host is not counted in the objection denominator",
-    "match": "            denominator -= _countedIn(steward, last) + _countedIn(target, last);",
+    "match": "            denominator -= _countedIn(host, last) + _countedIn(target, last);",
     "mutant": "            denominator -= _countedIn(target, last);",
     "status": "catalogued",
     "test": "test_proof1_aHandoverNobodyBlocksCompletes"
@@ -2224,8 +2224,8 @@
     "file": "src/Community.sol",
     "function": "_startVote",
     "bound": "the nominee is not counted in the objection denominator",
-    "match": "            denominator -= _countedIn(steward, last) + _countedIn(target, last);",
-    "mutant": "            denominator -= _countedIn(steward, last);",
+    "match": "            denominator -= _countedIn(host, last) + _countedIn(target, last);",
+    "mutant": "            denominator -= _countedIn(host, last);",
     "status": "catalogued",
     "test": "test_proof1_aHandoverNobodyBlocksCompletes"
   },
@@ -2234,7 +2234,7 @@
     "file": "src/Community.sol",
     "function": "objectToHandover",
     "bound": "neither the host nor the nominee objects",
-    "match": "        if (msg.sender == steward || msg.sender == v.target) revert VoteIneligible();",
+    "match": "        if (msg.sender == host || msg.sender == v.target) revert VoteIneligible();",
     "mutant": "",
     "status": "catalogued",
     "test": "test_proof4_eachCountedMemberObjectsOnceAndNoOneElse"
@@ -2244,8 +2244,8 @@
     "file": "src/Community.sol",
     "function": "objectToHandover",
     "bound": "only a member seasoned at acceptance objects, as the denominator counts",
-    "match": "        if (msg.sender == steward || msg.sender == v.target) revert VoteIneligible();\n        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();",
-    "mutant": "        if (msg.sender == steward || msg.sender == v.target) revert VoteIneligible();",
+    "match": "        if (msg.sender == host || msg.sender == v.target) revert VoteIneligible();\n        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();",
+    "mutant": "        if (msg.sender == host || msg.sender == v.target) revert VoteIneligible();",
     "status": "catalogued",
     "test": "test_proof4_eachCountedMemberObjectsOnceAndNoOneElse"
   },
@@ -2322,7 +2322,7 @@
   {
     "id": "SM-85",
     "file": "src/Community.sol",
-    "function": "proposeRemoveSteward",
+    "function": "proposeRemoveHost",
     "bound": "proposing to remove the host cancels a pending handover, so a host cannot escape a removal by handing the seat on",
     "match": "        if (_handoverPending()) _cancelNomination();",
     "mutant": "",
@@ -2334,8 +2334,8 @@
     "file": "src/Community.sol",
     "function": "nominateSuccessor",
     "bound": "no nomination while a vote to remove the host is open",
-    "match": "        if (msg.sender != steward) revert NotSteward();\n        if (_hostVoteOpen()) revert HostVoteOpen();\n        if (_handoverPending()) revert NominationPending();\n        uint64 failedAt",
-    "mutant": "        if (msg.sender != steward) revert NotSteward();\n        if (_handoverPending()) revert NominationPending();\n        uint64 failedAt",
+    "match": "        if (msg.sender != host) revert NotHost();\n        if (_hostVoteOpen()) revert HostVoteOpen();\n        if (_handoverPending()) revert NominationPending();\n        uint64 failedAt",
+    "mutant": "        if (msg.sender != host) revert NotHost();\n        if (_handoverPending()) revert NominationPending();\n        uint64 failedAt",
     "status": "catalogued",
     "test": "test_proof5_noNominationOrResignationWhileARemovalVoteIsOpen"
   },
@@ -2344,8 +2344,8 @@
     "file": "src/Community.sol",
     "function": "resignHost",
     "bound": "no resignation while a vote to remove the host is open",
-    "match": "    function resignHost() external {\n        if (closed) revert CommunityIsClosed();\n        if (msg.sender != steward) revert NotSteward();\n        if (_hostVoteOpen()) revert HostVoteOpen();",
-    "mutant": "    function resignHost() external {\n        if (closed) revert CommunityIsClosed();\n        if (msg.sender != steward) revert NotSteward();",
+    "match": "    function resignHost() external {\n        if (closed) revert CommunityIsClosed();\n        if (msg.sender != host) revert NotHost();\n        if (_hostVoteOpen()) revert HostVoteOpen();",
+    "mutant": "    function resignHost() external {\n        if (closed) revert CommunityIsClosed();\n        if (msg.sender != host) revert NotHost();",
     "status": "catalogued",
     "test": "test_proof5_noNominationOrResignationWhileARemovalVoteIsOpen"
   },
@@ -2354,8 +2354,8 @@
     "file": "src/Community.sol",
     "function": "resignHost",
     "bound": "no resignation while a nomination is pending",
-    "match": "        if (_handoverPending()) revert NominationPending();\n        steward = address(0);",
-    "mutant": "        steward = address(0);",
+    "match": "        if (_handoverPending()) revert NominationPending();\n        host = address(0);",
+    "mutant": "        host = address(0);",
     "status": "catalogued",
     "test": "test_proof7_noResignationWhileANominationIsPending"
   },
@@ -2374,8 +2374,8 @@
     "file": "src/Community.sol",
     "function": "_thresholdFor",
     "bound": "an election passes at the community vote threshold, more than half, no longer the host-vote threshold",
-    "match": "        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Closure) return config.hostVote();",
-    "mutant": "        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Closure || kind == VoteKind.Election) return config.hostVote();",
+    "match": "        if (kind == VoteKind.HostRemoval || kind == VoteKind.Closure) return config.hostVote();",
+    "mutant": "        if (kind == VoteKind.HostRemoval || kind == VoteKind.Closure || kind == VoteKind.Election) return config.hostVote();",
     "status": "catalogued",
     "test": "test_proof8_sixVotersElectWithFourYesVotesAndNotThree"
   },
@@ -2384,7 +2384,7 @@
     "file": "src/Community.sol",
     "function": "_thresholdFor",
     "bound": "a vote to remove the host keeps the host-vote threshold",
-    "match": "        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Closure) return config.hostVote();",
+    "match": "        if (kind == VoteKind.HostRemoval || kind == VoteKind.Closure) return config.hostVote();",
     "mutant": "        if (kind == VoteKind.Closure) return config.hostVote();",
     "status": "catalogued",
     "test": "test_proof8_removingTheHostOfSixStillNeedsFive"
@@ -2834,8 +2834,8 @@
     "file": "src/Community.sol",
     "function": "_thresholdFor",
     "bound": "a closure vote takes the host-vote bar, more than two thirds",
-    "match": "        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Closure) return config.hostVote();",
-    "mutant": "        if (kind == VoteKind.StewardRemoval) return config.hostVote();",
+    "match": "        if (kind == VoteKind.HostRemoval || kind == VoteKind.Closure) return config.hostVote();",
+    "mutant": "        if (kind == VoteKind.HostRemoval) return config.hostVote();",
     "status": "catalogued",
     "test": "test_proof13a_sixSeasoned_fourYesFail"
   },
@@ -2902,7 +2902,7 @@
   {
     "id": "SM-100",
     "file": "src/Community.sol",
-    "function": "electSteward",
+    "function": "electHost",
     "bound": "a candidate must be a seasoned Active member who is not frozen",
     "match": "        if (!_canHost(candidate)) revert CandidateIneligible();",
     "mutant": "",
@@ -2942,7 +2942,7 @@
   {
     "id": "SM-102",
     "file": "src/Community.sol",
-    "function": "proposeRemoveSteward",
+    "function": "proposeRemoveHost",
     "bound": "no host removal vote in a closed community",
     "match": "        // A closed community needs no host changes.\n        if (closed) revert CommunityIsClosed();\n",
     "mutant": "",
@@ -3608,5 +3608,235 @@
     "mutant": "        if (key == K.MAX_SEATS_PER_WALLET) return (0, 50);",
     "test": "test_credit_launchValuesAndBounds",
     "status": "catalogued"
+  },
+  {
+    "id": "PG-01",
+    "file": "src/Ledger.sol",
+    "function": "deposit",
+    "bound": "the DEPOSITS flag stops a deposit",
+    "match": "        if (IPauseGuard(config.pauseGuard()).paused(IPauseGuard.Flag.DEPOSITS)) revert IPauseGuard.Paused();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof1_depositsStopsLedgerDepositAndNothingElse"
+  },
+  {
+    "id": "PG-02",
+    "file": "src/CreditCore.sol",
+    "function": "draw",
+    "bound": "the DRAWS flag stops a draw",
+    "match": "        _whenOpen(IPauseGuard.Flag.DRAWS);",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof1_drawsStopsCreditCoreDrawAndNothingElse"
+  },
+  {
+    "id": "PG-03",
+    "file": "src/CreditCore.sol",
+    "function": "depositToStrategy",
+    "bound": "the VENUES flag stops the pool sending cash to a strategy",
+    "match": "        _whenOpen(IPauseGuard.Flag.VENUES);",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof1_venuesStopsMoneyIntoAStrategyAndNothingElse"
+  },
+  {
+    "id": "PG-04",
+    "file": "src/Venue.sol",
+    "function": "_allocate",
+    "bound": "the VENUES flag stops a Venue allocating into a strategy",
+    "match": "        if (IPauseGuard(config.pauseGuard()).paused(IPauseGuard.Flag.VENUES)) revert IPauseGuard.Paused();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof1_venuesStopsMoneyIntoAStrategyAndNothingElse"
+  },
+  {
+    "id": "PG-05",
+    "file": "src/ManualStrategy.sol",
+    "function": "deploy",
+    "bound": "the VENUES flag stops the operator sending principal to a destination",
+    "match": "        if (IPauseGuard(config.pauseGuard()).paused(IPauseGuard.Flag.VENUES)) revert IPauseGuard.Paused();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof1_venuesStopsMoneyIntoAStrategyAndNothingElse"
+  },
+  {
+    "id": "PG-06",
+    "file": "src/CreditCore.sol",
+    "function": "_whenOpen",
+    "bound": "the pool's pause read checks the flag it is given",
+    "match": "        if (IPauseGuard(config.pauseGuard()).paused(flag)) revert IPauseGuard.Paused();",
+    "mutant": "        if (IPauseGuard(config.pauseGuard()).paused(IPauseGuard.Flag.DEPOSITS)) revert IPauseGuard.Paused();",
+    "status": "catalogued",
+    "test": "test_proof1_drawsStopsCreditCoreDrawAndNothingElse"
+  },
+  {
+    "id": "PG-07",
+    "file": "src/PauseGuard.sol",
+    "function": "setPaused",
+    "bound": "only the pauser sets or clears a flag",
+    "match": "        if (msg.sender != pauser) revert NotPauser();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof3_anyoneElseReverts"
+  },
+  {
+    "id": "PG-08",
+    "file": "src/PauseGuard.sol",
+    "function": "setPauser",
+    "bound": "only the owner, the timelock, rotates the pauser",
+    "match": "    function setPauser(address next) external override onlyOwner {",
+    "mutant": "    function setPauser(address next) external override {",
+    "status": "catalogued",
+    "test": "test_proof3_onlyTheTimelockRotatesThePauser"
+  },
+  {
+    "id": "QV-138",
+    "file": "src/Venue.sol",
+    "function": "addStrategy",
+    "bound": "only the strategy lister adds a strategy",
+    "match": "    function addStrategy(address strategy, uint64 delaySeconds) external override {\n        if (msg.sender != strategyLister) revert NotStrategyLister();",
+    "mutant": "    function addStrategy(address strategy, uint64 delaySeconds) external override {",
+    "status": "catalogued",
+    "test": "test_onlyTheListerAddsAStrategy"
+  },
+  {
+    "id": "QV-139",
+    "file": "src/Venue.sol",
+    "function": "setStrategyLister",
+    "bound": "only the strategy lister names its successor, never the owner",
+    "match": "    function setStrategyLister(address next) external override {\n        if (msg.sender != strategyLister) revert NotStrategyLister();",
+    "mutant": "    function setStrategyLister(address next) external override {",
+    "status": "catalogued",
+    "test": "test_onlyTheListerHandsTheRoleOn"
+  },
+  {
+    "id": "DP-01",
+    "file": "script/Deploy.s.sol",
+    "function": "checkParams",
+    "bound": "the deploy runs only on anvil, Arc testnet and Arc mainnet",
+    "match": "            revert UnsupportedChain();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof6_anUnsupportedChainReverts"
+  },
+  {
+    "id": "DP-02",
+    "file": "script/Deploy.s.sol",
+    "function": "checkParams",
+    "bound": "Arc mainnet refuses a TIMELOCK_DELAY under 24 hours",
+    "match": "            if (p.delay < _MAINNET_DELAY_FLOOR) revert DelayBelowFloor(p.delay, _MAINNET_DELAY_FLOOR);",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof6_mainnetRefusesADelayUnder24Hours"
+  },
+  {
+    "id": "DP-03",
+    "file": "script/Deploy.s.sol",
+    "function": "checkParams",
+    "bound": "Arc mainnet refuses a TIMELOCK_DELAY_LONG under 7 days",
+    "match": "                revert DelayBelowFloor(p.delayLong, _MAINNET_DELAY_LONG_FLOOR);",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof6_mainnetRefusesALongDelayUnder7Days"
+  },
+  {
+    "id": "DP-04",
+    "file": "script/Deploy.s.sol",
+    "function": "checkParams",
+    "bound": "owner, pauser and operator are three keys on a public chain",
+    "match": "            if (p.owner == p.pauser || p.owner == p.operator || p.pauser == p.operator) revert RolesNotDistinct();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof6_publicChainsRefuseSharedKeys"
+  },
+  {
+    "id": "DP-05",
+    "file": "script/Deploy.s.sol",
+    "function": "checkParams",
+    "bound": "shared keys are accepted only on anvil",
+    "match": "        if (block.chainid != _ANVIL) {",
+    "mutant": "        if (true) {",
+    "status": "catalogued",
+    "test": "test_proof6_anvilAcceptsSharedKeys"
+  },
+  {
+    "id": "DP-06",
+    "file": "script/Deploy.s.sol",
+    "function": "checkParams",
+    "bound": "the owner key is never the deployer",
+    "match": "        if (p.owner == deployer_) revert OwnerIsDeployer();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof6_theOwnerIsNeverTheDeployer"
+  },
+  {
+    "id": "DC-01",
+    "file": "script/DeployCalibur.s.sol",
+    "function": "plan",
+    "bound": "code at the canonical address is used only if it is the pinned build",
+    "match": "            if (found != CaliburPin.RUNTIME_CODE_HASH) revert CaliburMismatch(found, CaliburPin.RUNTIME_CODE_HASH);",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_calibur_aMismatchStops"
+  },
+  {
+    "id": "DC-02",
+    "file": "script/DeployCalibur.s.sol",
+    "function": "plan",
+    "bound": "Arc mainnet is never deployed to",
+    "match": "        if (block.chainid == _ARC_MAINNET) revert MainnetUsesTheExistingDeployment();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_calibur_mainnetIsNeverDeployedTo"
+  },
+  {
+    "id": "CFG-14",
+    "file": "src/Config.sol",
+    "function": "setAddress",
+    "bound": "CREDIT_CORE is set once and never again",
+    "match": "        if (key == K.CREDIT_CORE && values[key] != 0) revert CreditCoreAlreadySet();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_creditCore_isSetOnceAndNeverAgain"
+  },
+  {
+    "id": "CC-108",
+    "file": "src/CreditCore.sol",
+    "function": "addStrategy",
+    "bound": "only the strategy lister adds a pool strategy",
+    "match": "    function addStrategy(address strategy) external {\n        if (msg.sender != strategyLister) revert NotStrategyLister();",
+    "mutant": "    function addStrategy(address strategy) external {",
+    "status": "catalogued",
+    "test": "test_onlyTheListerAddsAPoolStrategy"
+  },
+  {
+    "id": "CC-109",
+    "file": "src/CreditCore.sol",
+    "function": "setStrategyLister",
+    "bound": "only the pool's strategy lister names its successor, never the owner",
+    "match": "    function setStrategyLister(address next) external {\n        if (msg.sender != strategyLister) revert NotStrategyLister();",
+    "mutant": "    function setStrategyLister(address next) external {",
+    "status": "catalogued",
+    "test": "test_onlyThePoolListerHandsTheRoleOn"
+  },
+  {
+    "id": "DP-07",
+    "file": "script/Deploy.s.sol",
+    "function": "checkParams",
+    "bound": "Arc mainnet never runs the smoke community",
+    "match": "            if (!p.skipSmoke) revert NoSmokeOnMainnet();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_mainnetRefusesTheSmokeCommunity"
+  },
+  {
+    "id": "DP-08",
+    "file": "script/Deploy.s.sol",
+    "function": "_handOver",
+    "bound": "the pool's strategy lister goes to the 7-day timelock",
+    "match": "        creditCore.setStrategyLister(address(timelockLong));",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof5_theDeployerOwnsNothingAfterTheDeploy"
   }
 ]

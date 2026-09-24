@@ -8,9 +8,9 @@ import {ICreditCore} from "../src/interfaces/ICreditCore.sol";
 import {CreditFixture} from "./helpers/CreditFixture.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 
-/// On mainnet the owner and the allocation multisig are `TimelockController`s. Listing a pool
-/// strategy and taking Qudi's money out wait out the owner's delay, and a grant waits out its own,
-/// so a stolen key is seen before it can move anything.
+/// On mainnet the owner, the strategy lister and the allocation multisig are `TimelockController`s.
+/// Listing a pool strategy waits out the lister's delay, taking Qudi's money out waits out the
+/// owner's, and a grant waits out its own, so a stolen key is seen before it can move anything.
 contract CreditCoreTimelockTest is CreditFixture {
     TimelockController ownerLock;
     TimelockController allocationLock;
@@ -32,6 +32,11 @@ contract CreditCoreTimelockTest is CreditFixture {
         core.setAllocationMultisig(address(allocationLock));
         core.transferOwnership(address(ownerLock));
         _viaLock(ownerLock, address(core), abi.encodeCall(Ownable2StepLike.acceptOwnership, ()));
+    }
+
+    function _devOnly() internal view returns (address[] memory ops) {
+        ops = new address[](1);
+        ops[0] = dev;
     }
 
     function _viaLock(TimelockController lock, address target, bytes memory data) internal {
@@ -64,14 +69,17 @@ contract CreditCoreTimelockTest is CreditFixture {
         core.allocate(0, 1e6, ICreditCore.AllocationType.Growth);
     }
 
-    /// A pool strategy is listed only after the owner's delay.
-    function test_addStrategyWaitsForTheOwnersDelay() public {
+    /// A pool strategy is listed only through the strategy lister, after its delay. Here the lister
+    /// role is handed to a timelock the way a deployment hands it to the slower one.
+    function test_addStrategyWaitsForTheListersDelay() public {
+        TimelockController listerLock = new TimelockController(DELAY, _devOnly(), _devOnly(), address(0));
+        core.setStrategyLister(address(listerLock));
         MockStrategy s = new MockStrategy(IERC20(address(usdc)), address(core));
         vm.prank(dev);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, dev));
+        vm.expectRevert(ICreditCore.NotStrategyLister.selector);
         core.addStrategy(address(s));
 
-        _viaLock(ownerLock, address(core), abi.encodeCall(core.addStrategy, (address(s))));
+        _viaLock(listerLock, address(core), abi.encodeCall(core.addStrategy, (address(s))));
         assertTrue(core.isStrategy(address(s)));
     }
 

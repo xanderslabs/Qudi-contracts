@@ -9,6 +9,7 @@ import {ILedger} from "../../src/interfaces/ILedger.sol";
 import {ICommunityInit} from "../../src/interfaces/ICommunityInit.sol";
 import {Venue} from "../../src/Venue.sol";
 import {Config} from "../../src/Config.sol";
+import {PauseGuard} from "../../src/PauseGuard.sol";
 import {IConfig} from "../../src/interfaces/IConfig.sol";
 import {ConfigKeys as K} from "../../src/ConfigKeys.sol";
 import {ComplianceRegistry} from "../../src/ComplianceRegistry.sol";
@@ -267,6 +268,10 @@ contract LedgerInvariantTest is StdInvariant, Test {
         creditCore = new LedgerCreditCoreStub(usdc);
         vm.prank(owner);
         config.setAddress(K.CREDIT_CORE, address(creditCore));
+        // Every flag off: the money paths ask the guard before money moves in.
+        PauseGuard pauseGuard = new PauseGuard(address(this), address(this));
+        vm.prank(owner);
+        config.setAddress(K.PAUSE_GUARD, address(pauseGuard));
 
         ledger = Ledger(Clones.clone(address(new Ledger())));
         ledger.initialize(
@@ -289,7 +294,7 @@ contract LedgerInvariantTest is StdInvariant, Test {
             community.setMember(actors[i], true);
             community.setSeasoned(actors[i], true);
         }
-        community.setSteward(actors[0]);
+        community.setHost(actors[0]);
 
         uint256[6] memory ids;
         vm.startPrank(actors[0]);

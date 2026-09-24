@@ -48,7 +48,7 @@ contract CommunityTest is InviteSigner {
 
     address owner = makeAddr("owner");
     address treasury = makeAddr("treasury");
-    address steward = _keyed("steward");
+    address host = _keyed("host");
     address ada = _keyed("ada");
     address bem = _keyed("bem");
 
@@ -61,7 +61,7 @@ contract CommunityTest is InviteSigner {
     function setUp() public virtual {
         usdc = new MockUSDC();
         registry = new ComplianceRegistry(address(this));
-        _attest(steward);
+        _attest(host);
         _attest(ada);
         _attest(bem);
         vm.prank(owner);
@@ -82,7 +82,7 @@ contract CommunityTest is InviteSigner {
             seats: address(seats),
             community: address(community),
             vault: address(vault),
-            creator: steward,
+            creator: host,
             seatPrice: 50e6,
             name: "Test Community",
             poolType: VenueIds.CORE
@@ -125,7 +125,7 @@ contract CommunityTest is InviteSigner {
             seats: address(seats),
             community: address(freshCommunity),
             vault: address(vault),
-            creator: steward,
+            creator: host,
             seatPrice: price,
             name: "Test Community",
             poolType: VenueIds.CORE
@@ -136,14 +136,14 @@ contract CommunityTest is InviteSigner {
         usdc.approve(address(freshCommunity), price);
         (address inviteKey, bytes memory keySig) = _inviteFor(address(freshCommunity), ada);
         vm.expectEmit(true, false, false, false);
-        emit ICommunity.SeatMinted(ada, 0, 0, 0, 0);
+        emit ICommunity.SeatMinted(ada, inviteKey, 0, 0, 0, 0);
         vm.prank(ada);
         freshCommunity.join(inviteKey, keySig);
         (uint16 sBps, uint16 pBps, uint16 protBps) = config.mintSplit();
-        uint256 toSteward = price * sBps / 10_000;
+        uint256 toHost = price * sBps / 10_000;
         uint256 toPool = price * pBps / 10_000;
         // protocol takes the remainder so the three legs always sum to the price
-        assertEq(usdc.balanceOf(steward), toSteward);
+        assertEq(usdc.balanceOf(host), toHost);
         // The community leg is `CreditCore`'s, booked against this community's community id.
         assertEq(core.legOf(0), toPool);
         assertEq(core.lastCommunityId(), 0);
@@ -152,7 +152,7 @@ contract CommunityTest is InviteSigner {
         // and asserting against one would only prove the mock recorded what it was handed.
         // `test_leg_kindIsDerivedFromTheCaller` proves it against the real contract.
         assertEq(usdc.balanceOf(address(core)), toPool);
-        assertEq(usdc.balanceOf(treasury), price - toSteward - toPool);
+        assertEq(usdc.balanceOf(treasury), price - toHost - toPool);
         assertEq(usdc.balanceOf(address(freshCommunity)), 0);
         protBps; // silence unused warning; remainder rule asserted above
     }
@@ -171,7 +171,7 @@ contract CommunityTest is InviteSigner {
                 seats: address(seats),
                 community: address(freshCommunity),
                 vault: address(vault),
-                creator: steward,
+                creator: host,
                 seatPrice: price,
                 name: "Test Community",
                 poolType: VenueIds.CORE
@@ -180,14 +180,14 @@ contract CommunityTest is InviteSigner {
         address carl = makeAddr("carl");
         _attest(carl);
         usdc.mint(carl, price);
-        uint256 stewardBefore = usdc.balanceOf(steward);
+        uint256 hostBefore = usdc.balanceOf(host);
         uint256 treasuryBefore = usdc.balanceOf(treasury);
         uint256 poolBefore = core.legOf(0);
         vm.prank(carl);
         usdc.approve(address(freshCommunity), price);
         _joinAs(address(freshCommunity), carl);
 
-        uint256 toHost = usdc.balanceOf(steward) - stewardBefore;
+        uint256 toHost = usdc.balanceOf(host) - hostBefore;
         uint256 toPool = core.legOf(0) - poolBefore;
         uint256 toProtocol = usdc.balanceOf(treasury) - treasuryBefore;
         assertEq(toHost + toPool + toProtocol, price, "legs do not sum to price");
@@ -222,17 +222,17 @@ contract CommunityTest is InviteSigner {
         assertFalse(community.isSeasoned(bem));
     }
 
-    function test_mintSplitPaysStewardWallet() public {
+    function test_mintSplitPaysHostWallet() public {
         address stranger = makeAddr("stranger");
         _attest(stranger);
-        uint256 before = usdc.balanceOf(steward);
+        uint256 before = usdc.balanceOf(host);
         uint256 price = community.seatPrice();
         usdc.mint(stranger, price);
         vm.prank(stranger);
         usdc.approve(address(community), price);
         _joinAs(address(community), stranger);
         // 30% straight to the creator's wallet: no vault involvement, no cooldown.
-        assertEq(usdc.balanceOf(steward) - before, community.seatPrice() * 3000 / 10_000);
+        assertEq(usdc.balanceOf(host) - before, community.seatPrice() * 3000 / 10_000);
     }
 
     function test_forfeitIsTheOnlyExit() public {
@@ -311,10 +311,10 @@ contract CommunityTest is InviteSigner {
         _join(carl); // a third voter: a vote needs three yes votes
         newPrice = bound(newPrice, config.seatPriceFloor(), config.seatPriceCeiling());
         _season();
-        vm.prank(steward);
+        vm.prank(host);
         community.proposeSeatPrice(newPrice);
         uint256 voteId = community.activePriceVoteId();
-        vm.prank(steward);
+        vm.prank(host);
         community.castVote(voteId, true);
         vm.prank(ada);
         community.castVote(voteId, true);
@@ -340,25 +340,25 @@ contract CommunityTest is InviteSigner {
         // and an inline config.seatPriceFloor() call as an argument would be caught instead of
         // the intended community.proposeSeatPrice() call.
         uint256 floor = config.seatPriceFloor();
-        vm.prank(steward);
+        vm.prank(host);
         vm.expectRevert(ICommunity.BelowFloor.selector);
         community.proposeSeatPrice(floor - 1);
     }
 
-    /// With no steward there is nowhere to send the 30% host leg. _split() would
+    /// With no host there is nowhere to send the 30% host leg. _split() would
     /// revert on a transfer to address(0) (real USDC) and strand nothing, but joining stays
     /// shut until the community elects a replacement: vacancy is resolved by vote, not by
     /// admitting around it.
-    function test_joinBlockedWhileStewardVacant() public {
-        // Vacate the steward the only way it happens now: a passing removal vote.
+    function test_joinBlockedWhileHostVacant() public {
+        // Vacate the host the only way it happens now: a passing removal vote.
         _join(ada);
         _join(bem);
         address cy = makeAddr("cy");
         _join(cy);
         _season();
         vm.prank(ada);
-        community.proposeRemoveSteward();
-        uint256 voteId = community.activeStewardVoteId();
+        community.proposeRemoveHost();
+        uint256 voteId = community.activeHostVoteId();
         vm.prank(ada);
         community.castVote(voteId, true);
         vm.prank(bem);
@@ -366,8 +366,8 @@ contract CommunityTest is InviteSigner {
         vm.prank(cy);
         community.castVote(voteId, true);
         vm.warp(block.timestamp + 7 days + 1);
-        community.executeRemoveSteward();
-        assertTrue(community.stewardVacant());
+        community.executeRemoveHost();
+        assertTrue(community.hostVacant());
 
         // With no host there is nobody to make an invite; the vacancy refuses first.
         address dara = makeAddr("dara");
@@ -375,15 +375,15 @@ contract CommunityTest is InviteSigner {
         vm.prank(dara);
         usdc.approve(address(community), 50e6);
         vm.prank(dara);
-        vm.expectRevert(ICommunity.StewardVacant.selector);
+        vm.expectRevert(ICommunity.HostVacant.selector);
         community.join(address(0), "");
 
         assertFalse(community.isMember(dara));
     }
 
-    function test_onlyStewardAdmin() public {
+    function test_onlyHostAdmin() public {
         vm.startPrank(ada);
-        vm.expectRevert(ICommunity.NotSteward.selector);
+        vm.expectRevert(ICommunity.NotHost.selector);
         community.proposeSeatPrice(60e6);
         vm.stopPrank();
     }

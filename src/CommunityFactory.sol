@@ -8,7 +8,7 @@ import {ICommunityInit} from "./interfaces/ICommunityInit.sol";
 import {ISeats} from "./interfaces/ISeats.sol";
 import {Ownable2Step, Ownable} from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
 
-/// Anyone creates a community; the creator becomes founding steward and receives the founding
+/// Anyone creates a community; the creator becomes founding host and receives the founding
 /// seat unpaid inside initialize() (the creator does not pay for their own founding mint;
 /// every later seat is a paid mint splitting 40/30/30).
 /// Clones are EIP-1167 minimal proxies over immutable implementations: a deployment cost
@@ -148,7 +148,7 @@ contract CommunityFactory is ICommunityFactory, Ownable2Step {
         ICommunityInit(community).initialize(w);
         ICommunityInit(ledger).initialize(w);
 
-        emit CommunityCreated(communityId, msg.sender, community, ledger);
+        emit CommunityCreated(communityId, msg.sender, community, ledger, name, seatPrice);
     }
 
     /// The community's one ledger, or 0 if `community` is not one this factory created.

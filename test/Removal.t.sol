@@ -6,6 +6,7 @@ import {Seats} from "../src/Seats.sol";
 import {InviteSigner} from "./helpers/InviteSigner.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {Config} from "../src/Config.sol";
+import {PauseGuard} from "../src/PauseGuard.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
 import {Community} from "../src/Community.sol";
 import {CommunityFactory} from "../src/CommunityFactory.sol";
@@ -122,6 +123,9 @@ contract RemovalTest is InviteSigner {
         vm.prank(governance);
         standing.setCreditCore(address(cc));
         config.setAddress(K.CREDIT_CORE, address(cc));
+        // Every flag off: the money paths ask the guard before money moves in.
+        PauseGuard pauseGuard = new PauseGuard(address(this), address(this));
+        config.setAddress(K.PAUSE_GUARD, address(pauseGuard));
         config.setCreditAgreementHash(AGREEMENT);
         extra = new MockImpactSource();
         vm.prank(governance);
@@ -266,7 +270,7 @@ contract RemovalTest is InviteSigner {
     // =============================================================================
 
     function test_proof1_aMemberWhoIsNotTheHostCannotProposeARemoval() public {
-        vm.expectRevert(ICommunity.NotSteward.selector);
+        vm.expectRevert(ICommunity.NotHost.selector);
         _propose(bea, ada);
         assertEq(_voteId(ada), 0, "no vote exists and nobody is frozen");
         assertTrue(community.isMember(ada));
@@ -529,8 +533,8 @@ contract RemovalTest is InviteSigner {
     function test_proof8_unseasonedSeatsCannotVote_hostVote() public {
         (address early, address late) = _seasoningPair();
         vm.prank(bea);
-        community.proposeRemoveSteward();
-        _assertSeasonedVoting(community.activeStewardVoteId(), early, late);
+        community.proposeRemoveHost();
+        _assertSeasonedVoting(community.activeHostVoteId(), early, late);
     }
 
     function test_proof8_unseasonedSeatsCannotVote_priceVote() public {

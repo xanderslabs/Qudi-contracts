@@ -114,7 +114,7 @@ abstract contract MembershipFixture is InviteSigner {
 
     /// The host nominates `nominee`, who accepts; nobody objects, and the handover completes.
     function _handOver(Community c, address nominee) internal {
-        vm.prank(c.steward());
+        vm.prank(c.host());
         c.nominateSuccessor(nominee);
         vm.prank(nominee);
         c.acceptNomination();
@@ -123,28 +123,28 @@ abstract contract MembershipFixture is InviteSigner {
     }
 
     function _resign(Community c) internal {
-        vm.prank(c.steward());
+        vm.prank(c.host());
         c.resignHost();
     }
 
     /// `voters[0]` proposes removing the host, every voter votes yes, and it executes.
     function _removeHost(Community c, address[] memory voters) internal {
         vm.prank(voters[0]);
-        c.proposeRemoveSteward();
+        c.proposeRemoveHost();
         _carry(c, voters);
-        c.executeRemoveSteward();
+        c.executeRemoveHost();
     }
 
     /// `voters[0]` stands `candidate`, every voter votes yes, and it executes.
     function _elect(Community c, address candidate, address[] memory voters) internal {
         vm.prank(voters[0]);
-        c.electSteward(candidate);
+        c.electHost(candidate);
         _carry(c, voters);
-        c.executeRemoveSteward();
+        c.executeRemoveHost();
     }
 
     function _carry(Community c, address[] memory voters) private {
-        uint256 voteId = c.activeStewardVoteId();
+        uint256 voteId = c.activeHostVoteId();
         for (uint256 i; i < voters.length; i++) {
             _vote(c, voteId, voters[i], true);
         }

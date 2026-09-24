@@ -269,10 +269,11 @@ contract CreditPoolTest is CreditFixture {
         assertEq(_credit(aId).allocation, allocation);
     }
 
-    function test_strategy_listingIsTheOwnersAndMovingIsTheOperators() public {
+    /// Listing belongs to the strategy lister, which starts as the owner.
+    function test_strategy_listingIsTheListersAndMovingIsTheOperators() public {
         MockStrategy s = new MockStrategy(IERC20(address(usdc)), address(core));
         vm.prank(operator);
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, operator));
+        vm.expectRevert(ICreditCore.NotStrategyLister.selector);
         core.addStrategy(address(s));
         core.addStrategy(address(s));
         vm.expectRevert(ICreditCore.DuplicateStrategy.selector);

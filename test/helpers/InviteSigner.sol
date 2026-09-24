@@ -43,7 +43,7 @@ abstract contract InviteSigner is Test {
 
     /// The community's current host registers `inviteKey`.
     function _createInvite(address community, address inviteKey, uint16 maxUses, uint64 expiry) internal {
-        vm.prank(ICommunity(community).steward());
+        vm.prank(ICommunity(community).host());
         ICommunity(community).createInvite(inviteKey, maxUses, expiry);
     }
 

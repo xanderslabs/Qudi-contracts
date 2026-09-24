@@ -7,6 +7,7 @@ import {Math} from "openzeppelin-contracts/contracts/utils/math/Math.sol";
 import {Ownable2Step, Ownable} from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IConfig} from "./interfaces/IConfig.sol";
+import {IPauseGuard} from "./interfaces/IPauseGuard.sol";
 
 /// Qudi's own strategy, with pre-funded yield.
 ///
@@ -165,6 +166,7 @@ contract ManualStrategy is IStrategy, Ownable2Step {
     /// Venue's, only somewhere else. A stolen operator key can move money only to places the owner
     /// has already listed through the timelock.
     function deploy(uint256 amount, address destination, bytes32 ref) external onlyOperator {
+        if (IPauseGuard(config.pauseGuard()).paused(IPauseGuard.Flag.VENUES)) revert IPauseGuard.Paused();
         if (!isDestination[destination]) revert UnlistedDestination();
         if (amount > principalHeld) revert ExceedsCash();
         _accrue();

@@ -20,14 +20,14 @@ contract ElectionFloorTest is MembershipFixture {
         }
         _season();
         vm.prank(ada);
-        c.proposeRemoveSteward();
-        uint256 voteId = c.activeStewardVoteId();
+        c.proposeRemoveHost();
+        uint256 voteId = c.activeHostVoteId();
         _vote(c, voteId, ada, true);
         _vote(c, voteId, bem, true);
         _vote(c, voteId, cy, true);
         _pastWindow();
-        c.executeRemoveSteward();
-        assertTrue(c.stewardVacant());
+        c.executeRemoveHost();
+        assertTrue(c.hostVacant());
     }
 
     function _four() internal view returns (address[] memory m) {
@@ -44,8 +44,8 @@ contract ElectionFloorTest is MembershipFixture {
 
     function _elect(Community c, address candidate) internal returns (uint256 voteId) {
         vm.prank(candidate);
-        c.electSteward(candidate);
-        voteId = c.activeStewardVoteId();
+        c.electHost(candidate);
+        voteId = c.activeHostVoteId();
     }
 
     /// What the tally view says a vote needs: the bars `_passed` applies.
@@ -54,12 +54,12 @@ contract ElectionFloorTest is MembershipFixture {
         return t.yes >= t.minYes && uint256(t.yes) * 10_000 >= uint256(t.thresholdBps) * t.denominator;
     }
 
-    /// Executes the vote in the steward slot after its window, and checks the outcome is exactly
+    /// Executes the vote in the host slot after its window, and checks the outcome is exactly
     /// what the tally view predicted.
     function _execute(Community c, uint256 voteId) internal returns (bool passed) {
         _pastWindow();
         bool predicted = _tallyPasses(c, voteId);
-        try c.executeRemoveSteward() {
+        try c.executeRemoveHost() {
             passed = true;
         } catch (bytes memory reason) {
             assertEq(bytes4(reason), ICommunity.NotPassed.selector, "only the tally refuses");
@@ -83,7 +83,7 @@ contract ElectionFloorTest is MembershipFixture {
         _vote(c, voteId, ada, true);
         _vote(c, voteId, host, true);
         assertTrue(_execute(c, voteId), "two yes votes elect");
-        assertEq(c.steward(), ada);
+        assertEq(c.host(), ada);
     }
 
     function test_proof11_aLoneSeasonedVoterElectsThemselves() public {
@@ -98,7 +98,7 @@ contract ElectionFloorTest is MembershipFixture {
         assertEq(t.minYes, 1);
         _vote(c, voteId, ada, true);
         assertTrue(_execute(c, voteId));
-        assertEq(c.steward(), ada);
+        assertEq(c.host(), ada);
     }
 
     /// With no seasoned voter the floor is still 1, so no vote with the small-community floor can
@@ -130,17 +130,17 @@ contract ElectionFloorTest is MembershipFixture {
         _season();
         _join(c, dee); // joins as the host vote opens, so is unseasoned at the election
         vm.prank(ada);
-        c.proposeRemoveSteward();
-        uint256 voteId = c.activeStewardVoteId();
+        c.proposeRemoveHost();
+        uint256 voteId = c.activeHostVoteId();
         _vote(c, voteId, ada, true);
         _vote(c, voteId, bem, true);
         _vote(c, voteId, cy, true);
         _pastWindow();
-        c.executeRemoveSteward();
+        c.executeRemoveHost();
 
         vm.prank(ada);
         vm.expectRevert(ICommunity.CandidateIneligible.selector);
-        c.electSteward(dee);
+        c.electHost(dee);
     }
 
     /// Four voters: the floor is 3, not 4 and not 2.
@@ -199,8 +199,8 @@ contract ElectionFloorTest is MembershipFixture {
         p.proposeSeatPrice(60e6);
         uint256 priceVote = p.activePriceVoteId();
         vm.prank(ada);
-        h.proposeRemoveSteward();
-        uint256 hostVote = h.activeStewardVoteId();
+        h.proposeRemoveHost();
+        uint256 hostVote = h.activeHostVoteId();
         vm.prank(host);
         r.proposeRemoval(bem);
         uint256 removalVote = r.activeRemovalVoteId(bem);
@@ -220,7 +220,7 @@ contract ElectionFloorTest is MembershipFixture {
         vm.expectRevert(ICommunity.NotPassed.selector);
         p.executeSeatPriceVote();
         vm.expectRevert(ICommunity.NotPassed.selector);
-        h.executeRemoveSteward();
+        h.executeRemoveHost();
         vm.expectRevert(ICommunity.NotPassed.selector);
         r.executeRemoval(bem);
         assertFalse(_tallyPasses(p, priceVote));

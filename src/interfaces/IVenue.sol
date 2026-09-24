@@ -29,8 +29,12 @@ interface IVenue is IERC4626 {
     function setLabels(Labels calldata l) external;
     function labels() external view returns (Labels memory);
 
-    // strategies (owner)
-    function addStrategy(address strategy, uint64 delaySeconds) external;
+    // strategies. Adding one is a path to member money, so it belongs to the strategy lister, a role
+    // apart from the owner and held by the slower timelock. The rest stay with the owner.
+    function strategyLister() external view returns (address);
+    /// Lister only. The owner can neither take the role nor give it away.
+    function setStrategyLister(address next) external;
+    function addStrategy(address strategy, uint64 delaySeconds) external; // lister only
     function removeStrategy(address strategy) external;
     function setWeights(address[] calldata strategies_, uint16[] calldata bps) external;
     /// The most `strategy` may hold, in assets. Zero until the owner sets it, so nothing is
@@ -76,6 +80,7 @@ interface IVenue is IERC4626 {
     function fundReserve(uint256 assets) external; // anyone; mints to the reserve
 
     event LabelsSet(Labels labels);
+    event StrategyListerSet(address indexed previous, address indexed next);
     event StrategyAdded(address strategy, uint64 delaySeconds, bool instant);
     event StrategyRemoved(address strategy);
     event CapSet(address indexed strategy, uint256 cap);
@@ -111,4 +116,6 @@ interface IVenue is IERC4626 {
     error StrategyCapExceeded();
     /// A strategy removed while it still holds value the Venue could not withdraw.
     error StrategyNotEmpty();
+    error NotStrategyLister();
+    error ZeroAddress();
 }

@@ -23,6 +23,7 @@ contract Config is Ownable2Step {
     error SplitMismatch();
     error ZeroAddress();
     error UnknownAddressKey();
+    error CreditCoreAlreadySet();
     error TimelineOutOfOrder();
     error ZeroAgreementHash();
 
@@ -57,7 +58,7 @@ contract Config is Ownable2Step {
         // question, whether a stake is old enough to be real.
         _init(K.QUALIFYING_CONTRIBUTOR_MIN_DEPOSIT, 10e6);
         _init(K.QUALIFYING_CONTRIBUTOR_SEASONING, 14 days);
-        // After a failed removal vote the steward waits
+        // After a failed removal vote the host waits
         // this long to propose removing the same member again, so a member is frozen at most one
         // week in a month.
         _init(K.REMOVAL_REPROPOSE_COOLDOWN, 30 days);
@@ -177,10 +178,14 @@ contract Config is Ownable2Step {
     }
 
     function setAddress(bytes32 key, address value) external onlyOwner {
-        if (key != K.PROTOCOL_TREASURY && key != K.COMPLIANCE_REGISTRY && key != K.CREDIT_CORE) {
+        if (key != K.PROTOCOL_TREASURY && key != K.COMPLIANCE_REGISTRY && key != K.CREDIT_CORE && key != K.PAUSE_GUARD)
+        {
             revert UnknownAddressKey();
         }
         if (value == address(0)) revert ZeroAddress();
+        // Every community's seat leg and yield leg are paid to CREDIT_CORE. Set once, so no owner
+        // key can ever redirect them.
+        if (key == K.CREDIT_CORE && values[key] != 0) revert CreditCoreAlreadySet();
         _write(key, uint160(value));
     }
 
@@ -215,7 +220,7 @@ contract Config is Ownable2Step {
         if (key == K.COMMUNITY_VOTE_THRESHOLD_BPS) return (5001, 10_000);
         if (key == K.COMMUNITY_VOTE_WINDOW) return (1 days, 30 days);
         // Both ends are set: at least 7 days so a timelocked change cannot make
-        // it zero and let a steward re-freeze a member the moment a vote fails, at most 180.
+        // it zero and let a host re-freeze a member the moment a vote fails, at most 180.
         if (key == K.REMOVAL_REPROPOSE_COOLDOWN) return (7 days, 180 days);
         // At least a day, so a nominee has time to see the nomination; at most the 30 days
         // every other window in this contract gets.
@@ -474,6 +479,10 @@ contract Config is Ownable2Step {
 
     function creditCore() external view returns (address) {
         return address(uint160(values[K.CREDIT_CORE]));
+    }
+
+    function pauseGuard() external view returns (address) {
+        return address(uint160(values[K.PAUSE_GUARD]));
     }
 
     function poolLiquidFloorBps() external view returns (uint16) {

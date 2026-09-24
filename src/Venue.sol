@@ -8,6 +8,7 @@ import {Ownable2Step, Ownable} from "openzeppelin-contracts/contracts/access/Own
 import {IVenue} from "./interfaces/IVenue.sol";
 import {IStrategy} from "./interfaces/IStrategy.sol";
 import {IConfig} from "./interfaces/IConfig.sol";
+import {IPauseGuard} from "./interfaces/IPauseGuard.sol";
 import {ICommunityFactory} from "./interfaces/ICommunityFactory.sol";
 import {VenueStrategies} from "./VenueStrategies.sol";
 
@@ -63,6 +64,10 @@ contract Venue is IVenue, ERC4626, Ownable2Step {
     /// Set only for the duration of `_move`. Outside it, `_update` rejects every transfer.
     bool private _moving;
 
+    /// Adds strategies. It starts as the owner so a deployment can list the first ones, and is then
+    /// handed to the slower timelock, which alone names its successor.
+    address public override strategyLister;
+
     constructor(
         IERC20 usdc_,
         IConfig config_,
@@ -74,6 +79,8 @@ contract Venue is IVenue, ERC4626, Ownable2Step {
         config = config_;
         factory = factory_;
         _lastAccrual = uint64(block.timestamp);
+        strategyLister = owner_;
+        emit StrategyListerSet(address(0), owner_);
     }
 
     modifier onlyLedger() {
@@ -260,7 +267,15 @@ contract Venue is IVenue, ERC4626, Ownable2Step {
 
     // ---- strategies ----
 
-    function addStrategy(address strategy, uint64 delaySeconds) external override onlyOwner {
+    function setStrategyLister(address next) external override {
+        if (msg.sender != strategyLister) revert NotStrategyLister();
+        if (next == address(0)) revert ZeroAddress();
+        emit StrategyListerSet(strategyLister, next);
+        strategyLister = next;
+    }
+
+    function addStrategy(address strategy, uint64 delaySeconds) external override {
+        if (msg.sender != strategyLister) revert NotStrategyLister();
         bool instant = VenueStrategies.addStrategy(
             _strategies, isStrategy, isInstant, delayOf, strategy, delaySeconds, asset(), config.maxNoticePeriod()
         );
@@ -333,8 +348,10 @@ contract Venue is IVenue, ERC4626, Ownable2Step {
     }
 
     /// The one place money goes into a strategy. A strategy may never hold more than its cap, so an
-    /// allocation past it reverts the whole call rather than landing part-way.
+    /// allocation past it reverts the whole call rather than landing part-way. The pause stops it
+    /// here and only here: a rebalance that only brings money back from a strategy still runs.
     function _allocate(IStrategy s, uint256 amount) internal {
+        if (IPauseGuard(config.pauseGuard()).paused(IPauseGuard.Flag.VENUES)) revert IPauseGuard.Paused();
         if (s.totalAssets() + amount > capOf[address(s)]) revert StrategyCapExceeded();
         s.deposit(amount);
     }

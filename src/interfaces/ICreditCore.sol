@@ -123,8 +123,14 @@ interface ICreditCore {
     function closeCommunity(uint256 communityId) external;
     /// Anyone, once the community has been fully faded for the return period and nothing is out.
     function sweepDormant(uint256 communityId) external;
-    function addStrategy(address strategy) external;
-    function removeStrategy(address strategy) external;
+    /// Adds pool strategies. The pool holds community balances, so listing somewhere new it may
+    /// invest is a path to member money: the role is apart from the owner and held by the slower
+    /// timelock. It starts as the owner.
+    function strategyLister() external view returns (address);
+    /// Lister only. The owner can neither take the role nor give it away.
+    function setStrategyLister(address next) external;
+    function addStrategy(address strategy) external; // lister only
+    function removeStrategy(address strategy) external; // owner only
     function depositToStrategy(address strategy, uint256 amount) external;
     function withdrawFromStrategy(address strategy, uint256 amount) external;
     /// Owner only. Takes Qudi's unallocated money out.
@@ -157,6 +163,7 @@ interface ICreditCore {
     );
     event CommunityClosed(uint256 indexed communityId, uint256 returnedToTreasury);
     event DormantSwept(uint256 indexed communityId, uint256 returnedToTreasury);
+    event StrategyListerSet(address indexed previous, address indexed next);
     event StrategyAdded(address indexed strategy);
     event StrategyRemoved(address indexed strategy);
     event StrategyDeposit(address indexed strategy, uint256 amount);
@@ -216,6 +223,7 @@ interface ICreditCore {
     /// The balance is there but the cash is out in a pool strategy. Credit is briefly unavailable.
     error PoolIlliquid();
     error DuplicateStrategy();
+    error NotStrategyLister();
     error UnknownStrategy();
     error StrategyAssetMismatch();
     error StrategyHoldsBalance();

@@ -9,6 +9,7 @@ import {ILedger} from "../../src/interfaces/ILedger.sol";
 import {ICommunityInit} from "../../src/interfaces/ICommunityInit.sol";
 import {Venue} from "../../src/Venue.sol";
 import {Config} from "../../src/Config.sol";
+import {PauseGuard} from "../../src/PauseGuard.sol";
 import {IConfig} from "../../src/interfaces/IConfig.sol";
 import {ComplianceRegistry} from "../../src/ComplianceRegistry.sol";
 import {ConfigKeys as K} from "../../src/ConfigKeys.sol";
@@ -61,7 +62,7 @@ contract LedgerCommunityStub {
     mapping(address => bool) public isMember;
     mapping(address => bool) public isSeasoned;
     mapping(address => bool) public isFrozen;
-    address public steward;
+    address public host;
 
     function setMember(address a, bool v) external {
         isMember[a] = v;
@@ -76,8 +77,8 @@ contract LedgerCommunityStub {
         isMember[a] = false;
     }
 
-    function setSteward(address a) external {
-        steward = a;
+    function setHost(address a) external {
+        host = a;
     }
 }
 
@@ -171,6 +172,10 @@ abstract contract LedgerFixture is Test {
         creditCore = new LedgerCreditCoreStub(IERC20(address(usdc)));
         vm.prank(owner);
         config.setAddress(K.CREDIT_CORE, address(creditCore));
+        // Every flag off: the money paths ask the guard before money moves in.
+        PauseGuard pauseGuard = new PauseGuard(address(this), address(this));
+        vm.prank(owner);
+        config.setAddress(K.PAUSE_GUARD, address(pauseGuard));
 
         ledger = Ledger(Clones.clone(address(new Ledger())));
         ledger.initialize(
@@ -188,7 +193,7 @@ abstract contract LedgerFixture is Test {
         );
         factory.register(address(ledger));
 
-        community.setSteward(host);
+        community.setHost(host);
         address[8] memory people = [host, ada, bea, cid, dan, eve, fay, payee];
         for (uint256 i = 0; i < 7; i++) {
             community.setMember(people[i], true);

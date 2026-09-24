@@ -3,6 +3,8 @@ pragma solidity 0.8.30;
 
 import {Script, console} from "forge-std/Script.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import {Ownable2Step} from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
+import {TimelockController} from "openzeppelin-contracts/contracts/governance/TimelockController.sol";
 import {Config} from "../src/Config.sol";
 import {IConfig} from "../src/interfaces/IConfig.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
@@ -19,386 +21,581 @@ import {CreditStanding} from "../src/CreditStanding.sol";
 import {ICreditStanding} from "../src/interfaces/ICreditStanding.sol";
 import {CloneImpactSource} from "../src/CloneImpactSource.sol";
 import {ICommunityFactory} from "../src/interfaces/ICommunityFactory.sol";
+import {PauseGuard} from "../src/PauseGuard.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
+import {CaliburPin} from "./CaliburPin.sol";
+import {VenueLabels} from "./VenueLabels.sol";
 
-/// Minimal interface onto `test/mocks/MockUSDC.sol`'s open `mint`, declared locally rather than
-/// imported so this production deploy path never depends on test scaffolding (see the
-/// USDC_ADDRESS environment note below). Only ever called against the address anvil's own
-/// `_ANVIL_CHAIN_ID` branch has already gated to a chain the operator was told to put a
-/// `MockUSDC` at.
+/// `test/mocks/MockUSDC.sol`'s open `mint`, declared here so this deploy path never imports test
+/// code. Called only on anvil, where the USDC is that mock.
 interface IMintableTestUsdc {
     function mint(address to, uint256 amount) external;
 }
 
-/// Deployment entry point. Order, dictated by what the constructors actually require:
+/// Deploys Qudi on anvil, Arc testnet or Arc mainnet, hands every owned contract to two timelocks
+/// controlled by one owner key, and writes `deployments/<chainId>.json`, the file the app and the
+/// indexer read addresses from.
 ///
-///   compliance registry -> config -> implementations -> factory -> venues + strategies -> venue wiring
-///   -> config wiring assertions -> smoke community -> ownership handover
-///
-/// Two orderings worth naming, both forced rather than chosen:
-///   - the compliance registry is deployed BEFORE config, because
-///     `Config(usdc, treasury, complianceRegistry)` takes its address and rejects zero;
-///   - every other call happens AFTER the factory is created, never between the nonce read and the
-///     factory, because each broadcast call advances the deployer's nonce and would move the
-///     factory's predicted address.
-/// `CreditStanding` and `CreditCore` are deployed here, and
-/// `Config.CREDIT_CORE` is set to the latter. Both come AFTER the factory, because each takes
-/// it as an immutable constructor argument, and BEFORE the smoke community, because a paid seat mint
-/// routes its pool leg to `CreditCore` and reverts `CreditCoreUnset` while the key is zero.
-/// Neither is created before the factory, so `_FACTORY_NONCE_OFFSET` is unaffected.
+/// What it deploys: `ComplianceRegistry`, `Config`, `Seats`, the `Community` and `Ledger`
+/// implementations, `CommunityFactory`, three `Venue`s (Flex, Core and Term) each over one
+/// `ManualStrategy`, `CreditStanding` with the seat and ledger impact sources, `CreditCore`,
+/// `PauseGuard`, and two `TimelockController`s.
 ///
 /// **`ManualStrategy` reaches Arc mainnet for the beta, deliberately.** Its yield is paid in by
 /// Qudi's operator ahead of time and released at a set rate, so this is a deployment whose yield
-/// is what Qudi funds. It is not a third-party venue and must not be described as one. A partner
-/// strategy plugs in beside it later through the same interface.
+/// Qudi funds. It is not a third-party venue and must not be described as one.
 ///
-/// Three `Venue` instances, each over one `ManualStrategy`, listed in the factory's venue registry
-/// in order: Flex (id 0), Core (id 1), Term (id 2). A `Venue` takes the factory's address as an
-/// immutable, but the factory no longer takes the venues, so the venues are created after it. The
-/// one circular constructor dependency left is between `Seats` and the factory, resolved by
-/// precomputing the factory's CREATE address from the deployer's nonce. `_FACTORY_NONCE_OFFSET`
-/// below is the number of contract creations this script performs between reading the nonce and
-/// creating the factory; the factory's landing address is asserted against the precomputed one, so
-/// a miscount fails the deployment loudly.
+/// Order, and why:
+///   1. `ComplianceRegistry`, before `Config`, whose constructor takes it and refuses zero.
+///   2. `Config`.
+///   3. `Seats`, built with the factory's address precomputed from the deployer's nonce. `Seats`
+///      trusts one factory for good, so it must name the final one; the factory's landing address
+///      is asserted against the prediction, and a miscount fails the deploy.
+///   4. The `Community` and `Ledger` implementations.
+///   5. `CommunityFactory`. Nothing else is sent between reading the nonce and this creation,
+///      because every transaction moves the nonce.
+///   6. The venues and their strategies, labelled. A `Venue` takes the factory as an immutable.
+///   7. The venue registry: Flex (0), Core (1), Term (2), each id asserted.
+///   8. `CreditStanding` and its two impact sources.
+///   9. `CreditCore`, before any seat is sold, because a paid seat routes its pool leg there.
+///  10. `PauseGuard`, then every `Config` key: `CREDIT_CORE`, `PAUSE_GUARD` and the agreement hash.
+///  11. The roles, each asserted.
+///  12. The timelocks and the handover, each owner asserted.
+///  13. The smoke community, unless skipped.
 ///
-/// Environment contract:
-///   USDC_ADDRESS   the ERC-20 USDC for the target chain. Required on every chain, local
-///                  included: this script never deploys a token. Arc testnet:
-///                  0x3600000000000000000000000000000000000000. Local anvil: deploy
-///                  `test/mocks/MockUSDC.sol:MockUSDC` first with `forge create` and pass its
-///                  address here (keeping test-only code out of the production deploy path).
-///   TREASURY       optional; the protocol treasury. Defaults to the deployer.
-///   CONFIG_OWNER   optional; the address config, the registry, the factory, the three venues and
-///                  the three strategies are handed to at the end. Defaults to the deployer (the
-///                  testnet posture: the config owner is a single EOA). On mainnet this is the
-///                  TimelockController.
-///   CREDIT_AGREEMENT_HASH  required; the hash of the Credit Agreement a member's first draw
-///                  must carry.
-///   STRATEGY_OPERATOR  optional; each `ManualStrategy`'s operator, who funds yield, sets the rate,
-///                  deploys to listed destinations, returns money and reports losses. Defaults to
-///                  the deployer. Not behind the timelock: those are routine steps, and the
-///                  timelock already decides where money may go.
-///   SKIP_SMOKE_COMMUNITY  optional, "true" to skip the end-of-script smoke community. The smoke community is
-///                  a permanent artifact with the deployer as its founding steward and no removal
-///                  path, so a deployment whose community directory is not throwaway should skip it
-///                  and verify the wiring by other means. The smoke community opens one
-///                  personal vault in each of the three venues and deposits
-///                  `_SMOKE_AMOUNT` (50 USDC) of the deployer's own USDC into each: on anvil every
-///                  mint is free via `MockUSDC.mint`; on every other chain the deployer must
-///                  already hold that much real USDC per vault. The deposits stay as standing
-///                  balances, and the Term one is locked for a day. Separately,
-///                  `_SMOKE_AMOUNT` of USDC (regardless of `SKIP_SMOKE_COMMUNITY`) so it
-///                  can pay real redemptions.
+/// The handover. Every owned contract is `Ownable2Step`, so a transfer only nominates and the
+/// timelock must accept. Each timelock is created with no delay and the deployer as a temporary
+/// proposer, executor and admin. In one batch it accepts every ownership it was offered and then
+/// sets its own delay. The deployer then gives the owner key the proposer, executor and canceller
+/// roles and renounces all of its own, so each timelock is administered only by itself. This all
+/// happens inside the deploy, before anything holds money.
 ///
-/// Run: forge script script/Deploy.s.sol --rpc-url <url> --broadcast
+/// The two timelocks. The 24-hour one owns `Config`, `CommunityFactory`, each `Venue`,
+/// `CreditCore`, `CreditStanding`, `ComplianceRegistry` and `PauseGuard`. The 7-day one owns each
+/// `ManualStrategy` (its destinations and its operator) and holds the strategy-lister role of each
+/// Venue and of `CreditCore`, so every path that could send member money somewhere new waits a
+/// public week. `Config.CREDIT_CORE`, where every community's seat and yield legs are paid, is set
+/// here once and can never be set again.
+///
+/// Environment:
+///   USDC_ADDRESS           the chain's USDC. On anvil, a `test/mocks/MockUSDC.sol` deployed first.
+///   OWNER                  the single key behind both timelocks.
+///   PAUSER                 `PauseGuard`'s pauser.
+///   OPERATOR               every `ManualStrategy`'s operator, and `CreditCore`'s operator and
+///                          allocation role.
+///   SCREENER               `ComplianceRegistry`'s screener.
+///   TREASURY               the protocol treasury in `Config`.
+///   TIMELOCK_DELAY         seconds; at least 24 hours on Arc mainnet.
+///   TIMELOCK_DELAY_LONG    seconds; at least 7 days on Arc mainnet.
+///   CREDIT_AGREEMENT_HASH  the Credit Agreement a member's first draw must carry.
+///   GIT_COMMIT             recorded as given, not checked.
+///   SKIP_SMOKE             "true" to skip the smoke community. It is permanent, with the deployer
+///                          as its host. Arc testnet runs it; Arc mainnet refuses to.
+///
+/// Calibur must already be at its canonical address (`script/DeployCalibur.s.sol`); the record
+/// names it only if its code is the pinned build, and `CheckDeployment` fails otherwise.
+///
+/// Run, then fix the record's block to the first transaction's:
+///   forge script script/Deploy.s.sol --rpc-url <url> --account <keystore> --broadcast --slow
+///   forge script script/Deploy.s.sol --rpc-url <url> --sig "recordDeployBlock()"
 contract Deploy is Script {
-    /// registry, config, the community impl, the ledger impl, `Seats`: 5 creations before the
-    /// factory. Changing what this script deploys before the factory means changing this number in
-    /// the same commit; the assertion after the factory is created is what stops a miscount from
-    /// shipping silently.
+    struct Params {
+        address usdc;
+        address owner;
+        address pauser;
+        address operator;
+        address screener;
+        address treasury;
+        uint256 delay;
+        uint256 delayLong;
+        bytes32 agreementHash;
+        string gitCommit;
+        bool skipSmoke;
+    }
+
+    error UnsupportedChain();
+    error DelayBelowFloor(uint256 delay, uint256 floor);
+    error RolesNotDistinct();
+    error ZeroAddress();
+    error OwnerIsDeployer();
+    error NoSmokeOnMainnet();
+
+    uint256 internal constant _ANVIL = 31337;
+    uint256 internal constant _ARC_TESTNET = 5042002;
+    uint256 internal constant _ARC_MAINNET = 5042;
+
+    /// Arc mainnet's floors. Anvil and Arc testnet may use less, for testing.
+    uint256 internal constant _MAINNET_DELAY_FLOOR = 24 hours;
+    uint256 internal constant _MAINNET_DELAY_LONG_FLOOR = 7 days;
+
+    /// Contract creations between reading the deployer's nonce and creating the factory:
+    /// `ComplianceRegistry`, `Config`, `Seats` and the two implementations.
     uint256 internal constant _FACTORY_NONCE_OFFSET = 5;
 
-    /// What each smoke vault takes. It was the seat price floor, which is now 0.
-    uint256 internal constant _SMOKE_AMOUNT = 50e6;
-
-    /// Chains the testnet stand-ins may be deployed on: anvil and Arc testnet. `ManualStrategy` is
-    /// the one that still carries the guard (`_deployManualStrategy`). The credit-pool stub carried
-    /// one too until it was deleted, and that guard was the only thing refusing Arc mainnet.
-    uint256 internal constant _ANVIL_CHAIN_ID = 31337;
-    uint256 internal constant _ARC_TESTNET_CHAIN_ID = 5042002;
-    uint256 internal constant _ARC_MAINNET_CHAIN_ID = 5042;
-
-    /// Venue ids in the factory's registry, in the order this script lists them.
-    uint8 internal constant _FLEX = 0;
-    uint8 internal constant _CORE = 1;
-    uint8 internal constant _TERM = 2;
-    uint8 internal constant _VENUES = 3;
-
-    /// Each venue's one `ManualStrategy` is listed with no exit delay, because its principal cash
-    /// can be withdrawn at once, and holds this share of the venue; the rest stays idle as the
-    /// venue's cash buffer. Inside the launch group limits.
+    /// Each venue's one `ManualStrategy` holds this share of the venue; the rest stays idle as the
+    /// venue's cash buffer.
     uint16 internal constant _STRATEGY_WEIGHT_BPS = 7500;
 
-    // Deployment results live in script storage rather than in `run()`'s frame: the full order is
-    // one linear sequence and reads best as one, but the many live locals four-times-over
-    // overflow the stack under the legacy codegen this repo builds with (no `via_ir`).
-    /// Dev key (the deployer) holds the screener role on testnet; on mainnet
-    /// ownership hands to the Risk Committee timelock alongside config.
-    ComplianceRegistry internal registry;
-    Config internal config;
-    /// Indexed by venue id, Flex through Term.
-    Venue[3] internal vaults;
-    ManualStrategy[3] internal strategies;
-    Community internal communityImpl;
-    Seats internal seats;
-    Ledger internal ledgerImpl;
-    CommunityFactory internal factory;
-    CreditStanding internal standing;
-    CreditCore internal creditCore;
-    CloneImpactSource internal seatSource;
-    CloneImpactSource internal yieldSource;
+    /// What each smoke vault takes.
+    uint256 internal constant _SMOKE_AMOUNT = 50e6;
+
+    bytes32 internal constant _HANDOVER_SALT = keccak256("qudi deploy handover");
+
+    // Results live in storage: the deploy reads best as one sequence, and that many locals overflow
+    // the stack under the legacy code generator this repository builds with.
+    address public deployer;
+    uint256 public deployBlock;
+    uint256 public deployTimestamp;
+    ComplianceRegistry public registry;
+    Config public config;
+    Seats public seats;
+    Community public communityImpl;
+    Ledger public ledgerImpl;
+    CommunityFactory public factory;
+    Venue[3] public venues;
+    ManualStrategy[3] public strategies;
+    CreditStanding public standing;
+    CreditCore public creditCore;
+    CloneImpactSource public seatSource;
+    CloneImpactSource public ledgerSource;
+    PauseGuard public guard;
+    TimelockController public timelock;
+    TimelockController public timelockLong;
+    address public calibur;
 
     function run() external {
-        address usdc = vm.envAddress("USDC_ADDRESS");
-        address deployer = msg.sender;
-        address treasury = vm.envOr("TREASURY", deployer);
-        address configOwner = vm.envOr("CONFIG_OWNER", deployer);
+        deploy(
+            Params({
+                usdc: vm.envAddress("USDC_ADDRESS"),
+                owner: vm.envAddress("OWNER"),
+                pauser: vm.envAddress("PAUSER"),
+                operator: vm.envAddress("OPERATOR"),
+                screener: vm.envAddress("SCREENER"),
+                treasury: vm.envAddress("TREASURY"),
+                delay: vm.envUint("TIMELOCK_DELAY"),
+                delayLong: vm.envUint("TIMELOCK_DELAY_LONG"),
+                agreementHash: vm.envBytes32("CREDIT_AGREEMENT_HASH"),
+                gitCommit: vm.envOr("GIT_COMMIT", string("")),
+                skipSmoke: vm.envOr("SKIP_SMOKE", false)
+            })
+        );
+    }
 
+    /// Refuses a chain Qudi does not run on, a mainnet delay under its floor, a zero role, an owner
+    /// that is the deployer, and on a public chain any two of owner, pauser and operator that are
+    /// the same key. Anvil accepts shared keys, for local testing.
+    function checkParams(Params memory p, address deployer_) public view {
+        if (block.chainid != _ANVIL && block.chainid != _ARC_TESTNET && block.chainid != _ARC_MAINNET) {
+            revert UnsupportedChain();
+        }
+        if (block.chainid == _ARC_MAINNET) {
+            // The smoke community is permanent, with the deployer as its host.
+            if (!p.skipSmoke) revert NoSmokeOnMainnet();
+            if (p.delay < _MAINNET_DELAY_FLOOR) revert DelayBelowFloor(p.delay, _MAINNET_DELAY_FLOOR);
+            if (p.delayLong < _MAINNET_DELAY_LONG_FLOOR) {
+                revert DelayBelowFloor(p.delayLong, _MAINNET_DELAY_LONG_FLOOR);
+            }
+        }
+        if (
+            p.usdc == address(0) || p.owner == address(0) || p.pauser == address(0) || p.operator == address(0)
+                || p.screener == address(0) || p.treasury == address(0)
+        ) revert ZeroAddress();
+        // The deployer is retired after the deploy and renounces every timelock role, so it can
+        // never be the key those roles go to.
+        if (p.owner == deployer_) revert OwnerIsDeployer();
+        if (block.chainid != _ANVIL) {
+            if (p.owner == p.pauser || p.owner == p.operator || p.pauser == p.operator) revert RolesNotDistinct();
+        }
+    }
+
+    function deploy(Params memory p) public {
+        vm.startBroadcast();
+        (, deployer,) = vm.readCallers();
+        checkParams(p, deployer);
+        deployBlock = block.number;
+        deployTimestamp = block.timestamp;
         console.log("chain id:", block.chainid);
         console.log("deployer:", deployer);
-        console.log("USDC:    ", usdc);
-        console.log("treasury:", treasury);
 
         address predictedFactory = vm.computeCreateAddress(deployer, vm.getNonce(deployer) + _FACTORY_NONCE_OFFSET);
-        console.log("factory (precomputed):", predictedFactory);
 
-        vm.startBroadcast();
-
-        registry = new ComplianceRegistry(deployer);
-        config = new Config(usdc, treasury, address(registry));
-
-        // Creations only until the factory exists: see `_FACTORY_NONCE_OFFSET`.
+        // 1 to 5. Creations only, until the factory exists: see `_FACTORY_NONCE_OFFSET`.
+        registry = new ComplianceRegistry(p.screener);
+        config = new Config(p.usdc, p.treasury, address(registry));
+        seats = new Seats(predictedFactory, IConfig(address(config)));
         communityImpl = new Community();
         ledgerImpl = new Ledger();
-        // `Seats` trusts one factory, fixed here, and the factory refuses a `Seats` that names
-        // any other.
-        seats = new Seats(predictedFactory, IConfig(address(config)));
-
         factory = new CommunityFactory(
             address(config), address(seats), address(communityImpl), address(ledgerImpl), deployer
         );
-        // Loud, not silent: `Seats` trusts one factory, fixed at its construction, so a nonce
-        // miscount here would ship a `Seats` that refuses every community.
         require(address(factory) == predictedFactory, "factory address mismatch");
+        require(seats.factory() == address(factory), "Seats trusts another factory");
 
-        _deployVenues(usdc, deployer, vm.envOr("STRATEGY_OPERATOR", deployer));
+        // 6 and 7. The venues, their strategies and labels, and the registry.
+        for (uint8 i; i < VenueLabels.COUNT; i++) {
+            string memory s = VenueLabels.suffix(i);
+            venues[i] = new Venue(
+                IERC20(p.usdc),
+                IConfig(address(config)),
+                address(factory),
+                deployer,
+                string.concat("Qudi ", s),
+                string.concat("q", vm.toUppercase(s))
+            );
+            strategies[i] =
+                new ManualStrategy(IERC20(p.usdc), IConfig(address(config)), address(venues[i]), deployer, p.operator);
+            _wireVenue(venues[i], strategies[i], i);
+            require(factory.addVenue(address(venues[i])) == i, "venue listed under the wrong id");
+        }
 
-        // ---- the credit singletons ----
-        // After the factory, because both take it as an immutable constructor argument, and
-        // before the smoke community, because a paid seat mint routes its pool leg to `CreditCore`
-        // and reverts `CreditCoreUnset` while the config key is zero. Neither is created before
-        // the factory, so `_FACTORY_NONCE_OFFSET` is unaffected.
+        // 8. The standing half and the two impact sources: the seat leg in each community's
+        // `Community`, and the yield leg in each community's `Ledger`.
         standing = new CreditStanding(IConfig(address(config)), address(factory), deployer);
+        seatSource = new CloneImpactSource(ICommunityFactory(address(factory)), false);
+        ledgerSource = new CloneImpactSource(ICommunityFactory(address(factory)), true);
+        standing.addImpactSource(address(seatSource));
+        standing.addImpactSource(address(ledgerSource));
+
+        // 9. The pool. Its operator and allocation role are both the operator key.
         creditCore = new CreditCore(
-            IERC20(usdc),
+            IERC20(p.usdc),
             IConfig(address(config)),
             address(factory),
             deployer,
-            vm.envOr("TREASURY_MANAGER", deployer),
-            vm.envOr("ALLOCATION_MULTISIG", deployer),
+            p.operator,
+            p.operator,
             ICreditStanding(address(standing))
         );
         standing.setCreditCore(address(creditCore));
-        // The two impact sources: the seat leg in each community's `Community` and the yield leg in
-        // each community's `Ledger`, both reached through the factory. No pool strategy is listed
-        // yet; the pool holds only community balances until one is.
-        seatSource = new CloneImpactSource(ICommunityFactory(address(factory)), false);
-        yieldSource = new CloneImpactSource(ICommunityFactory(address(factory)), true);
-        standing.addImpactSource(address(seatSource));
-        standing.addImpactSource(address(yieldSource));
+
+        // 10. The pause, then every `Config` key. Credit stays shut until the agreement hash is set,
+        // and every money path refuses money in until the guard is.
+        guard = new PauseGuard(deployer, p.pauser);
         config.setAddress(K.CREDIT_CORE, address(creditCore));
-        require(config.creditCore() == address(creditCore), "credit core not wired");
-        // The Credit Agreement members sign on their first draw. Credit stays shut until it is set.
-        config.setCreditAgreementHash(vm.envBytes32("CREDIT_AGREEMENT_HASH"));
+        config.setAddress(K.PAUSE_GUARD, address(guard));
+        config.setCreditAgreementHash(p.agreementHash);
 
-        // ---- labels, strategies, weights and the registry (the deployer owns all of them) ----
-        _wireVenues();
+        // 11. The roles.
+        _assertRoles(p);
 
-        // ---- wire addresses into config ----
-        // `Config` holds exactly two address parameters, PROTOCOL_TREASURY and
-        // COMPLIANCE_REGISTRY, both already set by the constructor above. There is no config slot for the vaults or the
-        // factory: ledgers reach their venue through `CommunityFactory`'s venue registry, and
-        // each vault reaches the registry through its own immutable `factory`. Nothing further to
-        // wire; re-asserted here so a future reader does not go looking for a missing step.
-        require(config.complianceRegistry() == address(registry), "compliance registry not wired");
-        require(config.protocolTreasury() == treasury, "treasury not wired");
+        // 12. The timelocks and the handover.
+        _handOver(p);
 
-        // ---- smoke community: proves clone init, factory registration, tier resolution
-        // path, and ledger/vault deposit/redeem wiring ----
-        // Optional, because it is permanent: the deployer becomes its founding steward, holds an
-        // unpaid founding seat, and there is no path to remove the community from the factory's
-        // directory afterwards. Fine on a throwaway chain, unwanted on one whose community list is
-        // shown to real users.
-        if (!vm.envOr("SKIP_SMOKE_COMMUNITY", false)) {
-            // The founding mint in `createCommunity` requires the creator to have
-            // self-attested. Done here rather than right after the registry is deployed
-            // because any broadcast call between the nonce read and the factory creation
-            // would move the factory's predicted address (see `_FACTORY_NONCE_OFFSET`).
-            registry.attest(1);
-            _createSmokeCommunity(deployer, usdc);
+        // 13. The smoke community: a real community, vault and deposit in each venue, proving the
+        // clones, the registry and the money paths end to end. After the handover, because it needs
+        // no owner and proves the handed-over deployment.
+        if (!p.skipSmoke) {
+            _smoke(p.usdc);
         } else {
-            console.log("smoke community: SKIPPED (SKIP_SMOKE_COMMUNITY=true)");
+            console.log("smoke community: skipped");
         }
-
-        // ---- ownership handover, last ----
-        // `Ownable2Step`: this only nominates. The recipient must call `acceptOwnership()` on
-        // each contract to take it, which is the point (a fat-fingered address cannot orphan the
-        // deployment). Skipped entirely when the deployer keeps ownership, which is the local and
-        // testnet default, since nominating yourself is a no-op that still costs transactions.
-        //
-        // One owner for all of it. The strategies' routine steps belong to their operator, not
-        // their owner, so nothing an operator runs every day sits behind the timelock.
-        if (configOwner != deployer) {
-            config.transferOwnership(configOwner);
-            // The registry owner is the Risk Committee: it rotates the screener key.
-            // The screener role itself stays on the dev key for now.
-            registry.transferOwnership(configOwner);
-            factory.transferOwnership(configOwner);
-            for (uint8 i; i < _VENUES; i++) {
-                vaults[i].transferOwnership(configOwner);
-                strategies[i].transferOwnership(configOwner);
-            }
-            console.log("ownership NOMINATED to (must acceptOwnership):", configOwner);
-        }
-
         vm.stopBroadcast();
 
-        console.log("registry:      ", address(registry));
-        console.log("config:        ", address(config));
-        for (uint8 i; i < _VENUES; i++) {
-            console.log(string.concat("venue[", _poolLabel(i), "]:"), address(vaults[i]));
-            console.log(string.concat("strategy[", _poolLabel(i), "]:"), address(strategies[i]));
+        if (CaliburPin.CANONICAL.codehash == CaliburPin.RUNTIME_CODE_HASH) {
+            calibur = CaliburPin.CANONICAL;
+        } else {
+            console.log("WARNING: no canonical Calibur on this chain; run script/DeployCalibur.s.sol");
         }
-        console.log("communityImpl: ", address(communityImpl));
-        console.log("seats:         ", address(seats));
-        console.log("ledgerImpl:    ", address(ledgerImpl));
-        console.log("factory:       ", address(factory));
-        console.log("creditStanding:", address(standing));
-        console.log("creditCore:    ", address(creditCore));
-        console.log("seatSource:    ", address(seatSource));
-        console.log("yieldSource:   ", address(yieldSource));
+        _writeRecord(p);
     }
 
-    /// The three venues and their strategies. The array index is the venue id the registry hands
-    /// out in `_wireVenues`, which asserts it.
-    function _deployVenues(address usdc, address deployer, address operator) internal {
-        string[3] memory names = ["Qudi Flex", "Qudi Core", "Qudi Term"];
-        string[3] memory symbols = ["qFLEX", "qCORE", "qTERM"];
-        for (uint8 i; i < _VENUES; i++) {
-            vaults[i] =
-                new Venue(IERC20(usdc), IConfig(address(config)), address(factory), deployer, names[i], symbols[i]);
-            strategies[i] = _deployManualStrategy(usdc, address(vaults[i]), deployer, operator);
-        }
+    function _wireVenue(Venue v, ManualStrategy s, uint8 id) internal {
+        v.setLabels(VenueLabels.labels(id));
+        // No exit delay: the strategy's principal cash can be withdrawn at once.
+        v.addStrategy(address(s), 0);
+        v.setCap(address(s), config.globalDepositCap());
+        address[] memory list = new address[](1);
+        uint16[] memory bps = new uint16[](1);
+        list[0] = address(s);
+        bps[0] = _STRATEGY_WEIGHT_BPS;
+        v.setWeights(list, bps);
     }
 
-    /// The labels each venue is shown with. `maxRateBps` sits a little above the gross the
-    /// strategy earns, so the cap binds only on a jump.
-    function _labels(uint8 id) internal pure returns (IVenue.Labels memory) {
-        if (id == _FLEX) {
-            return IVenue.Labels({
-                name: "Flex", kind: IVenue.Kind.Open, riskKey: 1, estReturnBps: 200, exitSeconds: 0, maxRateBps: 300
-            });
+    function _assertRoles(Params memory p) internal view {
+        require(guard.pauser() == p.pauser, "pauser not set");
+        for (uint8 i; i < VenueLabels.COUNT; i++) {
+            require(strategies[i].operator() == p.operator, "strategy operator not set");
         }
-        if (id == _CORE) {
-            return IVenue.Labels({
-                name: "Core",
-                kind: IVenue.Kind.Open,
-                riskKey: 3,
-                estReturnBps: 350,
-                exitSeconds: 1 days,
-                maxRateBps: 520
-            });
-        }
-        return IVenue.Labels({
-            name: "Term", kind: IVenue.Kind.Locked, riskKey: 3, estReturnBps: 450, exitSeconds: 0, maxRateBps: 660
-        });
+        require(creditCore.operator() == p.operator, "pool operator not set");
+        require(creditCore.allocationMultisig() == p.operator, "allocation role not set");
+        require(registry.screener() == p.screener, "screener not set");
+        require(config.protocolTreasury() == p.treasury, "treasury not set");
+        require(config.complianceRegistry() == address(registry), "compliance registry not wired");
+        require(config.creditCore() == address(creditCore), "credit core not wired");
+        require(config.pauseGuard() == address(guard), "pause guard not wired");
+        require(config.creditAgreementHash() == p.agreementHash, "agreement hash not set");
     }
 
-    /// Labels each venue, lists its strategy with a cap of the global deposit cap (one strategy may
-    /// hold everything the venue can take), sets its weight, and lists the venue in the registry,
-    /// asserting the id it gets is its index.
-    function _wireVenues() internal {
-        for (uint8 i; i < _VENUES; i++) {
-            vaults[i].setLabels(_labels(i));
-            vaults[i].addStrategy(address(strategies[i]), 0);
-            vaults[i].setCap(address(strategies[i]), config.globalDepositCap());
-            address[] memory list = new address[](1);
-            uint16[] memory bps = new uint16[](1);
-            list[0] = address(strategies[i]);
-            bps[0] = _STRATEGY_WEIGHT_BPS;
-            vaults[i].setWeights(list, bps);
-            require(factory.addVenue(address(vaults[i])) == i, "venue listed under the wrong id");
+    function _handOver(Params memory p) internal {
+        address[] memory temp = new address[](1);
+        temp[0] = deployer;
+        timelock = new TimelockController(0, temp, temp, deployer);
+        timelockLong = new TimelockController(0, temp, temp, deployer);
+
+        address[] memory day = new address[](9);
+        day[0] = address(config);
+        day[1] = address(factory);
+        day[2] = address(creditCore);
+        day[3] = address(standing);
+        day[4] = address(registry);
+        day[5] = address(guard);
+        address[] memory week = new address[](3);
+        for (uint8 i; i < VenueLabels.COUNT; i++) {
+            day[6 + i] = address(venues[i]);
+            week[i] = address(strategies[i]);
+            // The lister role is a plain handover: the deployer listed the one strategy each venue
+            // starts with, and from here only the 7-day timelock lists another.
+            venues[i].setStrategyLister(address(timelockLong));
         }
+        // The pool holds community balances, so listing a pool strategy waits the week too.
+        creditCore.setStrategyLister(address(timelockLong));
+        for (uint256 i; i < day.length; i++) {
+            Ownable2Step(day[i]).transferOwnership(address(timelock));
+        }
+        for (uint256 i; i < week.length; i++) {
+            Ownable2Step(week[i]).transferOwnership(address(timelockLong));
+        }
+        _acceptAndHandOn(timelock, day, p.delay, p.owner);
+        _acceptAndHandOn(timelockLong, week, p.delayLong, p.owner);
+
+        for (uint256 i; i < day.length; i++) {
+            require(Ownable2Step(day[i]).owner() == address(timelock), "not owned by the timelock");
+            require(Ownable2Step(day[i]).pendingOwner() == address(0), "ownership still pending");
+        }
+        for (uint256 i; i < week.length; i++) {
+            require(Ownable2Step(week[i]).owner() == address(timelockLong), "not owned by the 7-day timelock");
+            require(Ownable2Step(week[i]).pendingOwner() == address(0), "ownership still pending");
+            require(venues[i].strategyLister() == address(timelockLong), "lister is not the 7-day timelock");
+        }
+        require(creditCore.strategyLister() == address(timelockLong), "pool lister is not the 7-day timelock");
+        console.log("timelock (24h):  ", address(timelock));
+        console.log("timelock (7d):   ", address(timelockLong));
     }
 
-    /// Venue name for the printed address block, so an operator reading the log sees
-    /// `venue[CORE]` rather than an index they have to decode.
-    function _poolLabel(uint8 id) internal pure returns (string memory) {
-        if (id == _FLEX) return "FLEX";
-        if (id == _CORE) return "CORE";
-        if (id == _TERM) return "TERM";
-        revert("unknown venue");
-    }
+    /// One zero-delay batch: accept every ownership, then set the real delay. Then the owner key
+    /// gets the operating roles and the deployer gives up all of its own.
+    function _acceptAndHandOn(TimelockController tl, address[] memory owned, uint256 delay, address owner) internal {
+        uint256 n = owned.length;
+        address[] memory targets = new address[](n + 1);
+        uint256[] memory values = new uint256[](n + 1);
+        bytes[] memory payloads = new bytes[](n + 1);
+        for (uint256 i; i < n; i++) {
+            targets[i] = owned[i];
+            payloads[i] = abi.encodeCall(Ownable2Step.acceptOwnership, ());
+        }
+        targets[n] = address(tl);
+        payloads[n] = abi.encodeCall(TimelockController.updateDelay, (delay));
+        tl.scheduleBatch(targets, values, payloads, bytes32(0), _HANDOVER_SALT, 0);
+        tl.executeBatch(targets, values, payloads, bytes32(0), _HANDOVER_SALT);
 
-    /// `ManualStrategy` pays a yield Qudi funds by hand, so it belongs only on the chains listed
-    /// here: anvil, Arc testnet, and Arc mainnet for the beta.
-    ///
-    /// The guard is a hard allowlist with no environment override on purpose: an override is a
-    /// flag someone can set under pressure, and this is the one deployment mistake that cannot be
-    /// undone. Adding a chain is a reviewable code change.
-    function _deployManualStrategy(address usdc_, address venue_, address owner_, address operator_)
-        internal
-        returns (ManualStrategy)
-    {
+        tl.grantRole(tl.PROPOSER_ROLE(), owner);
+        tl.grantRole(tl.EXECUTOR_ROLE(), owner);
+        tl.grantRole(tl.CANCELLER_ROLE(), owner);
+        tl.renounceRole(tl.PROPOSER_ROLE(), deployer);
+        tl.renounceRole(tl.EXECUTOR_ROLE(), deployer);
+        tl.renounceRole(tl.CANCELLER_ROLE(), deployer);
+        tl.renounceRole(tl.DEFAULT_ADMIN_ROLE(), deployer);
+
+        require(tl.getMinDelay() == delay, "delay not set");
         require(
-            block.chainid == _ANVIL_CHAIN_ID || block.chainid == _ARC_TESTNET_CHAIN_ID
-                || block.chainid == _ARC_MAINNET_CHAIN_ID,
-            "ManualStrategy: unsupported chain"
+            tl.hasRole(tl.PROPOSER_ROLE(), owner) && tl.hasRole(tl.EXECUTOR_ROLE(), owner)
+                && tl.hasRole(tl.CANCELLER_ROLE(), owner),
+            "owner roles not granted"
         );
-        return new ManualStrategy(IERC20(usdc_), IConfig(address(config)), venue_, owner_, operator_);
+        require(
+            !tl.hasRole(tl.PROPOSER_ROLE(), deployer) && !tl.hasRole(tl.EXECUTOR_ROLE(), deployer)
+                && !tl.hasRole(tl.CANCELLER_ROLE(), deployer) && !tl.hasRole(tl.DEFAULT_ADMIN_ROLE(), deployer),
+            "deployer kept a timelock role"
+        );
+        require(tl.hasRole(tl.DEFAULT_ADMIN_ROLE(), address(tl)), "timelock does not administer itself");
+        require(!tl.hasRole(tl.DEFAULT_ADMIN_ROLE(), owner), "owner holds the admin role");
     }
 
-    /// The smoke community created at the end, purely to prove clone-init, factory registration and
-    /// the money paths work end to end. Its seat price is read from config rather than hardcoded
-    /// so it can never fall outside the range.
-    function _createSmokeCommunity(address deployer, address usdc) internal {
-        address communityAddr = factory.createCommunity("Smoke Community", config.seatPriceFloor());
-        require(seats.isRegistered(communityAddr), "smoke community not registered with Seats");
-        require(seats.balanceOf(deployer) == 1, "smoke founding seat not minted in Seats");
-        require(factory.isCommunityContract(communityAddr), "smoke community not registered");
-        require(factory.communityIdOf(communityAddr) == 1, "smoke community is not community 0");
-        console.log("smoke community:", communityAddr);
+    // ---- the smoke community ----
 
-        // Every tier is available from the moment the community exists:
-        // nothing opens one, and the ledger resolves each tier's vault from the factory's own
-        // venue registry the first time a record names it.
-        address ledger = factory.ledgerOf(communityAddr);
-        require(ledger != address(0), "smoke ledger not deployed");
+    function _smoke(address usdc) internal {
+        // The founding mint requires the creator to have attested for itself.
+        registry.attest(1);
+        address community = factory.createCommunity("Smoke Community", config.seatPriceFloor());
+        require(seats.isRegistered(community), "smoke community not registered with Seats");
+        require(factory.isCommunityContract(community), "smoke community not registered");
+        address ledger = factory.ledgerOf(community);
         require(factory.isCommunityContract(ledger), "smoke ledger not registered");
-        console.log("smoke ledger:  ", ledger);
-
-        for (uint8 t; t < _VENUES; t++) {
-            require(
-                Ledger(ledger).tierVault(t) == address(vaults[t]), "smoke ledger resolves a tier to the wrong vault"
-            );
-            require(factory.vaultOf(communityAddr, t) == ledger, "smoke tier does not answer with the ledger");
+        for (uint8 i; i < VenueLabels.COUNT; i++) {
+            require(Ledger(ledger).tierVault(i) == address(venues[i]), "smoke ledger resolves the wrong venue");
+            _smokeDeposit(usdc, Ledger(ledger), i);
         }
-
-        for (uint8 t; t < _VENUES; t++) {
-            _smokeDeposit(deployer, usdc, ledger, t, _SMOKE_AMOUNT);
-        }
+        console.log("smoke community:", community);
     }
 
-    /// One personal vault in venue `venueId`, and one deposit of `amount` into it. A Term vault
-    /// carries a one-day lock, because a Locked-kind venue takes no vault without one.
-    function _smokeDeposit(address deployer, address usdc, address ledger, uint8 venueId, uint256 amount) internal {
-        if (block.chainid == _ANVIL_CHAIN_ID) {
-            // MockUSDC's `mint` is open to anyone; funding the deposit this way keeps the script
-            // runnable against a fresh anvil chain with no other setup than what the
-            // USDC_ADDRESS doc comment already asks for.
-            IMintableTestUsdc(usdc).mint(deployer, amount);
-        }
-
-        IERC20(usdc).approve(ledger, amount);
-        Ledger smokeLedger = Ledger(ledger);
-        uint64 lockedUntil = vaults[venueId].labels().kind == IVenue.Kind.Locked ? uint64(block.timestamp + 1 days) : 0;
-        uint256 vaultId = smokeLedger.createVault(
-            ILedger.VaultParams({venueId: venueId, shared: false, lockedUntil: lockedUntil, name: "Smoke savings"})
+    /// One personal vault in venue `id` and one deposit into it. A Term vault carries a one-day
+    /// lock, because a Locked-kind venue takes no vault without one.
+    function _smokeDeposit(address usdc, Ledger ledger, uint8 id) internal {
+        if (block.chainid == _ANVIL) IMintableTestUsdc(usdc).mint(deployer, _SMOKE_AMOUNT);
+        IERC20(usdc).approve(address(ledger), _SMOKE_AMOUNT);
+        uint64 lockedUntil = venues[id].labels().kind == IVenue.Kind.Locked ? uint64(block.timestamp + 1 days) : 0;
+        uint256 vaultId = ledger.createVault(
+            ILedger.VaultParams({venueId: id, shared: false, lockedUntil: lockedUntil, name: "Smoke savings"})
         );
-        smokeLedger.deposit(vaultId, amount);
-        require(smokeLedger.vaultValue(vaultId) == amount, "smoke deposit did not credit the vault");
-        require(smokeLedger.vaultCapital(vaultId) == amount, "smoke deposit did not record its capital");
+        ledger.deposit(vaultId, _SMOKE_AMOUNT);
+        require(ledger.vaultValue(vaultId) == _SMOKE_AMOUNT, "smoke deposit did not credit the vault");
+    }
 
-        console.log("smoke deposit: OK, venue:", _poolLabel(venueId));
+    // ---- the deployment record ----
+
+    function _recordDir() internal view virtual returns (string memory) {
+        return string.concat(vm.projectRoot(), "/deployments");
+    }
+
+    function _recordPath() internal view virtual returns (string memory) {
+        return string.concat(_recordDir(), "/", vm.toString(block.chainid), ".json");
+    }
+
+    function _q(string memory s) internal pure returns (string memory) {
+        return string.concat('"', s, '"');
+    }
+
+    function _kv(string memory k, address a) internal pure returns (string memory) {
+        return string.concat(_q(k), ":", _q(vm.toString(a)));
+    }
+
+    /// The record, with exactly the keys the address-book generator reads. Addresses are checksummed
+    /// strings; the chain id, block and timestamp are numbers.
+    function _writeRecord(Params memory p) internal {
+        string memory contracts = string.concat(
+            "{",
+            _kv("CommunityFactory", address(factory)),
+            ",",
+            _kv("CommunityImplementation", address(communityImpl)),
+            ",",
+            _kv("LedgerImplementation", address(ledgerImpl)),
+            ",",
+            _kv("Seats", address(seats)),
+            ",",
+            _kv("Config", address(config)),
+            ",",
+            _kv("ComplianceRegistry", address(registry)),
+            ","
+        );
+        contracts = string.concat(
+            contracts,
+            _kv("CreditCore", address(creditCore)),
+            ",",
+            _kv("CreditStanding", address(standing)),
+            ",",
+            _kv("ImpactSourceSeats", address(seatSource)),
+            ",",
+            _kv("ImpactSourceLedger", address(ledgerSource)),
+            ",",
+            _kv("PauseGuard", address(guard)),
+            ",",
+            _kv("Timelock", address(timelock)),
+            ",",
+            _kv("TimelockLong", address(timelockLong))
+        );
+        string memory venueList = "[";
+        for (uint8 i; i < VenueLabels.COUNT; i++) {
+            string memory s = VenueLabels.suffix(i);
+            contracts = string.concat(
+                contracts,
+                ",",
+                _kv(string.concat("Venue", s), address(venues[i])),
+                ",",
+                _kv(string.concat("ManualStrategy", s), address(strategies[i]))
+            );
+            IVenue.Labels memory l = venues[i].labels();
+            venueList = string.concat(
+                venueList,
+                i == 0 ? "" : ",",
+                "{",
+                _q("id"),
+                ":",
+                vm.toString(uint256(i)),
+                ",",
+                _q("name"),
+                ":",
+                _q(l.name),
+                ",",
+                _q("kind"),
+                ":",
+                _q(l.kind == IVenue.Kind.Locked ? "Locked" : "Open"),
+                ",",
+                _kv("venue", address(venues[i])),
+                ",",
+                _kv("strategy", address(strategies[i])),
+                "}"
+            );
+        }
+        contracts = string.concat(contracts, "}");
+        venueList = string.concat(venueList, "]");
+
+        string memory roles = string.concat(
+            "{",
+            _kv("owner", p.owner),
+            ",",
+            _kv("timelock", address(timelock)),
+            ",",
+            _kv("pauser", p.pauser),
+            ",",
+            _kv("operator", p.operator),
+            ",",
+            _kv("screener", p.screener),
+            ",",
+            _kv("treasury", p.treasury),
+            "}"
+        );
+        string memory json = string.concat(
+            "{",
+            _q("chainId"),
+            ":",
+            vm.toString(block.chainid),
+            ",",
+            _q("deployBlock"),
+            ":",
+            vm.toString(deployBlock),
+            ",",
+            _q("deployTimestamp"),
+            ":",
+            vm.toString(deployTimestamp),
+            ",",
+            _q("gitCommit"),
+            ":",
+            _q(p.gitCommit),
+            ","
+        );
+        json = string.concat(
+            json,
+            _q("contracts"),
+            ":",
+            contracts,
+            ",",
+            _q("venues"),
+            ":",
+            venueList,
+            ",",
+            _q("roles"),
+            ":",
+            roles,
+            ",",
+            _kv("calibur", calibur),
+            "}"
+        );
+        vm.createDir(_recordDir(), true);
+        vm.writeJson(json, _recordPath());
+        console.log("deployment record:", _recordPath());
+    }
+
+    /// Run after the broadcast. The record's block and timestamp are first written from the state
+    /// the script simulated against, which is never later than the first transaction. This sets
+    /// them to the block the first deploy transaction actually landed in, read from the broadcast
+    /// log, so the indexer starts exactly there.
+    function recordDeployBlock() external {
+        string memory log =
+            string.concat(vm.projectRoot(), "/broadcast/Deploy.s.sol/", vm.toString(block.chainid), "/run-latest.json");
+        uint256 first = vm.parseJsonUint(vm.readFile(log), ".receipts[0].blockNumber");
+        vm.rollFork(first);
+        vm.writeJson(vm.toString(first), _recordPath(), ".deployBlock");
+        vm.writeJson(vm.toString(block.timestamp), _recordPath(), ".deployTimestamp");
+        console.log("deploy block:", first, "timestamp:", block.timestamp);
     }
 }

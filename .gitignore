@@ -2,6 +2,8 @@
 out/
 cache/
 broadcast/
+# A local anvil deployment is throwaway; only real chains' records are committed.
+deployments/31337.json
 
 # Environment
 .env

@@ -105,9 +105,10 @@ contract VenueTest is VenueFixture {
         assertEq(vault.strategies(0), address(fast));
     }
 
-    function test_addStrategy_ownerOnly() public {
+    /// Adding a strategy belongs to the strategy lister, which starts as the owner.
+    function test_addStrategy_listerOnly() public {
         MockStrategy s = new MockStrategy(usdc, address(vault));
-        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger));
+        vm.expectRevert(IVenue.NotStrategyLister.selector);
         vm.prank(stranger);
         vault.addStrategy(address(s), 0);
     }

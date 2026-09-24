@@ -2,6 +2,7 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {Ownable} from "openzeppelin-contracts/contracts/access/Ownable.sol";
 import {Config} from "../src/Config.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
 import {VenueIds} from "./helpers/VenueIds.sol";
@@ -63,7 +64,7 @@ contract ConfigTest is Test {
     function test_retiredKeys_chargeMachinery() public {
         bytes32[5] memory retired = [
             keccak256("qudi.ADVANCE_FEE_BPS"),
-            keccak256("qudi.STEWARD_FEE_BPS"),
+            keccak256("qudi.HOST_FEE_BPS"),
             keccak256("qudi.PROTOCOL_FEE_BPS"),
             keccak256("qudi.LATE_FEE_BPS"),
             keccak256("qudi.DEFAULT_AFTER")
@@ -115,7 +116,7 @@ contract ConfigTest is Test {
     function test_noChargeParameterIsReachable() public {
         bytes32[] memory all = _allConfigKeys();
         // Count pinned to ConfigKeys.sol by check-config-key-enumeration.sh (CI).
-        assertEq(all.length, 62, "ConfigKeys count changed: update _allConfigKeys and re-audit");
+        assertEq(all.length, 63, "ConfigKeys count changed: update _allConfigKeys and re-audit");
 
         bytes32[] memory chargeShaped = _chargeShapedKeys();
         for (uint256 c; c < chargeShaped.length; c++) {
@@ -136,7 +137,7 @@ contract ConfigTest is Test {
     function _chargeShapedKeys() internal pure returns (bytes32[] memory k) {
         string[17] memory names = [
             "qudi.ADVANCE_FEE_BPS",
-            "qudi.STEWARD_FEE_BPS",
+            "qudi.HOST_FEE_BPS",
             "qudi.PROTOCOL_FEE_BPS",
             "qudi.LATE_FEE_BPS",
             "qudi.MINT_FEE_BPS",
@@ -162,7 +163,7 @@ contract ConfigTest is Test {
     /// The complete ConfigKeys set, maintained in lockstep with ConfigKeys.sol. The count
     /// assertion in test_noChargeParameterIsReachable forces this to stay complete.
     function _allConfigKeys() internal pure returns (bytes32[] memory k) {
-        k = new bytes32[](62);
+        k = new bytes32[](63);
         uint256 i;
         k[i++] = K.SEAT_PRICE_FLOOR;
         k[i++] = K.SEAT_PRICE_CEILING;
@@ -212,6 +213,8 @@ contract ConfigTest is Test {
         k[i++] = K.CONCENTRATION_BPS;
         // CREDIT_CORE is an address (not settable via `set`, so not charge-shaped by construction).
         k[i++] = K.CREDIT_CORE;
+        // PAUSE_GUARD is an address too. It can only stop money going in; no repayment path reads it.
+        k[i++] = K.PAUSE_GUARD;
         // No-charge audit for the pool and credit gates: the liquid floor limits what the operator
         // sends out; the dormancy windows, book quality and member count decide whether and how much
         // a community lends; the heal cooling decides when a repaid default heals; the agreement
@@ -241,7 +244,7 @@ contract ConfigTest is Test {
         k[i++] = K.QUALIFYING_CONTRIBUTOR_MIN_DEPOSIT;
         k[i++] = K.QUALIFYING_CONTRIBUTOR_SEASONING;
         // The removal cooldown. No-charge audit: not charge-shaped. It is a duration read only by
-        // `Community.proposeRemoval`, which decides when the steward may propose removing the
+        // `Community.proposeRemoval`, which decides when the host may propose removing the
         // same member again after a failed vote. It is never read on any repayment path and
         // cannot add anything to what a member owes.
         k[i++] = K.REMOVAL_REPROPOSE_COOLDOWN;
@@ -485,6 +488,38 @@ contract ConfigTest is Test {
         cfg.setAddress(K.SEAT_PRICE_FLOOR, t2);
     }
 
+    /// The live pause guard is an address key like the compliance registry, so changing which
+    /// guard is live goes through the owner, which is the timelock. Unset, it reads zero, and every
+    /// money contract that asks a zero guard reverts, so an unwired deployment takes no money in.
+    function test_setAddress_pauseGuard() public {
+        assertEq(cfg.pauseGuard(), address(0));
+        address g = makeAddr("guard");
+        cfg.setAddress(K.PAUSE_GUARD, g);
+        assertEq(cfg.pauseGuard(), g);
+        vm.expectRevert(Config.ZeroAddress.selector);
+        cfg.setAddress(K.PAUSE_GUARD, address(0));
+        vm.prank(makeAddr("stranger"));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, makeAddr("stranger")));
+        cfg.setAddress(K.PAUSE_GUARD, g);
+    }
+
+    /// `CREDIT_CORE` is where every community's seat leg and yield leg are paid. It is set once, at
+    /// deploy, and never again, so no owner key, however slow its timelock, can redirect that money.
+    function test_creditCore_isSetOnceAndNeverAgain() public {
+        assertEq(cfg.creditCore(), address(0));
+        address core = makeAddr("core");
+        cfg.setAddress(K.CREDIT_CORE, core);
+        assertEq(cfg.creditCore(), core);
+        vm.expectRevert(Config.CreditCoreAlreadySet.selector);
+        cfg.setAddress(K.CREDIT_CORE, makeAddr("elsewhere"));
+        vm.expectRevert(Config.CreditCoreAlreadySet.selector);
+        cfg.setAddress(K.CREDIT_CORE, core);
+        assertEq(cfg.creditCore(), core);
+        // The other address keys stay changeable through the owner.
+        cfg.setAddress(K.PROTOCOL_TREASURY, makeAddr("treasury2"));
+        cfg.setAddress(K.PAUSE_GUARD, makeAddr("guard2"));
+    }
+
     function test_memberSeasoningWindowBounds() public {
         cfg.set(K.MEMBER_SEASONING_WINDOW, 1 days); // lo
         cfg.set(K.MEMBER_SEASONING_WINDOW, 90 days); // hi
@@ -494,7 +529,7 @@ contract ConfigTest is Test {
     }
 
     /// The launch value is 30 days, and both ends of the range are fixed: at least 7 days, so a
-    /// timelocked change cannot make it zero and let a steward re-freeze a member the moment a
+    /// timelocked change cannot make it zero and let a host re-freeze a member the moment a
     /// vote fails, and at most 180.
     function test_removalReproposeCooldownBounds() public {
         assertEq(cfg.removalReproposeCooldown(), 30 days, "launch value");

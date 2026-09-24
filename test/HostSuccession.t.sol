@@ -28,7 +28,7 @@ contract HostSuccessionTest is MembershipFixture {
     }
 
     function _nominate(address nominee) internal {
-        vm.prank(c.steward());
+        vm.prank(c.host());
         c.nominateSuccessor(nominee);
     }
 
@@ -76,11 +76,11 @@ contract HostSuccessionTest is MembershipFixture {
 
         vm.warp(p.objectionDeadline + 1);
         vm.expectEmit(true, true, false, false);
-        emit ICommunity.StewardChanged(host, ada);
+        emit ICommunity.HostChanged(host, ada, uint8(ICommunity.HostChange.Handover));
         vm.prank(makeAddr("anyone"));
         c.completeHandover();
 
-        assertEq(c.steward(), ada);
+        assertEq(c.host(), ada);
         assertTrue(c.isMember(host), "the old host is an ordinary Active member");
         assertEq(uint8(c.seatStateOf(host)), uint8(ICommunity.SeatState.Active));
         _noPending();
@@ -115,7 +115,7 @@ contract HostSuccessionTest is MembershipFixture {
         }
 
         vm.prank(ada);
-        vm.expectRevert(ICommunity.NotSteward.selector);
+        vm.expectRevert(ICommunity.NotHost.selector);
         c.nominateSuccessor(cy);
 
         // The same nomination of a qualifying member goes through.
@@ -173,7 +173,7 @@ contract HostSuccessionTest is MembershipFixture {
 
         _pastWindow();
         c.completeHandover();
-        assertEq(c.steward(), ada, "half is not more than half");
+        assertEq(c.host(), ada, "half is not more than half");
     }
 
     function test_proof4_fourObjectionsOfSixBlockAndStartTheCooldown() public {
@@ -188,7 +188,7 @@ contract HostSuccessionTest is MembershipFixture {
         uint256 failedAt = block.timestamp;
 
         _noPending();
-        assertEq(c.steward(), host);
+        assertEq(c.host(), host);
         vm.expectRevert(ICommunity.NoActiveVote.selector);
         c.completeHandover();
         vm.expectRevert(ICommunity.NoNomination.selector);
@@ -252,7 +252,7 @@ contract HostSuccessionTest is MembershipFixture {
         vm.expectEmit(true, false, false, false);
         emit ICommunity.NominationCancelled(ada);
         vm.prank(bem);
-        c.proposeRemoveSteward();
+        c.proposeRemoveHost();
         _noPending();
         vm.expectRevert(ICommunity.NoActiveVote.selector);
         c.completeHandover();
@@ -261,7 +261,7 @@ contract HostSuccessionTest is MembershipFixture {
     function test_proof5_proposingARemovalCancelsANominationNotYetAccepted() public {
         _nominate(ada);
         vm.prank(bem);
-        c.proposeRemoveSteward();
+        c.proposeRemoveHost();
         _noPending();
         vm.prank(ada);
         vm.expectRevert(ICommunity.NoNomination.selector);
@@ -270,7 +270,7 @@ contract HostSuccessionTest is MembershipFixture {
 
     function test_proof5_noNominationOrResignationWhileARemovalVoteIsOpen() public {
         vm.prank(bem);
-        c.proposeRemoveSteward();
+        c.proposeRemoveHost();
 
         vm.startPrank(host);
         vm.expectRevert(ICommunity.HostVoteOpen.selector);
@@ -299,7 +299,7 @@ contract HostSuccessionTest is MembershipFixture {
         vm.expectEmit(true, false, false, false);
         emit ICommunity.HandoverFailed(ada);
         c.completeHandover();
-        assertEq(c.steward(), host);
+        assertEq(c.host(), host);
         _noPending();
         vm.prank(host);
         vm.expectRevert(ICommunity.HandoverCooldown.selector);
@@ -314,7 +314,7 @@ contract HostSuccessionTest is MembershipFixture {
         _pastWindow();
 
         c.completeHandover();
-        assertEq(c.steward(), host);
+        assertEq(c.host(), host);
         _noPending();
         vm.prank(host);
         vm.expectRevert(ICommunity.HandoverCooldown.selector);
@@ -327,7 +327,7 @@ contract HostSuccessionTest is MembershipFixture {
         _nominate(ada);
         _accept(ada);
         vm.prank(bem);
-        vm.expectRevert(ICommunity.NotSteward.selector);
+        vm.expectRevert(ICommunity.NotHost.selector);
         c.cancelNomination();
 
         vm.expectEmit(true, false, false, false);
@@ -348,13 +348,13 @@ contract HostSuccessionTest is MembershipFixture {
         c.createInvite(key, 5, uint64(block.timestamp + 30 days));
 
         vm.prank(ada);
-        vm.expectRevert(ICommunity.NotSteward.selector);
+        vm.expectRevert(ICommunity.NotHost.selector);
         c.resignHost();
 
         vm.expectEmit(true, true, false, false);
-        emit ICommunity.StewardChanged(host, address(0));
+        emit ICommunity.HostChanged(host, address(0), uint8(ICommunity.HostChange.Resignation));
         _resign(c);
-        assertTrue(c.stewardVacant());
+        assertTrue(c.hostVacant());
         assertTrue(c.isMember(host), "the old host keeps their seat");
 
         // The old host's invites fail at join: first on the empty seat, then as the old term's.
@@ -362,12 +362,12 @@ contract HostSuccessionTest is MembershipFixture {
         _attest(joiner);
         bytes memory keySig = _keySign(uint256(keccak256("unused")), address(c), joiner);
         vm.prank(joiner);
-        vm.expectRevert(ICommunity.StewardVacant.selector);
+        vm.expectRevert(ICommunity.HostVacant.selector);
         c.join(key, keySig);
 
         // An election follows: five of the eight seasoned members is more than half.
         _elect(c, bem, _five(ada, bem, cy, dee, eve));
-        assertEq(c.steward(), bem);
+        assertEq(c.host(), bem);
         vm.prank(joiner);
         vm.expectRevert(ICommunity.InviteStale.selector);
         c.join(key, keySig);
@@ -386,7 +386,7 @@ contract HostSuccessionTest is MembershipFixture {
         vm.prank(host);
         c.cancelNomination();
         _resign(c);
-        assertTrue(c.stewardVacant());
+        assertTrue(c.hostVacant());
     }
 
     // ---- proof 8: the election threshold ----
@@ -406,8 +406,8 @@ contract HostSuccessionTest is MembershipFixture {
         _resign(s);
 
         vm.prank(ada);
-        s.electSteward(ada);
-        uint256 voteId = s.activeStewardVoteId();
+        s.electHost(ada);
+        uint256 voteId = s.activeHostVoteId();
         ICommunity.VoteTally memory t = s.voteTally(voteId);
         (uint16 communityBps,) = config.communityVote();
         assertEq(t.denominator, 6);
@@ -417,10 +417,10 @@ contract HostSuccessionTest is MembershipFixture {
         _vote(s, voteId, cy, true);
         _pastWindow();
         vm.expectRevert(ICommunity.NotPassed.selector);
-        s.executeRemoveSteward();
+        s.executeRemoveHost();
 
         _elect(s, ada, _four(ada, bem, cy, dee));
-        assertEq(s.steward(), ada, "four of six is more than half");
+        assertEq(s.host(), ada, "four of six is more than half");
     }
 
     function test_proof8_twoVotersElectWithTwoYesVotes() public {
@@ -430,28 +430,28 @@ contract HostSuccessionTest is MembershipFixture {
         _resign(s);
 
         vm.prank(ada);
-        s.electSteward(ada);
-        uint256 voteId = s.activeStewardVoteId();
+        s.electHost(ada);
+        uint256 voteId = s.activeHostVoteId();
         _vote(s, voteId, ada, true);
         _pastWindow();
         vm.expectRevert(ICommunity.NotPassed.selector);
-        s.executeRemoveSteward();
+        s.executeRemoveHost();
 
         vm.prank(ada);
-        s.electSteward(ada);
-        voteId = s.activeStewardVoteId();
+        s.electHost(ada);
+        voteId = s.activeHostVoteId();
         _vote(s, voteId, ada, true);
         _vote(s, voteId, host, true);
         _pastWindow();
-        s.executeRemoveSteward();
-        assertEq(s.steward(), ada);
+        s.executeRemoveHost();
+        assertEq(s.host(), ada);
     }
 
     function test_proof8_removingTheHostOfSixStillNeedsFive() public {
         Community s = _six();
         vm.prank(ada);
-        s.proposeRemoveSteward();
-        uint256 voteId = s.activeStewardVoteId();
+        s.proposeRemoveHost();
+        uint256 voteId = s.activeHostVoteId();
         ICommunity.VoteTally memory t = s.voteTally(voteId);
         (uint16 hostBps,) = config.hostVote();
         assertEq(t.denominator, 6);
@@ -463,12 +463,12 @@ contract HostSuccessionTest is MembershipFixture {
         }
         _pastWindow();
         vm.expectRevert(ICommunity.NotPassed.selector);
-        s.executeRemoveSteward();
+        s.executeRemoveHost();
 
         // The failed vote's cooldown passes, and five of six carry the next one.
         vm.warp(block.timestamp + 30 days);
         _removeHost(s, _five(ada, bem, cy, dee, eve));
-        assertTrue(s.stewardVacant());
+        assertTrue(s.hostVacant());
     }
 
     function _four(address a, address b, address d, address e) internal pure returns (address[] memory m) {

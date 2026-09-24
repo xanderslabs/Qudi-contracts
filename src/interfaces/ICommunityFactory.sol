@@ -35,7 +35,15 @@ interface ICommunityFactory {
     function communityCount() external view returns (uint256);
     function communityAt(uint256 i) external view returns (address community);
 
-    event CommunityCreated(uint256 indexed communityId, address indexed creator, address community, address ledger);
+    /// `name` and `seatPrice` are the ones the community was created with.
+    event CommunityCreated(
+        uint256 indexed communityId,
+        address indexed creator,
+        address community,
+        address ledger,
+        string name,
+        uint256 seatPrice
+    );
     event VenueAdded(uint256 indexed id, address venue);
     event VenueRetired(uint256 indexed id);
 

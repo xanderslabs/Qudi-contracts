@@ -5,6 +5,7 @@ import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {InviteSigner} from "./helpers/InviteSigner.sol";
 import {Seats} from "../src/Seats.sol";
 import {Config} from "../src/Config.sol";
+import {PauseGuard} from "../src/PauseGuard.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
 import {Community} from "../src/Community.sol";
 import {CommunityFactory} from "../src/CommunityFactory.sol";
@@ -54,6 +55,10 @@ contract CommunityClosureTest is InviteSigner {
         core = new MockCreditCoreLeg(IERC20(address(usdc)));
         vm.prank(owner);
         config.setAddress(K.CREDIT_CORE, address(core));
+        // Every flag off: the money paths ask the guard before money moves in.
+        PauseGuard pauseGuard = new PauseGuard(address(this), address(this));
+        vm.prank(owner);
+        config.setAddress(K.PAUSE_GUARD, address(pauseGuard));
         (, hostWindow) = config.hostVote();
 
         address communityImpl = address(new Community());
@@ -162,7 +167,7 @@ contract CommunityClosureTest is InviteSigner {
     }
 
     function test_proof13a_onlyTheHostProposes() public {
-        vm.expectRevert(ICommunity.NotSteward.selector);
+        vm.expectRevert(ICommunity.NotHost.selector);
         vm.prank(ada);
         community.proposeClosure();
     }
@@ -250,7 +255,7 @@ contract CommunityClosureTest is InviteSigner {
     /// Refused while a vote to remove the host is open, and while a handover is pending.
     function test_proof13a_refusedWhileAHostVoteOrHandoverIsOpen() public {
         vm.prank(ada);
-        community.proposeRemoveSteward();
+        community.proposeRemoveHost();
         vm.expectRevert(ICommunity.VoteActive.selector);
         vm.prank(host);
         community.proposeClosure();
@@ -345,7 +350,7 @@ contract CommunityClosureTest is InviteSigner {
         _close();
         vm.expectRevert(ICommunity.CommunityIsClosed.selector);
         vm.prank(ada);
-        community.proposeRemoveSteward();
+        community.proposeRemoveHost();
         vm.expectRevert(ICommunity.CommunityIsClosed.selector);
         vm.prank(host);
         community.nominateSuccessor(ada);
@@ -354,7 +359,7 @@ contract CommunityClosureTest is InviteSigner {
         community.resignHost();
         vm.expectRevert(ICommunity.CommunityIsClosed.selector);
         vm.prank(ada);
-        community.electSteward(bea);
+        community.electHost(bea);
     }
 
     /// A closed community refuses deposits and still pays its personal vaults out.
@@ -440,10 +445,10 @@ contract CommunityClosureTest is InviteSigner {
         community.resignHost();
         vm.expectRevert(ICommunity.CandidateIneligible.selector);
         vm.prank(ada);
-        community.electSteward(newcomer);
+        community.electHost(newcomer);
 
         vm.prank(ada);
-        community.electSteward(bea);
+        community.electHost(bea);
     }
 
     function test_election_aFrozenCandidateIsRefused() public {
@@ -453,7 +458,7 @@ contract CommunityClosureTest is InviteSigner {
         community.resignHost();
         vm.expectRevert(ICommunity.CandidateIneligible.selector);
         vm.prank(ada);
-        community.electSteward(bea);
+        community.electHost(bea);
     }
 
     // ---- proof 10 over real seats: a removed member keeps their personal vault ----

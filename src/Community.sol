@@ -22,12 +22,12 @@ import {IImpactSource} from "./interfaces/IImpactSource.sol";
 /// the vote arithmetic needs, keyed by seat number.
 ///
 /// join() needs an invite the current host registered onchain and the invite key bound to the
-/// caller, from a wallet that has attested for itself and is not screener-blocked, while a steward
+/// caller, from a wallet that has attested for itself and is not screener-blocked, while a host
 /// exists and the community is under `MEMBER_CAP` Active seats. It mints at the current price, which the
 /// host sets from `SEAT_PRICE_FLOOR` to `SEAT_PRICE_CEILING` and the members change by vote. A
 /// paid seat splits, config-driven: 40% to the Community Credit Account, 30% to the host's
 /// wallet, 30% to the protocol treasury. A $0 seat moves no money. A member leaves by forfeit()
-/// or is removed by a vote the steward proposes. The host role changes by a handover the members
+/// or is removed by a vote the host proposes. The host role changes by a handover the members
 /// do not block, a resignation, a removal vote, or an election while the seat is empty. The mint
 /// timestamp is the sole source of truth for member seasoning.
 ///
@@ -48,7 +48,7 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     address internal ledger;
     address internal factory;
 
-    address public steward;
+    address public host;
     uint256 public seatPrice;
     string public communityName;
 
@@ -66,9 +66,9 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     bytes32 internal constant JOIN_TYPEHASH = keccak256("Join(address community,address joiner)");
 
     /// One vote per slot, keyed by kind: `target` is the candidate for an election vote, the
-    /// steward-at-proposal-time for a steward removal vote (informational only, execution always
+    /// host-at-proposal-time for a host removal vote (informational only, execution always
     /// vacates on a passing removal), the member for a member removal vote, and unused for a
-    /// price vote. `newPrice` is Price-kind only. `activeStewardVoteId` is 0 when no steward
+    /// price vote. `newPrice` is Price-kind only. `activeHostVoteId` is 0 when no host
     /// removal/election vote is live. A handover's objection period is a Handover vote whose
     /// `target` is the nominee and whose `againstCount` is the objections.
     ///
@@ -98,15 +98,15 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     }
 
     mapping(uint256 => Vote) internal votes;
-    uint256 public activeStewardVoteId;
+    uint256 public activeHostVoteId;
     uint256 public activePriceVoteId;
     /// The member's latest removal vote. Left in place when it fails, because the cooldown is
     /// measured from its deadline; cleared when it executes.
     mapping(address => uint256) public activeRemovalVoteId;
     uint256 internal nextVoteId;
 
-    /// The latest vote to remove the steward. Kept apart from
-    /// `activeStewardVoteId` because that slot is shared with Election: a removal proposal is
+    /// The latest vote to remove the host. Kept apart from
+    /// `activeHostVoteId` because that slot is shared with Election: a removal proposal is
     /// refused while this vote is unresolved, and a failed one starts the host-vote cooldown.
     /// Cleared when it passes and executes, which starts no cooldown.
     uint256 internal lastHostRemovalVoteId;
@@ -169,14 +169,14 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
         _requireMintable(w.creator);
         ledger = w.vault;
         factory = w.factory;
-        steward = w.creator;
+        host = w.creator;
         seatPrice = w.seatPrice;
         communityName = w.name;
 
-        // The founding steward's seat is unpaid and needs no invite: no USDC moves, no split
+        // The founding host's seat is unpaid and needs no invite: no USDC moves, no split
         // runs, and the zero amounts in SeatMinted record that.
-        _mintSeat(steward, 0);
-        emit SeatMinted(steward, 0, 0, 0, 0);
+        _mintSeat(host, 0);
+        emit SeatMinted(host, address(0), 0, 0, 0, 0);
     }
 
     // ---- membership ----
@@ -185,9 +185,9 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
         // Someone joining while members vote on closing would pay for a seat in a community about
         // to close, and a closed community takes nobody.
         _requireOpen();
-        // No steward means no one to answer for an invite, and no destination for the 30% host
+        // No host means no one to answer for an invite, and no destination for the 30% host
         // leg. Joining reopens once the community has a host again.
-        if (stewardVacant()) revert StewardVacant();
+        if (hostVacant()) revert HostVacant();
         _requireMintable(msg.sender);
         // The bar on rejoining. A seat is never burned and `Seats` keeps it in the wallet, so this
         // refuses a wallet whose seat is Active, Suspended or Left alike.
@@ -202,12 +202,12 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
         // A $0 seat moves nothing and splits nothing, so it needs no allowance and no wired
         // `CreditCore`.
         if (price == 0) {
-            emit SeatMinted(msg.sender, 0, 0, 0, 0);
+            emit SeatMinted(msg.sender, inviteKey, 0, 0, 0, 0);
             return;
         }
         IERC20(config.usdc()).safeTransferFrom(msg.sender, address(this), price);
-        (uint256 toSteward, uint256 toPool, uint256 toProtocol) = _split(price);
-        emit SeatMinted(msg.sender, price, toSteward, toPool, toProtocol);
+        (uint256 toHost, uint256 toPool, uint256 toProtocol) = _split(price);
+        emit SeatMinted(msg.sender, inviteKey, price, toHost, toPool, toProtocol);
     }
 
     /// Checks an invite and counts one use of it. The host registered the invite key; the key,
@@ -241,7 +241,7 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     /// calls it, so with the seat empty nobody does. A key is registered once, so a revoked or
     /// spent invite cannot be refilled under the same link.
     function createInvite(address inviteKey, uint16 maxUses, uint64 expiry) external {
-        if (msg.sender != steward) revert NotSteward();
+        if (msg.sender != host) revert NotHost();
         _requireOpen();
         if (_invites[inviteKey].expiry != 0) revert InviteAlreadyRegistered();
         if (expiry <= block.timestamp) revert InviteExpired();
@@ -260,7 +260,7 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
 
     /// Ends one invite, whatever uses it has left.
     function revokeInvite(address inviteKey) external {
-        if (msg.sender != steward) revert NotSteward();
+        if (msg.sender != host) revert NotHost();
         InviteRecord storage inv = _invites[inviteKey];
         if (inv.expiry == 0) revert InviteNotRegistered();
         inv.revoked = true;
@@ -269,7 +269,7 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
 
     /// Ends every invite made so far, in one transaction.
     function revokeAllInvites() external {
-        if (msg.sender != steward) revert NotSteward();
+        if (msg.sender != host) revert NotHost();
         emit AllInvitesRevoked(++inviteEpoch);
     }
 
@@ -376,7 +376,7 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
         (uint256 tokenId, ISeats.Seat memory s) = _seat(msg.sender);
         if (s.state != SeatState.Active) revert NotMember();
         if (_frozen(msg.sender)) revert MemberFrozen();
-        if (msg.sender == steward) revert StewardCannotForfeit();
+        if (msg.sender == host) revert HostCannotForfeit();
         if (_hasOpenCreditTab(msg.sender)) revert OpenTabBlocks();
         if (_holdsAPersonalVault(msg.sender)) revert VaultHoldsBalance();
 
@@ -385,8 +385,8 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
         emit SeatForfeited(msg.sender, tokenId);
     }
 
-    function stewardVacant() public view returns (bool) {
-        return steward == address(0);
+    function hostVacant() public view returns (bool) {
+        return host == address(0);
     }
 
     /// A vote to remove the host takes the host-vote threshold, more than two thirds, because it
@@ -395,13 +395,13 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     /// fill, since with no host nobody can join and no shared vault can pay out. A handover's
     /// objection period takes only the community vote's window from here.
     function _thresholdFor(VoteKind kind) internal view returns (uint16 thresholdBps, uint64 window) {
-        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Closure) return config.hostVote();
+        if (kind == VoteKind.HostRemoval || kind == VoteKind.Closure) return config.hostVote();
         return config.communityVote();
     }
 
     /// Shared vote-opening body: snapshots the denominator and the start time, sets the
     /// deadline from the kind's threshold window, and emits VoteStarted. The caller writes the
-    /// returned id into its own slot (activeStewardVoteId, activePriceVoteId, or
+    /// returned id into its own slot (activeHostVoteId, activePriceVoteId, or
     /// activeRemovalVoteId[member]).
     function _startVote(VoteKind kind, address target, uint256 newPrice) internal returns (uint256 voteId) {
         (, uint64 window) = _thresholdFor(kind);
@@ -428,10 +428,10 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
         } else if (kind == VoteKind.Handover) {
             // Neither the host nor the nominee is counted: whether to accept the change is the
             // other members' call.
-            denominator -= _countedIn(steward, last) + _countedIn(target, last);
+            denominator -= _countedIn(host, last) + _countedIn(target, last);
         }
         v.denominator = denominator;
-        emit VoteStarted(voteId, uint8(kind), target);
+        emit VoteStarted(voteId, uint8(kind), target, newPrice);
     }
 
     /// 1 if `who` holds an Active seat numbered 1 to `last`, which is exactly a seat the seasoned
@@ -545,15 +545,15 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
         return !_passed(voteId);
     }
 
-    function proposeRemoveSteward() external {
+    function proposeRemoveHost() external {
         if (!_isMember(msg.sender)) revert NotMember();
         // A closed community needs no host changes.
         if (closed) revert CommunityIsClosed();
         // Nothing to remove while the role is empty, and allowing it would let one member park a
-        // pointless vote in activeStewardVoteId that blocks electSteward() for the whole window,
-        // over and over, leaving the community leaderless. Vacancy is electSteward()'s to resolve.
-        if (stewardVacant()) revert StewardVacant();
-        if (activeStewardVoteId != 0 && !_resolvedAsFailed(activeStewardVoteId)) revert VoteActive();
+        // pointless vote in activeHostVoteId that blocks electHost() for the whole window,
+        // over and over, leaving the community leaderless. Vacancy is electHost()'s to resolve.
+        if (hostVacant()) revert HostVacant();
+        if (activeHostVoteId != 0 && !_resolvedAsFailed(activeHostVoteId)) revert VoteActive();
         // A failed host vote waits the same cooldown a failed removal does,
         // or a bloc could keep one open back to back and the host could never remove anyone. A
         // live or passed-but-unexecuted one is refused above; a passed one cleared this slot.
@@ -562,33 +562,33 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
             revert HostVoteCooldown();
         }
 
-        uint256 voteId = _startVote(VoteKind.StewardRemoval, steward, 0);
-        activeStewardVoteId = voteId;
+        uint256 voteId = _startVote(VoteKind.HostRemoval, host, 0);
+        activeHostVoteId = voteId;
         lastHostRemovalVoteId = voteId;
         // A host facing removal cannot hand the seat on to escape it: the vote cancels any
         // nomination, and none can be made until it resolves.
         if (_handoverPending()) _cancelNomination();
     }
 
-    function electSteward(address candidate) external {
+    function electHost(address candidate) external {
         if (!_isMember(msg.sender)) revert NotMember();
         if (closed) revert CommunityIsClosed();
         // The bar a handover nominee meets: a seasoned Active member no removal vote is open
         // against, so nobody can join and stand for host on day one. Execution checks membership
         // again.
         if (!_canHost(candidate)) revert CandidateIneligible();
-        if (!stewardVacant()) revert StewardNotVacant();
-        if (activeStewardVoteId != 0 && !_resolvedAsFailed(activeStewardVoteId)) revert VoteActive();
+        if (!hostVacant()) revert HostNotVacant();
+        if (activeHostVoteId != 0 && !_resolvedAsFailed(activeHostVoteId)) revert VoteActive();
 
-        activeStewardVoteId = _startVote(VoteKind.Election, candidate, 0);
+        activeHostVoteId = _startVote(VoteKind.Election, candidate, 0);
     }
 
-    /// Card-price changes are proposed by the steward and approved by the members
+    /// Card-price changes are proposed by the host and approved by the members
     /// (community vote, simple-majority default), binding future mints only: the price
     /// actually charged is read at join(), and no minted seat is ever repriced. The price stays
     /// inside the same floor and ceiling a community is created with.
     function proposeSeatPrice(uint256 newPrice) external {
-        if (msg.sender != steward) revert NotSteward();
+        if (msg.sender != host) revert NotHost();
         _requirePriceInRange(newPrice);
         if (activePriceVoteId != 0 && !_resolvedAsFailed(activePriceVoteId)) revert VoteActive();
         activePriceVoteId = _startVote(VoteKind.Price, address(0), newPrice);
@@ -608,22 +608,22 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
         emit SeatPriceSet(v.newPrice);
     }
 
-    /// Removing a member. Only the steward proposes, the members
+    /// Removing a member. Only the host proposes, the members
     /// decide at the community threshold, and there is no appeal. From this call until the vote
     /// resolves the member is frozen to exit-only: `isMember` reads false, so they cannot draw,
     /// deposit, create a vault, vote or propose, and `forfeit()` refuses them. They can still
     /// withdraw their own personal vaults and settle their tab, which read no membership.
     ///
     /// A failed vote bars a new removal of the same member until its deadline plus
-    /// `REMOVAL_REPROPOSE_COOLDOWN`, so a steward cannot keep a member frozen by proposing again
+    /// `REMOVAL_REPROPOSE_COOLDOWN`, so a host cannot keep a member frozen by proposing again
     /// each time a vote fails.
     function proposeRemoval(address member) external {
-        if (stewardVacant()) revert StewardVacant();
-        if (msg.sender != steward) revert NotSteward();
-        if (member == steward) revert CannotRemoveSteward();
+        if (hostVacant()) revert HostVacant();
+        if (msg.sender != host) revert NotHost();
+        if (member == host) revert CannotRemoveHost();
         (, ISeats.Seat memory s) = _seat(member);
         if (s.state != SeatState.Active) revert TargetNotMember();
-        // No removal while a vote to remove the steward is unresolved, so a
+        // No removal while a vote to remove the host is unresolved, so a
         // host facing one cannot freeze the members who would vote in it.
         uint256 hostVote = lastHostRemovalVoteId;
         if (hostVote != 0 && !_resolvedAsFailed(hostVote)) revert HostVoteOpen();
@@ -640,7 +640,7 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
 
     /// Permissionless after the window, if passed. The seat becomes Suspended for good and stays
     /// in the member's wallet. The target is still Active here: a frozen
-    /// member cannot forfeit, and the steward, the one seat that could otherwise change role
+    /// member cannot forfeit, and the host, the one seat that could otherwise change role
     /// mid-vote, cannot be a target.
     function executeRemoval(address member) external {
         uint256 voteId = activeRemovalVoteId[member];
@@ -684,25 +684,25 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     /// denominator is the seasoned Active count stored when the vote started, and the pinned
     /// rounding is unchanged: votesFor * 10_000 >= thresholdBps * denominator, integer-only, with
     /// at least `_minYes` votes for.
-    function executeRemoveSteward() external {
-        uint256 voteId = activeStewardVoteId;
+    function executeRemoveHost() external {
+        uint256 voteId = activeHostVoteId;
         if (voteId == 0) revert NoActiveVote();
 
         Vote storage v = votes[voteId];
         if (block.timestamp <= v.deadline) revert VoteWindowOpen();
         if (!_passed(voteId)) revert NotPassed();
-        // A candidate who is no longer a member can never be seated: a steward without an Active
-        // seat would violate stewardIsMemberOrVacant and leave a non-member running the community.
+        // A candidate who is no longer a member can never be seated: a host without an Active
+        // seat would violate hostIsMemberOrVacant and leave a non-member running the community.
         // _resolvedAsFailed treats this vote as failed so a new one starts.
         if (v.kind == VoteKind.Election && !_isMember(v.target)) revert CandidateNotMember();
 
-        activeStewardVoteId = 0;
+        activeHostVoteId = 0;
         // A passed host vote starts no cooldown and no longer blocks removals.
-        if (v.kind == VoteKind.StewardRemoval) lastHostRemovalVoteId = 0;
-        address old = steward;
-        steward = v.kind == VoteKind.Election ? v.target : address(0);
+        if (v.kind == VoteKind.HostRemoval) lastHostRemovalVoteId = 0;
+        address old = host;
+        host = v.kind == VoteKind.Election ? v.target : address(0);
         hostTerm++;
-        emit StewardChanged(old, steward);
+        emit HostChanged(old, host, uint8(v.kind == VoteKind.Election ? HostChange.Election : HostChange.Removal));
     }
 
     // ---- handover and resignation ----
@@ -732,14 +732,14 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     /// have had the objection period; the host keeps every power meanwhile.
     function nominateSuccessor(address nominee) external {
         if (closed) revert CommunityIsClosed();
-        if (msg.sender != steward) revert NotSteward();
+        if (msg.sender != host) revert NotHost();
         if (_hostVoteOpen()) revert HostVoteOpen();
         if (_handoverPending()) revert NominationPending();
         uint64 failedAt = _handoverFailedAt;
         if (failedAt != 0 && block.timestamp < failedAt + config.removalReproposeCooldown()) {
             revert HandoverCooldown();
         }
-        if (nominee == steward || !_canHost(nominee)) revert NomineeIneligible();
+        if (nominee == host || !_canHost(nominee)) revert NomineeIneligible();
         _handover = Handover({nominee: nominee, nominatedAt: uint64(block.timestamp), voteId: 0});
         emit SuccessorNominated(nominee);
     }
@@ -766,7 +766,7 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
         Vote storage v = votes[voteId];
         if (block.timestamp > v.deadline) revert VoteWindowClosed();
         if (!_isMember(msg.sender)) revert NotMember();
-        if (msg.sender == steward || msg.sender == v.target) revert VoteIneligible();
+        if (msg.sender == host || msg.sender == v.target) revert VoteIneligible();
         if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();
         if (v.voted[msg.sender]) revert AlreadyVoted();
         v.voted[msg.sender] = true;
@@ -790,15 +790,15 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
             return;
         }
         delete _handover;
-        address old = steward;
-        steward = nominee;
+        address old = host;
+        host = nominee;
         hostTerm++;
-        emit StewardChanged(old, nominee);
+        emit HostChanged(old, nominee, uint8(HostChange.Handover));
     }
 
     /// The host withdraws a nomination before it completes. Nothing failed, so no cooldown.
     function cancelNomination() external {
-        if (msg.sender != steward) revert NotSteward();
+        if (msg.sender != host) revert NotHost();
         if (!_handoverPending()) revert NoNomination();
         _cancelNomination();
     }
@@ -820,12 +820,12 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     /// cancels first.
     function resignHost() external {
         if (closed) revert CommunityIsClosed();
-        if (msg.sender != steward) revert NotSteward();
+        if (msg.sender != host) revert NotHost();
         if (_hostVoteOpen()) revert HostVoteOpen();
         if (_handoverPending()) revert NominationPending();
-        steward = address(0);
+        host = address(0);
         hostTerm++;
-        emit StewardChanged(msg.sender, address(0));
+        emit HostChanged(msg.sender, address(0), uint8(HostChange.Resignation));
     }
 
     function pendingHandover() external view returns (PendingHandover memory p) {
@@ -850,7 +850,7 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     /// handover is pending, and while a shared vault holds money, and within
     /// `REMOVAL_REPROPOSE_COOLDOWN` of a failed closure vote.
     function proposeClosure() external {
-        if (msg.sender != steward) revert NotSteward();
+        if (msg.sender != host) revert NotHost();
         _requireClosable();
         uint256 last = closureVoteId;
         if (last != 0) {
@@ -877,7 +877,7 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
 
     function _requireClosable() internal view {
         if (closed) revert CommunityIsClosed();
-        uint256 hostVote = activeStewardVoteId;
+        uint256 hostVote = activeHostVoteId;
         if (block.timestamp <= _removalWindowEnd || (hostVote != 0 && !_resolvedAsFailed(hostVote))) {
             revert VoteActive();
         }
@@ -903,19 +903,19 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     /// community's credit balance or nothing. Sending it to Qudi's own revenue instead would be
     /// a silent reroute of the community's 40%, so an unwired deployment fails loud here
     /// instead. A deployment that opens paid mints wires `CREDIT_CORE`.
-    function _split(uint256 price) internal returns (uint256 toSteward, uint256 toPool, uint256 toProtocol) {
-        (uint16 stewardBps, uint16 poolBps,) = config.mintSplit();
-        toSteward = price * stewardBps / 10_000;
+    function _split(uint256 price) internal returns (uint256 toHost, uint256 toPool, uint256 toProtocol) {
+        (uint16 hostBps, uint16 poolBps,) = config.mintSplit();
+        toHost = price * hostBps / 10_000;
         toPool = price * poolBps / 10_000;
-        toProtocol = price - toSteward - toPool;
+        toProtocol = price - toHost - toPool;
 
         address core = config.creditCore();
         if (core == address(0)) revert CreditCoreUnset();
 
         IERC20 usdc = IERC20(config.usdc());
-        // The steward leg pays the creator's wallet directly:
+        // The host leg pays the creator's wallet directly:
         // no vault balance, no cooldown. The protocol leg is unchanged.
-        usdc.safeTransfer(steward, toSteward);
+        usdc.safeTransfer(host, toHost);
         // Transfer then book, which is the shape the retired `receiveMintShare` hook had: the
         // USDC is in `CreditCore` before it is told whose balance to raise.
         usdc.safeTransfer(core, toPool);

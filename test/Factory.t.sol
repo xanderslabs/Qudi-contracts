@@ -282,7 +282,7 @@ contract FactoryFoundingMintTest is Test {
         vm.prank(creator);
         address communityAddr = factory.createCommunity("Lagos Circle", 100e6);
         ICommunity s = ICommunity(communityAddr);
-        assertEq(s.steward(), creator);
+        assertEq(s.host(), creator);
         assertTrue(s.isMember(creator));
         assertEq(s.memberCount(), 1);
         assertEq(usdc.balanceOf(creator), 0); // nothing pulled
@@ -292,7 +292,7 @@ contract FactoryFoundingMintTest is Test {
 
     /// I1: the founding seat is a mint like any other, so the creator passes the same
     /// gates every join() caller passes: attested for themselves, and not screener-blocked.
-    /// Without this a blocked wallet could found a community and take the steward role, and the
+    /// Without this a blocked wallet could found a community and take the host role, and the
     /// 30% host leg of every later mint would flow to it.
     function test_createCommunityGatesCreator() public {
         address elsa = makeAddr("elsa");

@@ -184,8 +184,8 @@ contract RemovalFixTest is InviteSigner {
         vm.warp(block.timestamp + 1 days);
 
         vm.prank(_m(0));
-        community.proposeRemoveSteward();
-        uint256 voteId = community.activeStewardVoteId();
+        community.proposeRemoveHost();
+        uint256 voteId = community.activeHostVoteId();
         assertEq(community.voteTally(voteId).denominator, 7, "the host and six seasoned members");
         for (uint256 i; i < 6; i++) {
             _yes(voteId, _m(i));
@@ -193,8 +193,8 @@ contract RemovalFixTest is InviteSigner {
         vm.prank(host);
         community.castVote(voteId, false);
         vm.warp(block.timestamp + _hostWindow() + 1);
-        community.executeRemoveSteward();
-        assertTrue(community.stewardVacant(), "six of the seven who could vote removed the host");
+        community.executeRemoveHost();
+        assertTrue(community.hostVacant(), "six of the seven who could vote removed the host");
     }
 
     // =============================================================================
@@ -394,7 +394,7 @@ contract RemovalFixTest is InviteSigner {
         _joinRange(0, 4);
         _season();
         vm.prank(_m(0));
-        community.proposeRemoveSteward();
+        community.proposeRemoveHost();
 
         vm.expectRevert(E_HOST_VOTE_OPEN);
         vm.prank(host);
@@ -409,8 +409,8 @@ contract RemovalFixTest is InviteSigner {
         _joinRange(0, 4);
         _season();
         vm.prank(_m(0));
-        community.proposeRemoveSteward();
-        uint256 hostVote = community.activeStewardVoteId();
+        community.proposeRemoveHost();
+        uint256 hostVote = community.activeHostVoteId();
         for (uint256 i; i < 4; i++) {
             _yes(hostVote, _m(i));
         }
@@ -420,16 +420,16 @@ contract RemovalFixTest is InviteSigner {
         vm.prank(host);
         community.proposeRemoval(_m(3));
 
-        community.executeRemoveSteward();
+        community.executeRemoveHost();
         vm.prank(_m(0));
-        community.electSteward(_m(0));
-        uint256 election = community.activeStewardVoteId();
+        community.electHost(_m(0));
+        uint256 election = community.activeHostVoteId();
         for (uint256 i; i < 4; i++) {
             _yes(election, _m(i)); // 4 x 10,000 >= 6,667 x 5
         }
         vm.warp(block.timestamp + _hostWindow() + 1);
-        community.executeRemoveSteward();
-        assertEq(community.steward(), _m(0));
+        community.executeRemoveHost();
+        assertEq(community.host(), _m(0));
 
         vm.prank(_m(0));
         community.proposeRemoval(_m(3));
@@ -444,28 +444,28 @@ contract RemovalFixTest is InviteSigner {
         _joinRange(0, 4);
         _season();
         vm.prank(_m(0));
-        community.proposeRemoveSteward();
+        community.proposeRemoveHost();
         uint256 deadline = block.timestamp + _hostWindow();
         vm.warp(deadline + 1);
 
         vm.warp(deadline + config.removalReproposeCooldown() - 1);
         vm.expectRevert(E_HOST_VOTE_COOLDOWN);
         vm.prank(_m(1));
-        community.proposeRemoveSteward();
+        community.proposeRemoveHost();
 
         vm.warp(deadline + config.removalReproposeCooldown());
         vm.prank(_m(1));
-        community.proposeRemoveSteward();
-        uint256 second = community.activeStewardVoteId();
+        community.proposeRemoveHost();
+        uint256 second = community.activeHostVoteId();
         for (uint256 i; i < 4; i++) {
             _yes(second, _m(i));
         }
         vm.warp(block.timestamp + _hostWindow() + 1);
-        community.executeRemoveSteward();
+        community.executeRemoveHost();
 
         vm.prank(_m(0));
-        community.electSteward(_m(1)); // a passed host vote starts no cooldown
-        assertTrue(community.activeStewardVoteId() != second);
+        community.electHost(_m(1)); // a passed host vote starts no cooldown
+        assertTrue(community.activeHostVoteId() != second);
     }
 
     // =============================================================================
@@ -487,8 +487,8 @@ contract RemovalFixTest is InviteSigner {
         );
 
         vm.prank(_m(3));
-        community.proposeRemoveSteward();
-        uint256 hostVote = community.activeStewardVoteId();
+        community.proposeRemoveHost();
+        uint256 hostVote = community.activeHostVoteId();
         for (uint256 i; i < 7; i++) {
             _yes(hostVote, _m(i)); // 7 x 10,000 >= 6,667 x 8
         }
@@ -502,8 +502,8 @@ contract RemovalFixTest is InviteSigner {
         community.proposeRemoval(_m(6));
 
         vm.warp(block.timestamp + _hostWindow() + 1);
-        community.executeRemoveSteward();
-        assertTrue(community.stewardVacant(), "the host vote carried");
+        community.executeRemoveHost();
+        assertTrue(community.hostVacant(), "the host vote carried");
     }
 
     // =============================================================================

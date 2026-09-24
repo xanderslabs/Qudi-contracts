@@ -5,6 +5,7 @@ import {Test} from "forge-std/Test.sol";
 import {Seats} from "../src/Seats.sol";
 import {InviteSigner} from "./helpers/InviteSigner.sol";
 import {Config} from "../src/Config.sol";
+import {PauseGuard} from "../src/PauseGuard.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
 import {Community} from "../src/Community.sol";
 import {CommunityFactory} from "../src/CommunityFactory.sol";
@@ -52,6 +53,10 @@ contract LedgerForfeitTest is InviteSigner {
         core = new MockCreditCoreLeg(IERC20(address(usdc)));
         vm.prank(owner);
         config.setAddress(K.CREDIT_CORE, address(core));
+        // Every flag off: the money paths ask the guard before money moves in.
+        PauseGuard pauseGuard = new PauseGuard(address(this), address(this));
+        vm.prank(owner);
+        config.setAddress(K.PAUSE_GUARD, address(pauseGuard));
 
         address communityImpl = address(new Community());
         address ledgerImpl = address(new Ledger());

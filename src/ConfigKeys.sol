@@ -15,7 +15,7 @@ library ConfigKeys {
     bytes32 constant MINT_SPLIT_HOST = keccak256("qudi.MINT_SPLIT_HOST");
     bytes32 constant MINT_SPLIT_POOL = keccak256("qudi.MINT_SPLIT_POOL");
     bytes32 constant MINT_SPLIT_PROTOCOL = keccak256("qudi.MINT_SPLIT_PROTOCOL");
-    // The host removal vote (was STEWARD_VOTE_*). An election uses the community vote.
+    // The host removal vote. An election uses the community vote.
     bytes32 constant HOST_VOTE_THRESHOLD_BPS = keccak256("qudi.HOST_VOTE_THRESHOLD_BPS");
     bytes32 constant HOST_VOTE_WINDOW = keccak256("qudi.HOST_VOTE_WINDOW");
     bytes32 constant COMMUNITY_VOTE_THRESHOLD_BPS = keccak256("qudi.COMMUNITY_VOTE_THRESHOLD_BPS");
@@ -70,8 +70,13 @@ library ConfigKeys {
     bytes32 constant PHASE_MIN_TIME_ESTABLISHED = keccak256("qudi.PHASE_MIN_TIME_ESTABLISHED"); // +180 days
     // The debt half. CREDIT_CORE points `Community` at the singleton CreditCore, whose
     // `hasOpenTab` gates a seat forfeit. It is zero until a deployment sets it, which leaves
-    // that gate open with no other change. No payout path reads it.
+    // that gate open with no other change. It is also where every community's seat leg and yield
+    // leg are paid, so it is set once, at deploy, and never again.
     bytes32 constant CREDIT_CORE = keccak256("qudi.CREDIT_CORE");
+    // The live `PauseGuard`. An address key, so changing which guard is live goes through the
+    // timelock. Unset, every money contract that asks it reverts, so an unwired deployment takes
+    // no money in.
+    bytes32 constant PAUSE_GUARD = keccak256("qudi.PAUSE_GUARD");
     // The ceiling on any Venue's `maxRate`, the fastest its share price may rise, in annual bps.
     // Not a charge on an obligation: it bounds how fast savings value is recognised, and a member
     // still repays exactly the principal drawn.
@@ -85,8 +90,8 @@ library ConfigKeys {
     // still repays exactly the principal drawn.
     bytes32 constant QUALIFYING_CONTRIBUTOR_MIN_DEPOSIT = keccak256("qudi.QUALIFYING_CONTRIBUTOR_MIN_DEPOSIT");
     bytes32 constant QUALIFYING_CONTRIBUTOR_SEASONING = keccak256("qudi.QUALIFYING_CONTRIBUTOR_SEASONING");
-    // How long after a failed removal vote's deadline before the steward may propose removing the
-    // same member again. Without it a steward could
+    // How long after a failed removal vote's deadline before the host may propose removing the
+    // same member again. Without it a host could
     // re-propose each time a vote fails and keep a member frozen indefinitely.
     // The same cooldown also follows a failed shared vault payout request on that vault, and a failed
     // closure vote.

@@ -63,6 +63,7 @@ interface IConfig {
 
     /// Zero until a deployment sets it. `Community` reads it for the open-tab forfeit gate.
     function creditCore() external view returns (address);
+    function pauseGuard() external view returns (address);
     /// The share of every unlent paper balance a pool strategy deposit must leave as cash.
     function poolLiquidFloorBps() external view returns (uint16);
     /// The community dormancy windows, in seconds.

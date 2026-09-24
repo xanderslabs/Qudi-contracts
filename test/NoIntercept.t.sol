@@ -9,6 +9,7 @@ import {CreditCore} from "../src/CreditCore.sol";
 import {ICreditCore} from "../src/interfaces/ICreditCore.sol";
 import {IConfig} from "../src/interfaces/IConfig.sol";
 import {Config} from "../src/Config.sol";
+import {PauseGuard} from "../src/PauseGuard.sol";
 import {ConfigKeys} from "../src/ConfigKeys.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
 import {CommunityFactory} from "../src/CommunityFactory.sol";
@@ -84,6 +85,9 @@ contract NoInterceptTest is InviteSigner {
         usdc = new MockUSDC();
         registry = new ComplianceRegistry(screener);
         config = new Config(address(usdc), makeAddr("protocolTreasury"), address(registry));
+        // Every flag off: the money paths ask the guard before money moves in.
+        PauseGuard pauseGuard = new PauseGuard(address(this), address(this));
+        config.setAddress(ConfigKeys.PAUSE_GUARD, address(pauseGuard));
 
         address communityImpl = address(new Community());
         address ledgerImpl = address(new Ledger());

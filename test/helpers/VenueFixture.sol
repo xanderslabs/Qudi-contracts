@@ -5,6 +5,8 @@ import {Test} from "forge-std/Test.sol";
 import {Venue} from "../../src/Venue.sol";
 import {IVenue} from "../../src/interfaces/IVenue.sol";
 import {Config} from "../../src/Config.sol";
+import {PauseGuard} from "../../src/PauseGuard.sol";
+import {ConfigKeys as K} from "../../src/ConfigKeys.sol";
 import {IConfig} from "../../src/interfaces/IConfig.sol";
 import {ComplianceRegistry} from "../../src/ComplianceRegistry.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
@@ -39,6 +41,10 @@ abstract contract VenueFixture is Test {
         address screener = address(new ComplianceRegistry(address(this)));
         vm.prank(owner); // Config takes its owner from msg.sender
         config = new Config(address(usdc), treasury, screener);
+        // Every flag off: the money paths ask the guard before money moves in.
+        PauseGuard pauseGuard = new PauseGuard(address(this), address(this));
+        vm.prank(owner);
+        config.setAddress(K.PAUSE_GUARD, address(pauseGuard));
         factory = new VenueFactoryStub();
         factory.register(ledger);
         vault = new Venue(usdc, IConfig(address(config)), address(factory), owner, "Qudi Core", "qCORE");

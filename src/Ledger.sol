@@ -8,6 +8,7 @@ import {ILedger} from "./interfaces/ILedger.sol";
 import {ICommunityInit} from "./interfaces/ICommunityInit.sol";
 import {IVenue} from "./interfaces/IVenue.sol";
 import {IConfig} from "./interfaces/IConfig.sol";
+import {IPauseGuard} from "./interfaces/IPauseGuard.sol";
 import {ICommunity} from "./interfaces/ICommunity.sol";
 import {ICommunityFactory} from "./interfaces/ICommunityFactory.sol";
 import {IComplianceRegistry} from "./interfaces/IComplianceRegistry.sol";
@@ -440,7 +441,7 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
     function createVault(VaultParams calldata p) external override returns (uint256 vaultId) {
         if (communityClosed) revert CommunityIsClosed();
         if (p.shared) {
-            if (msg.sender != community.steward()) revert NotHost();
+            if (msg.sender != community.host()) revert NotHost();
         } else if (!community.isMember(msg.sender)) {
             revert NotMember();
         }
@@ -513,7 +514,7 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
     function closeVault(uint256 vaultId) external override {
         Vault storage v = _liveVault(vaultId);
         if (v.shared) {
-            if (msg.sender != community.steward()) revert NotHost();
+            if (msg.sender != community.host()) revert NotHost();
         } else if (msg.sender != v.owner) {
             revert NotVaultOwner();
         }
@@ -543,6 +544,8 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
     /// screener-blocked account. A retired venue takes no new vaults, but its existing vaults still
     /// take deposits.
     function deposit(uint256 vaultId, uint256 amount) external override {
+        // The pause stops money going in. Every way out stays open, so a pause traps nothing.
+        if (IPauseGuard(config.pauseGuard()).paused(IPauseGuard.Flag.DEPOSITS)) revert IPauseGuard.Paused();
         if (communityClosed) revert CommunityIsClosed();
         if (amount == 0) revert ZeroAmount();
         Vault storage v = _liveVault(vaultId);
@@ -746,7 +749,7 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
         if (communityClosed) revert CommunityIsClosed();
         Vault storage v = _liveVault(vaultId);
         if (!v.shared) revert PersonalVaultHasNoProposals();
-        if (msg.sender != community.steward()) revert NotHost();
+        if (msg.sender != community.host()) revert NotHost();
         if (block.timestamp < v.lockedUntil) revert VaultLocked();
         if (recipient == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();

@@ -23,13 +23,13 @@ import {InviteSigner} from "../helpers/InviteSigner.sol";
 /// no-op (never revert) on a failed precondition, so the fuzzer can chain deep call
 /// sequences without every call reverting the moment one actor is off cooldown/eligibility/etc.
 ///
-/// Ghost-state design note: the fixture's founding steward (`originalSteward`) gets its seat
+/// Ghost-state design note: the fixture's founding host (`originalHost`) gets its seat
 /// for free in Community.initialize(), outside the handler's 8-actor pool, and is never
-/// re-added to the ghost member set by any handler call. So "is the founding steward still
-/// seated" is tracked directly via community.seatStateOf(originalSteward) rather than by mirroring
-/// the currently-active steward() role, which can move to one of the 8 actors via
-/// electSteward() after a removal - at that point the actor is already in the ghost set from
-/// their own join(), and double counting a "+1 for current steward" would be wrong.
+/// re-added to the ghost member set by any handler call. So "is the founding host still
+/// seated" is tracked directly via community.seatStateOf(originalHost) rather than by mirroring
+/// the currently-active host() role, which can move to one of the 8 actors via
+/// electHost() after a removal - at that point the actor is already in the ghost set from
+/// their own join(), and double counting a "+1 for current host" would be wrong.
 ///
 /// A seat is never burned. It is Active, Suspended (an executed removal vote) or Left
 /// (forfeit), and the last two are final. `ghostState` mirrors the one write each handler call
@@ -45,7 +45,7 @@ contract SeatHandler is InviteSigner {
     MockUSDC public usdc;
     MockVault public vault;
     MockCreditCoreLeg public core;
-    address public originalSteward;
+    address public originalHost;
     address public owner;
 
     /// 24, not 8: each actor can mint here once in its life, and a
@@ -58,7 +58,7 @@ contract SeatHandler is InviteSigner {
     EnumerableSet.AddressSet internal _members;
 
     uint256 public sumMinted;
-    uint256 public sumToSteward;
+    uint256 public sumToHost;
     uint256 public sumToPool;
     uint256 public sumToTreasury;
     address public treasury;
@@ -94,7 +94,7 @@ contract SeatHandler is InviteSigner {
         MockUSDC usdc_,
         MockVault vault_,
         MockCreditCoreLeg core_,
-        address steward_,
+        address host_,
         address treasury_,
         address owner_
     ) {
@@ -104,7 +104,7 @@ contract SeatHandler is InviteSigner {
         usdc = usdc_;
         vault = vault_;
         core = core_;
-        originalSteward = steward_;
+        originalHost = host_;
         treasury = treasury_;
         owner = owner_;
         for (uint256 i = 0; i < actors.length; i++) {
@@ -151,20 +151,20 @@ contract SeatHandler is InviteSigner {
         vm.prank(actor);
         usdc.approve(address(community), price);
 
-        address stewardAtCall = community.steward();
-        uint256 stewardBefore = usdc.balanceOf(stewardAtCall);
+        address hostAtCall = community.host();
+        uint256 hostBefore = usdc.balanceOf(hostAtCall);
         uint256 poolBefore = core.totalLegs();
         uint256 treasuryBefore = usdc.balanceOf(treasury);
 
         (address inviteKey, bytes memory keySig) = _signedInvite(actor);
         vm.prank(actor);
         try community.join(inviteKey, keySig) {
-            uint256 stewardAfter = usdc.balanceOf(stewardAtCall);
+            uint256 hostAfter = usdc.balanceOf(hostAtCall);
             uint256 poolAfter = core.totalLegs();
             uint256 treasuryAfter = usdc.balanceOf(treasury);
 
             sumMinted += price;
-            sumToSteward += stewardAfter - stewardBefore;
+            sumToHost += hostAfter - hostBefore;
             sumToPool += poolAfter - poolBefore;
             sumToTreasury += treasuryAfter - treasuryBefore;
             _members.add(actor);
@@ -189,16 +189,16 @@ contract SeatHandler is InviteSigner {
     }
 
     function _signedInvite(address actor) internal returns (address inviteKey, bytes memory keySig) {
-        if (community.stewardVacant()) return (inviteKey, keySig);
+        if (community.hostVacant()) return (inviteKey, keySig);
         return _inviteFor(address(community), actor);
     }
 
-    // The steward cannot forfeit (must be removed by vote first). A frozen member is sent
+    // The host cannot forfeit (must be removed by vote first). A frozen member is sent
     // through anyway: forfeit() must refuse them, and a landing would set the flag.
     function forfeit(uint256 actorSeed) external {
         address actor = _pickActor(actorSeed);
         if (community.seatStateOf(actor) != ICommunity.SeatState.Active) return;
-        if (actor == community.steward()) return;
+        if (actor == community.host()) return;
         if (core.hasOpenTab(actor)) return;
         tries["forfeit"]++;
         bool frozen = community.isFrozen(actor);
@@ -212,7 +212,7 @@ contract SeatHandler is InviteSigner {
         } catch {}
     }
 
-    // ---- card price: propose (steward) / vote (members) / execute (permissionless) ----
+    // ---- card price: propose (host) / vote (members) / execute (permissionless) ----
 
     // config is not itself a fuzz target (only `owner` may call Config.set(), and no
     // handler-driven actor is the owner), so without this the floor is pinned at its
@@ -232,22 +232,22 @@ contract SeatHandler is InviteSigner {
     }
 
     function proposeSeatPrice(uint256 priceSeed) external {
-        address steward = community.steward();
-        if (steward == address(0)) return;
+        address host = community.host();
+        if (host == address(0)) return;
         uint256 floor = config.seatPriceFloor();
         uint256 ceiling = config.seatPriceCeiling();
         if (floor > ceiling) return;
         uint256 price = bound(priceSeed, floor, ceiling);
 
         tries["proposeSeatPrice"]++;
-        vm.prank(steward);
+        vm.prank(host);
         try community.proposeSeatPrice(price) {
             lands["proposeSeatPrice"]++;
         } catch {}
     }
 
     /// One ballot on `voteId`, from the first member in pool order from `seed` whose ballot lands,
-    /// then the founding steward. A vote needs three seasoned yes votes and a
+    /// then the founding host. A vote needs three seasoned yes votes and a
     /// threshold over the seasoned seats, and ballots from actors
     /// picked at random were mostly refused (already voted, unseasoned), so no price vote or host
     /// vote ever carried and the paths behind them compared 0 to 0.
@@ -260,8 +260,8 @@ contract SeatHandler is InviteSigner {
                 return true;
             } catch {}
         }
-        if (!community.isMember(originalSteward)) return false;
-        vm.prank(originalSteward);
+        if (!community.isMember(originalHost)) return false;
+        vm.prank(originalHost);
         try community.castVote(voteId, support) {
             return true;
         } catch {}
@@ -286,48 +286,48 @@ contract SeatHandler is InviteSigner {
         } catch {}
     }
 
-    // ---- steward removal / election: propose (member) / vote (members) / execute
+    // ---- host removal / election: propose (member) / vote (members) / execute
     // (permissionless), with election reachable only once the role is vacant ----
 
-    function proposeRemoveSteward(uint256 actorSeed) external {
+    function proposeRemoveHost(uint256 actorSeed) external {
         address actor = _pickActor(actorSeed);
         if (!community.isMember(actor)) return;
 
-        tries["proposeRemoveSteward"]++;
+        tries["proposeRemoveHost"]++;
         vm.prank(actor);
-        try community.proposeRemoveSteward() {
-            lands["proposeRemoveSteward"]++;
+        try community.proposeRemoveHost() {
+            lands["proposeRemoveHost"]++;
         } catch {}
     }
 
-    function voteOnSteward(uint256 actorSeed, bool support) external {
-        uint256 voteId = community.activeStewardVoteId();
+    function voteOnHost(uint256 actorSeed, bool support) external {
+        uint256 voteId = community.activeHostVoteId();
         if (voteId == 0) return;
-        tries["voteOnSteward"]++;
-        if (_ballot(voteId, actorSeed, support)) lands["voteOnSteward"]++;
+        tries["voteOnHost"]++;
+        if (_ballot(voteId, actorSeed, support)) lands["voteOnHost"]++;
     }
 
     // Only reachable once the role is vacant, by a passed removal vote or a resignation. A
     // failed election leaves its id in the slot, so the handler does not skip on a non-zero id:
     // the contract refuses a live one itself, and a community whose host resigned before anyone
     // seasoned would otherwise never get another.
-    function electSteward(uint256 candidateSeed) external {
-        if (!community.stewardVacant()) return;
+    function electHost(uint256 candidateSeed) external {
+        if (!community.hostVacant()) return;
         uint256 n = _members.length();
         if (n == 0) return;
         address candidate = _members.at(candidateSeed % n);
 
-        tries["electSteward"]++;
+        tries["electHost"]++;
         vm.prank(candidate);
-        try community.electSteward(candidate) {
-            lands["electSteward"]++;
+        try community.electHost(candidate) {
+            lands["electHost"]++;
         } catch {}
     }
 
-    function executeRemoveSteward() external {
-        tries["executeRemoveSteward"]++;
-        try community.executeRemoveSteward() {
-            lands["executeRemoveSteward"]++;
+    function executeRemoveHost() external {
+        tries["executeRemoveHost"]++;
+        try community.executeRemoveHost() {
+            lands["executeRemoveHost"]++;
         } catch {}
     }
 
@@ -335,12 +335,12 @@ contract SeatHandler is InviteSigner {
     // (permissionless) / cancel (host), and resignation (host) ----
 
     function nominateSuccessor(uint256 nomineeSeed) external {
-        address steward = community.steward();
-        if (steward == address(0)) return;
+        address host = community.host();
+        if (host == address(0)) return;
         uint256 n = _members.length();
         if (n == 0) return;
         tries["nominateSuccessor"]++;
-        vm.prank(steward);
+        vm.prank(host);
         try community.nominateSuccessor(_members.at(nomineeSeed % n)) {
             lands["nominateSuccessor"]++;
         } catch {}
@@ -357,12 +357,12 @@ contract SeatHandler is InviteSigner {
     }
 
     /// One objection, from the first member in pool order from `seed` whose objection lands,
-    /// then the founding steward, for the reason `_ballot` gives.
+    /// then the founding host, for the reason `_ballot` gives.
     function objectToHandover(uint256 seed) external {
         if (community.pendingHandover().acceptedAt == 0) return;
         tries["objectToHandover"]++;
         for (uint256 i; i <= ACTORS; i++) {
-            address who = i == ACTORS ? originalSteward : actors[(seed % ACTORS + i) % ACTORS];
+            address who = i == ACTORS ? originalHost : actors[(seed % ACTORS + i) % ACTORS];
             if (!community.isMember(who)) continue;
             vm.prank(who);
             try community.objectToHandover() {
@@ -380,37 +380,37 @@ contract SeatHandler is InviteSigner {
     }
 
     function cancelNomination() external {
-        address steward = community.steward();
-        if (steward == address(0)) return;
+        address host = community.host();
+        if (host == address(0)) return;
         tries["cancelNomination"]++;
-        vm.prank(steward);
+        vm.prank(host);
         try community.cancelNomination() {
             lands["cancelNomination"]++;
         } catch {}
     }
 
     function resignHost() external {
-        address steward = community.steward();
-        if (steward == address(0)) return;
+        address host = community.host();
+        if (host == address(0)) return;
         tries["resignHost"]++;
-        vm.prank(steward);
+        vm.prank(host);
         try community.resignHost() {
             lands["resignHost"]++;
         } catch {}
     }
 
-    // ---- member removal: propose (steward only) / vote (members) / execute (permissionless),
+    // ---- member removal: propose (host only) / vote (members) / execute (permissionless),
     // per-target vote slot ----
 
     function proposeRemoval(uint256 targetSeed) external {
-        address steward = community.steward();
-        if (steward == address(0)) return;
+        address host = community.host();
+        if (host == address(0)) return;
         address target = _pickActor(targetSeed);
         if (community.seatStateOf(target) != ICommunity.SeatState.Active) return;
-        if (target == steward) return;
+        if (target == host) return;
 
         tries["proposeRemoval"]++;
-        vm.prank(steward);
+        vm.prank(host);
         try community.proposeRemoval(target) {
             lands["proposeRemoval"]++;
         } catch {}
@@ -468,7 +468,7 @@ contract SeatsInvariantTest is StdInvariant, Test {
 
     address owner = makeAddr("owner");
     address treasury = makeAddr("treasury");
-    address steward = makeAddr("steward");
+    address host = makeAddr("host");
 
     /// This test contract is the community's factory (`factory: address(this)` below), so it
     /// answers the two factory reads the community makes, as `test/Community.t.sol` does:
@@ -485,7 +485,7 @@ contract SeatsInvariantTest is StdInvariant, Test {
     function setUp() public {
         usdc = new MockUSDC();
         ComplianceRegistry registry = new ComplianceRegistry(address(this));
-        vm.prank(steward);
+        vm.prank(host);
         registry.attest(1);
         vm.prank(owner);
         config = new Config(address(usdc), treasury, address(registry));
@@ -506,7 +506,7 @@ contract SeatsInvariantTest is StdInvariant, Test {
             seats: address(seats),
             community: address(community),
             vault: address(vault),
-            creator: steward,
+            creator: host,
             seatPrice: 50e6,
             name: "Test Community",
             poolType: VenueIds.CORE
@@ -514,7 +514,7 @@ contract SeatsInvariantTest is StdInvariant, Test {
         community.initialize(w);
         vault.initialize(w);
 
-        handler = new SeatHandler(community, seats, config, usdc, vault, core, steward, treasury, owner);
+        handler = new SeatHandler(community, seats, config, usdc, vault, core, host, treasury, owner);
 
         // Every actor the handler may prank into join() has self-attested. The
         // handler still exercises the blocked path via the compliance registry.
@@ -541,28 +541,28 @@ contract SeatsInvariantTest is StdInvariant, Test {
                 assertEq(seats.getApproved(tokenId), address(0));
             }
         }
-        assertEq(seats.balanceOf(steward), 1);
-        assertEq(seats.getApproved(community.tokenOf(steward)), address(0));
+        assertEq(seats.balanceOf(host), 1);
+        assertEq(seats.getApproved(community.tokenOf(host)), address(0));
     }
 
     function invariant_splitConserves() public view {
-        // The steward leg lands in the steward's wallet balance; sumToSteward is a ghost
+        // The host leg lands in the host's wallet balance; sumToHost is a ghost
         // accumulator of that wallet-balance delta per join(), not a vault credit. The three
         // legs must still sum to every price ever paid, to the wei.
-        assertEq(handler.sumToSteward() + handler.sumToPool() + handler.sumToTreasury(), handler.sumMinted());
+        assertEq(handler.sumToHost() + handler.sumToPool() + handler.sumToTreasury(), handler.sumMinted());
     }
 
     function invariant_memberCountMatchesGhost() public view {
-        // seats.memberCount() == the Active actors (+1 for the founding steward's seat, which no
+        // seats.memberCount() == the Active actors (+1 for the founding host's seat, which no
         // handler forfeits or targets). Frozen members are Active and are counted.
         uint256 expected = handler.memberSetLength();
-        if (community.seatStateOf(steward) == ICommunity.SeatState.Active) expected += 1;
+        if (community.seatStateOf(host) == ICommunity.SeatState.Active) expected += 1;
         assertEq(community.memberCount(), expected);
     }
 
-    function invariant_stewardIsMemberOrVacant() public view {
-        // stewardVacant() || isMember(steward()).
-        assertTrue(community.stewardVacant() || community.isMember(community.steward()));
+    function invariant_hostIsMemberOrVacant() public view {
+        // hostVacant() || isMember(host()).
+        assertTrue(community.hostVacant() || community.isMember(community.host()));
     }
 
     /// A handover past acceptance and a vote to remove the host are never live at once, so a
@@ -575,10 +575,10 @@ contract SeatsInvariantTest is StdInvariant, Test {
     /// A vote to remove the host is open until it fails at its deadline, or until it passes and
     /// executes, which clears the slot.
     function _hostRemovalOpen() internal view returns (bool) {
-        uint256 id = community.activeStewardVoteId();
+        uint256 id = community.activeHostVoteId();
         if (id == 0) return false;
         ICommunity.VoteTally memory t = community.voteTally(id);
-        if (t.kind != ICommunity.VoteKind.StewardRemoval) return false;
+        if (t.kind != ICommunity.VoteKind.HostRemoval) return false;
         if (block.timestamp <= t.deadline) return true;
         return t.yes >= t.minYes && uint256(t.yes) * 10_000 >= uint256(t.thresholdBps) * t.denominator;
     }
@@ -598,7 +598,7 @@ contract SeatsInvariantTest is StdInvariant, Test {
     function invariant_seatsAndCommunityAgree() public view {
         uint256 n = handler.ACTORS();
         for (uint256 i = 0; i <= n; i++) {
-            address who = i == n ? steward : handler.actors(i);
+            address who = i == n ? host : handler.actors(i);
             uint256 tokenId = seats.seatOf(address(community), who);
             assertEq(community.tokenOf(who), tokenId, "the token id");
             if (tokenId == 0) {
@@ -647,7 +647,7 @@ contract SeatsInvariantTest is StdInvariant, Test {
         invariant_soulbound();
         invariant_splitConserves();
         invariant_memberCountMatchesGhost();
-        invariant_stewardIsMemberOrVacant();
+        invariant_hostIsMemberOrVacant();
         invariant_neverALiveHandoverAndAHostRemovalVote();
         invariant_priceInRangeAtExecution();
         invariant_seatsAndCommunityAgree();
@@ -671,8 +671,8 @@ contract SeatsInvariantTest is StdInvariant, Test {
     /// a vote to remove the host proposed while a handover is live must end the handover.
     function test_sequence_aHostRemovalVoteEndsALiveHandover() public {
         _acceptedHandover();
-        handler.proposeRemoveSteward(1);
-        assertGt(community.activeStewardVoteId(), 0, "the removal vote is open");
+        handler.proposeRemoveHost(1);
+        assertGt(community.activeHostVoteId(), 0, "the removal vote is open");
         _assertAllInvariants();
     }
 
@@ -713,13 +713,13 @@ contract SeatsInvariantTest is StdInvariant, Test {
             } else if (pick == 9) {
                 handler.executeSeatPriceVote();
             } else if (pick < 12) {
-                handler.proposeRemoveSteward(a1);
+                handler.proposeRemoveHost(a1);
             } else if (pick < 18) {
-                handler.voteOnSteward(a1, yes);
+                handler.voteOnHost(a1, yes);
             } else if (pick == 18) {
-                handler.electSteward(a1);
+                handler.electHost(a1);
             } else if (pick == 19) {
-                handler.executeRemoveSteward();
+                handler.executeRemoveHost();
             } else if (pick < 22) {
                 handler.proposeRemoval(a1);
             } else if (pick < 28) {
@@ -753,10 +753,10 @@ contract SeatsInvariantTest is StdInvariant, Test {
             "proposeSeatPrice",
             "voteOnPrice",
             "executeSeatPriceVote",
-            "proposeRemoveSteward",
-            "voteOnSteward",
-            "electSteward",
-            "executeRemoveSteward",
+            "proposeRemoveHost",
+            "voteOnHost",
+            "electHost",
+            "executeRemoveHost",
             "proposeRemoval",
             "voteOnRemoval",
             "executeRemoval",
@@ -778,11 +778,11 @@ contract SeatsInvariantTest is StdInvariant, Test {
         assertGt(handler.lands("proposeRemoval"), 0, "removal proposals landed");
         assertGt(handler.lands("voteOnRemoval"), 0, "removal ballots landed");
         assertGt(handler.lands("executeRemoval"), 0, "removals executed");
-        // The vote paths behind the price floor and the steward invariant, which an
+        // The vote paths behind the price floor and the host invariant, which an
         // earlier replay never reached.
         assertGt(handler.lands("executeSeatPriceVote"), 0, "a price vote carried");
-        assertGt(handler.lands("executeRemoveSteward"), 0, "a host vote carried");
-        assertGt(handler.lands("electSteward"), 0, "an election started");
+        assertGt(handler.lands("executeRemoveHost"), 0, "a host vote carried");
+        assertGt(handler.lands("electHost"), 0, "an election started");
         // The handover paths, each landed at least once.
         assertGt(handler.lands("nominateSuccessor"), 0, "nominations landed");
         assertGt(handler.lands("acceptNomination"), 0, "acceptances landed");

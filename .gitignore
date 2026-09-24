@@ -1,0 +1,18 @@
+# Foundry build output and deploy records
+out/
+cache/
+broadcast/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Mutation runner: the temp file an atomic write leaves if a run is killed mid-write,
+# and run logs redirected from its output
+*.mutation-tmp
+*.log
+
+# OS and editor files
+.DS_Store
+Thumbs.db

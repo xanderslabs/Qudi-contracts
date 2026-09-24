@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+      - run: forge --version
+      - run: bash script/check-config-literals.sh
+      - run: bash script/check-config-key-enumeration.sh
+      - run: bash script/check-config-first-access-floor.sh
+      - run: bash script/check-contract-size-margin.sh
+      - run: bash script/check-no-internal-ids.sh
+      - run: forge build --sizes
+      # Enumerate the exact test set CI runs, so a local-versus-CI count gap can be diffed by
+      # name rather than guessed.
+      - run: forge test --list | sort
+      - run: forge test

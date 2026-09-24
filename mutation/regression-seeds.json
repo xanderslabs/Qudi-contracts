@@ -1,0 +1,8 @@
+[
+  {
+    "seed": "0x328259ab689b1f44f21fb11f07052bbc9dda6072a50f730065f318a9aceade52",
+    "found": "2026-09-08",
+    "found_by": "review",
+    "note": "invariant_feeSharesMatchSplit failed reproducibly on this seed, on both the default and deep profiles, against assertApproxEqRel(feeValueMinted, expected, 1e15): a 0.1% relative tolerance on a quantity small enough that integer rounding dominates. Fixed by rewriting the invariant to the directional property. Pre-existing: Venue.sol and the invariant file both predate the split work; not a defect introduced by it."
+  }
+]

@@ -4,10 +4,11 @@ pragma solidity 0.8.30;
 /// Deploys communities as clone sets and answers which addresses are legitimate community
 /// contracts. OpenTabs and Venue trust only addresses this registry vouches for.
 interface ICommunityFactory {
-    /// Clones both of a community's contracts, seats and its one ledger,
-    /// and registers both. Returns the seats address; `ledgerOf` answers the other.
+    /// Clones both of a community's contracts, the community and its one ledger, registers both,
+    /// and registers the community with `Seats`. Returns the community's address; `ledgerOf`
+    /// answers the other. The seat price must be from `SEAT_PRICE_FLOOR` to `SEAT_PRICE_CEILING`.
     function createCommunity(string calldata name, uint256 seatPrice) external returns (address community);
-    /// The community's one ledger; 0 if `seats` is not one this factory minted.
+    /// The community's one ledger; 0 if `community` is not one this factory created.
     function ledgerOf(address community) external view returns (address);
     /// Qudi's shared `Venue` for a tier, indexed by the PoolTypes constant. This is the whole
     /// of what decides which tiers exist, and a ledger reads it to resolve the tier
@@ -22,7 +23,7 @@ interface ICommunityFactory {
     function isCommunity(address vault) external view returns (bool);
     function isCommunityContract(address any) external view returns (bool);
     /// The community a registered community contract belongs to, **plus one**; 0 means unregistered.
-    /// Same 1-based convention as the internal `seatsIndex`, and for the same reason: community 0
+    /// Same 1-based convention as the internal `communityIndex`, and for the same reason: community 0
     /// is a real community, so a plain id cannot double as "not found". `CreditCore`'s
     /// `receiveCommunityLeg` gate is the caller: the callee decides which community a
     /// caller may top up, never the caller.
@@ -33,4 +34,5 @@ interface ICommunityFactory {
     event CommunityCreated(uint256 indexed communityId, address indexed creator, address community, address ledger);
 
     error SeatPriceBelowFloor();
+    error SeatPriceAboveCeiling();
 }

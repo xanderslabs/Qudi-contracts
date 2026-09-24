@@ -2,6 +2,8 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {Seats} from "../src/Seats.sol";
+import {InviteSigner} from "./helpers/InviteSigner.sol";
 import {Config} from "../src/Config.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
 import {Community} from "../src/Community.sol";
@@ -23,7 +25,7 @@ import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 ///
 /// Over the real factory, because "a tier no host ever opened" is only a meaningful phrase if the
 /// factory is the real one that used to require opening it.
-contract LedgerNoTierGateTest is Test {
+contract LedgerNoTierGateTest is InviteSigner {
     MockUSDC usdc;
     Config config;
     ComplianceRegistry registry;
@@ -36,7 +38,7 @@ contract LedgerNoTierGateTest is Test {
 
     address owner = makeAddr("owner");
     address treasury = makeAddr("treasury");
-    address host = makeAddr("host");
+    address host = _keyed("host");
     address ada = makeAddr("ada");
 
     function setUp() public {
@@ -49,16 +51,17 @@ contract LedgerNoTierGateTest is Test {
         vm.prank(owner);
         config.setAddress(K.CREDIT_CORE, address(core));
 
-        address seatsImpl = address(new Community());
+        address communityImpl = address(new Community());
         address ledgerImpl = address(new Ledger());
 
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 3);
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
         address[3] memory poolAddrs;
         for (uint8 t = 0; t < 3; t++) {
             pools[t] = new Venue(usdc, IConfig(address(config)), predicted, t, owner, "Qudi", "q");
             poolAddrs[t] = address(pools[t]);
         }
-        factory = new CommunityFactory(address(config), seatsImpl, ledgerImpl, poolAddrs);
+        Seats seats = new Seats(predicted);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, poolAddrs);
         assertEq(address(factory), predicted);
 
         for (uint8 t = 0; t < 3; t++) {
@@ -80,7 +83,7 @@ contract LedgerNoTierGateTest is Test {
             usdc.mint(people[i], 1_000_000e6);
         }
 
-        uint256 seatPrice = config.seatPriceFloor();
+        uint256 seatPrice = 50e6;
         vm.prank(host);
         community = Community(factory.createCommunity("No Gate Community", seatPrice));
         ledger = Ledger(factory.ledgerOf(address(community)));
@@ -88,7 +91,7 @@ contract LedgerNoTierGateTest is Test {
         vm.startPrank(ada);
         usdc.approve(address(community), type(uint256).max);
         usdc.approve(address(ledger), type(uint256).max);
-        community.join();
+        _invitedJoin(address(community), ada);
         vm.stopPrank();
         vm.prank(host);
         usdc.approve(address(ledger), type(uint256).max);
@@ -174,7 +177,7 @@ contract LedgerNoTierGateTest is Test {
         vm.prank(other);
         registry.attest(1);
         usdc.mint(other, 1_000_000e6);
-        uint256 seatPrice = config.seatPriceFloor();
+        uint256 seatPrice = 50e6;
         vm.prank(other);
         Community community2 = Community(factory.createCommunity("Second", seatPrice));
         Ledger ledger2 = Ledger(factory.ledgerOf(address(community2)));

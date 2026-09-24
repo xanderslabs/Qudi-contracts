@@ -5,6 +5,12 @@ pragma solidity 0.8.30;
 /// USDC has no key: it is a constructor immutable with no setter.
 library ConfigKeys {
     bytes32 constant SEAT_PRICE_FLOOR = keccak256("qudi.SEAT_PRICE_FLOOR");
+    bytes32 constant SEAT_PRICE_CEILING = keccak256("qudi.SEAT_PRICE_CEILING");
+    // The most Active seats a community holds. One cap for every community, set by Qudi.
+    bytes32 constant MEMBER_CAP = keccak256("qudi.MEMBER_CAP");
+    // The largest invite a host can sign: its uses, and its lifetime from issue to expiry.
+    bytes32 constant INVITE_MAX_USES = keccak256("qudi.INVITE_MAX_USES");
+    bytes32 constant INVITE_MAX_TTL = keccak256("qudi.INVITE_MAX_TTL");
     // Seat-fee split: 40% Community Credit Account / 30% host / 30% protocol.
     bytes32 constant MINT_SPLIT_HOST = keccak256("qudi.MINT_SPLIT_HOST");
     bytes32 constant MINT_SPLIT_POOL = keccak256("qudi.MINT_SPLIT_POOL");

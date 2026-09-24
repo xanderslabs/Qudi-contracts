@@ -2,6 +2,8 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {Seats} from "../src/Seats.sol";
+import {InviteSigner} from "./helpers/InviteSigner.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {ICreditCore} from "../src/interfaces/ICreditCore.sol";
@@ -29,7 +31,7 @@ import {CreditStandingHarness} from "./helpers/CreditStandingHarness.sol";
 /// `te_earned`, attributed yield) are primed through the harness pokes, which write the
 /// same storage the Standing paths write. The harness's seam overrides only take effect when
 /// a test sets them; unset, every seam falls through to the real debt ledger.
-contract CreditCoreDebtTest is Test {
+contract CreditCoreDebtTest is InviteSigner {
     MockUSDC usdc;
     Config config;
     ComplianceRegistry registry;
@@ -45,6 +47,8 @@ contract CreditCoreDebtTest is Test {
     address member = makeAddr("member");
     address member2 = makeAddr("member2");
     address other = makeAddr("other");
+    /// Founds every community here. A keyed account, because the host signs each invite.
+    address creator = _keyed("creator");
 
     // Empty book, 1 community: required = max(2000e6, 10_000e6) + 0 + 0 + 0 + 100_000e6.
     uint256 constant BASE_REQUIRED = 110_000e6;
@@ -56,9 +60,10 @@ contract CreditCoreDebtTest is Test {
         usdc = new MockUSDC();
         registry = new ComplianceRegistry(screener);
         config = new Config(address(usdc), treasury, address(registry));
-        factory = new CommunityFactory(
-            address(config), address(new Community()), address(new MockCommunityModule()), _dummyPools()
-        );
+        address communityImpl = address(new Community());
+        address ledgerImpl = address(new MockCommunityModule());
+        Seats seats = new Seats(vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1));
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, _dummyPools());
         standing = new CreditStandingHarness(IConfig(address(config)), address(factory), governance);
         cc = new CreditCoreHarness(
             IERC20(address(usdc)),
@@ -79,8 +84,9 @@ contract CreditCoreDebtTest is Test {
         // Treasury funded so one community's allocation plus the stress floor leaves a
         // comfortable draw cushion; the retained-capital gate is tested separately by consuming it.
         _fund(300_000e6);
-        registry.attest(1); // the test contract is the founding creator (self-attestation)
-        factory.createCommunity("Debt Community", SEAT);
+        vm.prank(creator);
+        registry.attest(1);
+        _createCommunity("Debt Community");
         _allocate(0, ALLOCATION);
 
         vm.warp(2000 days);
@@ -94,8 +100,13 @@ contract CreditCoreDebtTest is Test {
         }
     }
 
-    function _seats(uint256 communityId) internal view returns (address community) {
+    function _community(uint256 communityId) internal view returns (address community) {
         community = factory.communityAt(communityId);
+    }
+
+    function _createCommunity(string memory name) internal returns (address community) {
+        vm.prank(creator);
+        community = factory.createCommunity(name, SEAT);
     }
 
     function _fund(uint256 amount) internal {
@@ -118,8 +129,8 @@ contract CreditCoreDebtTest is Test {
         registry.attest(1);
         usdc.mint(who, SEAT);
         vm.startPrank(who);
-        usdc.approve(address(_seats(0)), SEAT);
-        Community(_seats(0)).join();
+        usdc.approve(address(_community(0)), SEAT);
+        _invitedJoin(_community(0), who);
         vm.stopPrank();
         vm.warp(block.timestamp + 14 days + 1);
     }
@@ -288,7 +299,7 @@ contract CreditCoreDebtTest is Test {
     /// budget; no existing test creates a community small enough to reach this branch, since the
     /// fixture's community 0 is always allocated well above `sub`.
     function test_communityImpactBudget_floorsAtZeroBelowTheOperatingBuffer() public {
-        factory.createCommunity("Tiny Community", SEAT);
+        _createCommunity("Tiny Community");
         _allocate(1, 1000e6); // below OPERATING_BUFFER_PER_COMMUNITY (2000e6) + MIN_LENDABLE (50e6)
         assertEq(cc.communityImpactBudget(1), 0, "a community below its own operating buffer has no liquid budget");
     }
@@ -324,13 +335,15 @@ contract CreditCoreDebtTest is Test {
         cc.draw(0, 50e6, AGREEMENT);
     }
 
-    /// The real removal path: proposed by the steward (this contract, the founding creator),
+    /// The real removal path: proposed by the steward (`creator`, the founding host),
     /// carried at the community threshold, and executed once the window closes. Nothing here is
     /// a harness poke, so the gate above is proved against the state the community itself sets.
     function _removeByVote(address who) internal {
-        Community community = Community(_seats(0));
+        Community community = Community(_community(0));
+        vm.prank(creator);
         community.proposeRemoval(who);
         uint256 voteId = community.activeRemovalVoteId(who);
+        vm.prank(creator);
         community.castVote(voteId, true);
         vm.prank(member2);
         community.castVote(voteId, true);
@@ -347,8 +360,8 @@ contract CreditCoreDebtTest is Test {
         registry.attest(1);
         usdc.mint(member, SEAT);
         vm.startPrank(member);
-        usdc.approve(address(_seats(0)), SEAT);
-        Community(_seats(0)).join();
+        usdc.approve(address(_community(0)), SEAT);
+        _invitedJoin(_community(0), member);
         vm.stopPrank();
         vm.warp(block.timestamp + 14 days - 1); // one second short of the window
         _primeEligible(member);
@@ -363,11 +376,11 @@ contract CreditCoreDebtTest is Test {
         _gatesPass();
         _drawFirst(member, 50e6);
 
-        address community2 = factory.createCommunity("Other Community", SEAT);
+        address community2 = _createCommunity("Other Community");
         usdc.mint(member, SEAT);
         vm.startPrank(member);
         usdc.approve(community2, SEAT);
-        Community(community2).join();
+        _invitedJoin(community2, member);
         vm.stopPrank();
         vm.warp(block.timestamp + 14 days + 1);
         _allocate(1, ALLOCATION);
@@ -395,7 +408,7 @@ contract CreditCoreDebtTest is Test {
     }
 
     function test_drawGate_communityClosed() public {
-        factory.createCommunity("Closed Community", SEAT);
+        _createCommunity("Closed Community");
         vm.prank(governance);
         cc.closeCommunity(1); // no allocation, no debt: closure is allowed
         vm.prank(member);
@@ -410,7 +423,7 @@ contract CreditCoreDebtTest is Test {
     function test_drawGate_retainedCapital() public {
         uint256 cushion = usdc.balanceOf(address(cc)) - (ALLOCATION + BASE_REQUIRED);
         assertGt(cushion, 50e6, "fixture must leave a cushion to consume");
-        factory.createCommunity("Sink Community", SEAT); // a second community to park the cushion in
+        _createCommunity("Sink Community"); // a second community to park the cushion in
         _allocate(1, cushion - 1); // leaves 1e6 of slack: any draw must fail
 
         _gatesPass();
@@ -482,11 +495,11 @@ contract CreditCoreDebtTest is Test {
         // Account-wide, not per community: a first draw in a second community needs no
         // second acceptance, because the account already accepted once.
         _settle(member, 50e6);
-        address community2 = factory.createCommunity("Other Community", SEAT);
+        address community2 = _createCommunity("Other Community");
         usdc.mint(member, SEAT);
         vm.startPrank(member);
         usdc.approve(community2, SEAT);
-        Community(community2).join();
+        _invitedJoin(community2, member);
         vm.stopPrank();
         vm.warp(block.timestamp + 14 days + 1);
         _allocate(1, ALLOCATION);
@@ -925,7 +938,7 @@ contract CreditCoreDebtTest is Test {
     /// delinquency that belongs to a different community's Line. This exercises the real
     /// `CreditCore._tabSnapshot` through the `tabSnapshot` pass-through, not a test-side copy.
     function test_tabSnapshot_communityGuardIsolatesDelinquency() public {
-        factory.createCommunity("Second Community", SEAT);
+        _createCommunity("Second Community");
         _allocate(1, ALLOCATION);
 
         _gatesPass();
@@ -1407,11 +1420,11 @@ contract CreditCoreDebtTest is Test {
         vm.prank(other);
         cc.finalizeWriteOff(member);
 
-        address community2 = factory.createCommunity("Second Community", SEAT);
+        address community2 = _createCommunity("Second Community");
         usdc.mint(member, SEAT);
         vm.startPrank(member);
         usdc.approve(community2, SEAT);
-        Community(community2).join();
+        _invitedJoin(community2, member);
         vm.stopPrank();
         vm.warp(block.timestamp + 14 days + 1);
         _allocate(1, ALLOCATION);

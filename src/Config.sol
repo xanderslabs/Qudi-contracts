@@ -36,7 +36,15 @@ contract Config is Ownable2Step {
             revert ZeroAddress();
         }
         usdc = usdc_;
-        _init(K.SEAT_PRICE_FLOOR, 50e6);
+        // A host prices seats from $0 to $100. A $0 seat moves no money.
+        _init(K.SEAT_PRICE_FLOOR, 0);
+        _init(K.SEAT_PRICE_CEILING, 100e6);
+        // Around 150 is the size at which a group stops being people who all know each other,
+        // and credit here rests on standing among people who do.
+        _init(K.MEMBER_CAP, 150);
+        // The group link's shape. A single-use link (1 use, 7 days) is an invite inside it.
+        _init(K.INVITE_MAX_USES, 25);
+        _init(K.INVITE_MAX_TTL, 30 days);
         // Seat-fee split: 40% Community Credit Account / 30% host / 30% protocol.
         _init(K.MINT_SPLIT_HOST, 3000);
         _init(K.MINT_SPLIT_POOL, 4000);
@@ -212,7 +220,16 @@ contract Config is Ownable2Step {
     /// Hard sanity ranges per scalar key: a fat-fingered owner transaction cannot set an
     /// absurd value. Composite, address, and unknown keys return (1, 0) so `set` always reverts.
     function bounds(bytes32 key) public pure returns (uint256 lo, uint256 hi) {
-        if (key == K.SEAT_PRICE_FLOOR) return (1e6, 100_000e6);
+        // The floor may be zero, since a free seat is allowed, and neither end goes past $1,000.
+        // A ceiling below the floor would stop every community being created and every price
+        // vote passing; Config does not tie two keys together, so that is the owner's to avoid.
+        if (key == K.SEAT_PRICE_FLOOR) return (0, 1000e6);
+        if (key == K.SEAT_PRICE_CEILING) return (0, 1000e6);
+        // At least 10, the members a community needs holding impact before credit opens.
+        if (key == K.MEMBER_CAP) return (10, 1000);
+        // At least 1 use and 1 day, or no invite could seat anyone.
+        if (key == K.INVITE_MAX_USES) return (1, 150);
+        if (key == K.INVITE_MAX_TTL) return (1 days, 90 days);
         if (key == K.EPOCH_LENGTH) return (1 days, 90 days);
         if (key == K.WITHDRAW_TERM_CORE) return (0, 30 days);
         if (key == K.WITHDRAW_TERM_FLEX) return (0, 30 days);
@@ -346,6 +363,18 @@ contract Config is Ownable2Step {
 
     function seatPriceFloor() external view returns (uint256) {
         return values[K.SEAT_PRICE_FLOOR];
+    }
+
+    function seatPriceCeiling() external view returns (uint256) {
+        return values[K.SEAT_PRICE_CEILING];
+    }
+
+    function memberCap() external view returns (uint256) {
+        return values[K.MEMBER_CAP];
+    }
+
+    function inviteLimits() external view returns (uint32 maxUses, uint64 maxTtl) {
+        return (uint32(values[K.INVITE_MAX_USES]), uint64(values[K.INVITE_MAX_TTL]));
     }
 
     function mintSplit() external view returns (uint16 host, uint16 pool, uint16 protocol) {

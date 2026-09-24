@@ -37,7 +37,7 @@ contract LedgerFactoryStub {
 /// Membership and the host, set directly by the test. The real `Community` answers the same two
 /// questions and nothing else the ledger asks. A suspended or frozen member is simply
 /// not a member (`isMember` false), so there is no separate suspension answer to stub.
-contract LedgerSeatsStub {
+contract LedgerCommunityStub {
     mapping(address => bool) public isMember;
     address public steward;
 
@@ -80,7 +80,7 @@ abstract contract LedgerFixture is Test {
     Config config;
     ComplianceRegistry registry;
     LedgerFactoryStub factory;
-    LedgerSeatsStub community;
+    LedgerCommunityStub community;
     LedgerCreditCoreStub creditCore;
     Ledger ledger;
 
@@ -120,7 +120,7 @@ abstract contract LedgerFixture is Test {
         flexVenue = _venue(flexVault, "Flex venue", "FV");
         coreVenue = _venue(coreVault, "Core venue", "CV");
 
-        community = new LedgerSeatsStub();
+        community = new LedgerCommunityStub();
         creditCore = new LedgerCreditCoreStub(IERC20(address(usdc)));
         vm.prank(owner);
         config.setAddress(K.CREDIT_CORE, address(creditCore));
@@ -130,6 +130,7 @@ abstract contract LedgerFixture is Test {
             ICommunityInit.CommunityWiring({
                 config: address(config),
                 factory: address(factory),
+                seats: address(0), // the ledger reads no seat
                 community: address(community),
                 vault: address(0),
                 creator: host,

@@ -9,21 +9,23 @@ import {Config} from "../../src/Config.sol";
 import {ConfigKeys as K} from "../../src/ConfigKeys.sol";
 import {ComplianceRegistry} from "../../src/ComplianceRegistry.sol";
 import {Community} from "../../src/Community.sol";
+import {Seats} from "../../src/Seats.sol";
 import {ICommunity} from "../../src/interfaces/ICommunity.sol";
 import {ICommunityInit} from "../../src/interfaces/ICommunityInit.sol";
 import {PoolTypes} from "../../src/PoolTypes.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {MockVault, MockCreditCoreLeg} from "../mocks/MockSeatSiblings.sol";
+import {InviteSigner} from "../helpers/InviteSigner.sol";
 
-/// A seat handler (it only drives the Seats surface so far). Every mutating function is guarded to
+/// A seat handler, driving one community's seats and votes. Every mutating function is guarded to
 /// no-op (never revert) on a failed precondition, so the fuzzer can chain deep call
 /// sequences without every call reverting the moment one actor is off cooldown/eligibility/etc.
 ///
 /// Ghost-state design note: the fixture's founding steward (`originalSteward`) gets its seat
 /// for free in Community.initialize(), outside the handler's 8-actor pool, and is never
 /// re-added to the ghost member set by any handler call. So "is the founding steward still
-/// seated" is tracked directly via seats.seatStateOf(originalSteward) rather than by mirroring
+/// seated" is tracked directly via community.seatStateOf(originalSteward) rather than by mirroring
 /// the currently-active steward() role, which can move to one of the 8 actors via
 /// electSteward() after a removal - at that point the actor is already in the ghost set from
 /// their own join(), and double counting a "+1 for current steward" would be wrong.
@@ -35,8 +37,9 @@ import {MockVault, MockCreditCoreLeg} from "../mocks/MockSeatSiblings.sol";
 /// calls that landed (`lands`) against the calls it tried (`tries`), because this suite was once
 /// found comparing 0 to 0: a reshaped handler whose calls all revert inside their `try` makes
 /// every invariant hold vacuously, and only a landed count shows it.
-contract SeatHandler is Test {
+contract SeatHandler is InviteSigner {
     Community public community;
+    Seats public seats;
     Config public config;
     MockUSDC public usdc;
     MockVault public vault;
@@ -74,17 +77,18 @@ contract SeatHandler is Test {
     mapping(bytes32 => uint256) public lands;
     mapping(bytes32 => uint256) public tries;
 
-    /// Set true iff executeSeatPriceVote() ever succeeds while leaving seats.seatPrice() below
-    /// config.seatPriceFloor() at that same instant. This is the only floor property the
-    /// contract actually promises: seatPrice is sticky once set and the floor can rise
-    /// independently afterward (see raiseFloor below), so "seatPrice >= floor" is not a
-    /// standing invariant over live state - it only has to hold at the moment a price-setting
-    /// vote executes, which is exactly what executeSeatPriceVote()'s live BelowFloor recheck
+    /// Set true iff executeSeatPriceVote() ever succeeds while leaving community.seatPrice()
+    /// below config.seatPriceFloor() or above config.seatPriceCeiling() at that same instant.
+    /// This is the only range property the contract actually promises: seatPrice is sticky once
+    /// set and the floor can rise independently afterward (see raiseFloor below), so "seatPrice
+    /// in range" is not a standing invariant over live state. It only has to hold at the moment
+    /// a price-setting vote executes, which is what executeSeatPriceVote()'s live recheck
     /// exists to guarantee.
-    bool public priceBelowFloorAtExecution;
+    bool public priceOutOfRangeAtExecution;
 
     constructor(
         Community community_,
+        Seats seats_,
         Config config_,
         MockUSDC usdc_,
         MockVault vault_,
@@ -94,6 +98,7 @@ contract SeatHandler is Test {
         address owner_
     ) {
         community = community_;
+        seats = seats_;
         config = config_;
         usdc = usdc_;
         vault = vault_;
@@ -101,8 +106,10 @@ contract SeatHandler is Test {
         originalSteward = steward_;
         treasury = treasury_;
         owner = owner_;
+        // Every actor has a key, so whichever of them the community elects can sign invites.
+        _keyed("steward");
         for (uint256 i = 0; i < actors.length; i++) {
-            actors[i] = address(uint160(uint256(keccak256(abi.encode("seat-actor", i)))));
+            actors[i] = _keyedFromSeed(uint256(keccak256(abi.encode("seat-actor", i))));
         }
     }
 
@@ -128,8 +135,9 @@ contract SeatHandler is Test {
 
     // ---- handler surface ----
 
-    // join is unconditionally open while a steward is seated: there is no admission list,
-    // no member cap, and no steward gate to drive through separately. A wallet that already
+    // Every join carries a fresh single-use invite from the current host, so the gate itself is
+    // never what refuses a join here. With no host there is no key to sign with, and the join is
+    // sent with an empty invite, which the vacancy check refuses first. A wallet that already
     // holds a seat is still sent through join(), because that is the rejoin the bar refuses.
     function join(uint256 actorSeed) external {
         address actor = _pickActor(actorSeed);
@@ -149,8 +157,9 @@ contract SeatHandler is Test {
         uint256 poolBefore = core.totalLegs();
         uint256 treasuryBefore = usdc.balanceOf(treasury);
 
+        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _signedInvite(actor);
         vm.prank(actor);
-        try community.join() {
+        try community.join(inv, hostSig, keySig) {
             uint256 stewardAfter = usdc.balanceOf(stewardAtCall);
             uint256 poolAfter = core.totalLegs();
             uint256 treasuryAfter = usdc.balanceOf(treasury);
@@ -172,11 +181,20 @@ contract SeatHandler is Test {
         usdc.mint(actor, price);
         vm.prank(actor);
         usdc.approve(address(community), price);
+        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _signedInvite(actor);
         vm.prank(actor);
-        try community.join() {
+        try community.join(inv, hostSig, keySig) {
             rejoinLanded = true;
             lands["rejoin"]++;
         } catch {}
+    }
+
+    function _signedInvite(address actor)
+        internal
+        returns (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig)
+    {
+        if (community.stewardVacant()) return (inv, hostSig, keySig);
+        return _inviteFor(address(community), actor);
     }
 
     // The steward cannot forfeit (must be removed by vote first). A frozen member is sent
@@ -202,15 +220,17 @@ contract SeatHandler is Test {
 
     // config is not itself a fuzz target (only `owner` may call Config.set(), and no
     // handler-driven actor is the owner), so without this the floor is pinned at its
-    // constructor value for the whole run and invariant_priceNeverBelowFloor could never
+    // constructor value for the whole run and invariant_priceInRangeAtExecution could never
     // exercise the live re-check in executeSeatPriceVote(): a floor raised after a price vote
     // is proposed but before it executes. This lets the fuzzer raise it mid-run instead. Note
     // this can legitimately push the floor above the currently-standing seatPrice with no vote
     // in flight at all - that is not a bug (seatPrice is never retroactively re-validated), which
-    // is why the invariant tracks priceBelowFloorAtExecution rather than comparing live values.
+    // is why the invariant tracks priceOutOfRangeAtExecution rather than comparing live values.
     function raiseFloor(uint256 newFloorSeed) external {
         uint256 current = config.seatPriceFloor();
-        uint256 newFloor = bound(newFloorSeed, current, current + 1_000_000e6);
+        uint256 ceiling = config.seatPriceCeiling();
+        if (current >= ceiling) return;
+        uint256 newFloor = bound(newFloorSeed, current, ceiling);
         vm.prank(owner);
         try config.set(K.SEAT_PRICE_FLOOR, newFloor) {} catch {}
     }
@@ -219,7 +239,9 @@ contract SeatHandler is Test {
         address steward = community.steward();
         if (steward == address(0)) return;
         uint256 floor = config.seatPriceFloor();
-        uint256 price = bound(priceSeed, floor, floor + 1_000_000e6);
+        uint256 ceiling = config.seatPriceCeiling();
+        if (floor > ceiling) return;
+        uint256 price = bound(priceSeed, floor, ceiling);
 
         tries["proposeSeatPrice"]++;
         vm.prank(steward);
@@ -260,7 +282,10 @@ contract SeatHandler is Test {
     function executeSeatPriceVote() external {
         tries["executeSeatPriceVote"]++;
         try community.executeSeatPriceVote() {
-            if (community.seatPrice() < config.seatPriceFloor()) priceBelowFloorAtExecution = true;
+            uint256 price = community.seatPrice();
+            if (price < config.seatPriceFloor() || price > config.seatPriceCeiling()) {
+                priceOutOfRangeAtExecution = true;
+            }
             lands["executeSeatPriceVote"]++;
         } catch {}
     }
@@ -366,7 +391,7 @@ contract SeatHandler is Test {
 }
 
 /// Deploys the same directly-deployed (no clone) Community + mock siblings fixture as
-/// Seats.t.sol / SeatsVotes.t.sol, then drives it exclusively through SeatHandler so every
+/// Community.t.sol / CommunityVotes.t.sol, with a real `Seats`, then drives it exclusively through SeatHandler so every
 /// call sequence the fuzzer explores is precondition-guarded (no reverts to discard).
 contract SeatsInvariantTest is StdInvariant, Test {
     Config config;
@@ -374,15 +399,17 @@ contract SeatsInvariantTest is StdInvariant, Test {
     MockVault vault;
     MockCreditCoreLeg core;
     Community community;
+    Seats seats;
     SeatHandler handler;
 
     address owner = makeAddr("owner");
     address treasury = makeAddr("treasury");
     address steward = makeAddr("steward");
 
-    /// This test contract is the seats clone's factory (`factory: address(this)` below), so it
-    /// answers the two factory reads seats makes, as `test/Seats.t.sol` does: `_split`'s
-    /// community id plus one, and `forfeit()`'s ledger, zero so the vault gate stays off here.
+    /// This test contract is the community's factory (`factory: address(this)` below), so it
+    /// answers the two factory reads the community makes, as `test/Community.t.sol` does:
+    /// `_split`'s community id plus one, and `forfeit()`'s ledger, zero so the vault gate stays
+    /// off here. It is also the factory `Seats` trusts, so it registers the community.
     function communityIdOf(address) external pure returns (uint256) {
         return 1;
     }
@@ -406,10 +433,13 @@ contract SeatsInvariantTest is StdInvariant, Test {
         vm.prank(owner);
         config.setAddress(K.CREDIT_CORE, address(core));
         community = new Community();
+        seats = new Seats(address(this));
+        seats.registerCommunity(address(community), 0);
 
         ICommunityInit.CommunityWiring memory w = ICommunityInit.CommunityWiring({
             config: address(config),
             factory: address(this),
+            seats: address(seats),
             community: address(community),
             vault: address(vault),
             creator: steward,
@@ -420,7 +450,7 @@ contract SeatsInvariantTest is StdInvariant, Test {
         community.initialize(w);
         vault.initialize(w);
 
-        handler = new SeatHandler(community, config, usdc, vault, core, steward, treasury, owner);
+        handler = new SeatHandler(community, seats, config, usdc, vault, core, steward, treasury, owner);
 
         // Every actor the handler may prank into join() has self-attested. The
         // handler still exercises the blocked path via the compliance registry.
@@ -439,16 +469,16 @@ contract SeatsInvariantTest is StdInvariant, Test {
         for (uint256 i = 0; i < handler.ACTORS(); i++) {
             address actor = handler.actors(i);
             bool minted = handler.ghostState(actor) != 0;
-            assertEq(community.balanceOf(actor), minted ? 1 : 0);
+            assertEq(seats.balanceOf(actor), minted ? 1 : 0);
             if (minted) {
                 uint256 tokenId = handler.ghostToken(actor);
                 assertEq(community.tokenOf(actor), tokenId, "tokenOf is kept");
-                assertEq(community.ownerOf(tokenId), actor, "the seat stays in the wallet");
-                assertEq(community.getApproved(tokenId), address(0));
+                assertEq(seats.ownerOf(tokenId), actor, "the seat stays in the wallet");
+                assertEq(seats.getApproved(tokenId), address(0));
             }
         }
-        assertEq(community.balanceOf(steward), 1);
-        assertEq(community.getApproved(community.tokenOf(steward)), address(0));
+        assertEq(seats.balanceOf(steward), 1);
+        assertEq(seats.getApproved(community.tokenOf(steward)), address(0));
     }
 
     function invariant_splitConserves() public view {
@@ -471,13 +501,46 @@ contract SeatsInvariantTest is StdInvariant, Test {
         assertTrue(community.stewardVacant() || community.isMember(community.steward()));
     }
 
-    function invariant_priceNeverBelowFloor() public view {
+    function invariant_priceInRangeAtExecution() public view {
         // seatPrice is sticky once set and the floor (see handler.raiseFloor()) can rise
-        // independently afterward with no vote in flight, so "seatPrice >= floor" does not
+        // independently afterward with no vote in flight, so "seatPrice in range" does not
         // hold as a standing property of live state - only at the instant a price vote
-        // executes, which is what executeSeatPriceVote()'s live BelowFloor recheck guarantees.
-        // See handler.priceBelowFloorAtExecution for the property this actually checks.
-        assertFalse(handler.priceBelowFloorAtExecution());
+        // executes, which is what executeSeatPriceVote()'s live recheck guarantees.
+        // See handler.priceOutOfRangeAtExecution for the property this actually checks.
+        assertFalse(handler.priceOutOfRangeAtExecution());
+    }
+
+    /// `Seats` is the one record of a seat's state, and `Community` answers from it: for every
+    /// wallet, the community's reads agree with the token, membership is exactly an Active seat
+    /// that is not frozen, and the Active seats counted one by one equal `memberCount`.
+    function invariant_seatsAndCommunityAgree() public view {
+        uint256 n = handler.ACTORS();
+        for (uint256 i = 0; i <= n; i++) {
+            address who = i == n ? steward : handler.actors(i);
+            uint256 tokenId = seats.seatOf(address(community), who);
+            assertEq(community.tokenOf(who), tokenId, "the token id");
+            if (tokenId == 0) {
+                assertEq(uint8(community.seatStateOf(who)), uint8(ICommunity.SeatState.None));
+                assertFalse(community.isMember(who));
+                continue;
+            }
+            ICommunity.SeatState state = seats.seatInfo(tokenId).state;
+            assertEq(uint8(community.seatStateOf(who)), uint8(state), "the state");
+            assertEq(community.mintedAt(who), seats.seatInfo(tokenId).mintedAt, "the mint time");
+            assertEq(
+                community.isMember(who),
+                state == ICommunity.SeatState.Active && !community.isFrozen(who),
+                "membership is an Active seat that is not frozen"
+            );
+        }
+        uint256 active;
+        uint256 count = seats.seatCount(address(community));
+        for (uint256 number = 1; number <= count; number++) {
+            if (seats.seatInfo(seats.seatAt(address(community), number)).state == ICommunity.SeatState.Active) {
+                active++;
+            }
+        }
+        assertEq(active, community.memberCount(), "the Active count is memberCount");
     }
 
     function invariant_seatStateOnlyByVoteOrForfeit() public view {
@@ -502,7 +565,7 @@ contract SeatsInvariantTest is StdInvariant, Test {
     /// numbers (the CreditCoreDebt replay's precedent). Every
     /// invariant above is asserted at the end.
     function test_replay3000Steps_reportsPerMethodLandedCounts() public {
-        bytes32 seed = keccak256("qudi.p1.20.seats-replay.v1");
+        bytes32 seed = keccak256("qudi.seats-replay.v1");
         for (uint256 step; step < 3000; step++) {
             uint256 a0 = uint256(keccak256(abi.encode(seed, step, 0)));
             uint256 a1 = uint256(keccak256(abi.encode(seed, step, 1)));
@@ -545,7 +608,8 @@ contract SeatsInvariantTest is StdInvariant, Test {
         invariant_splitConserves();
         invariant_memberCountMatchesGhost();
         invariant_stewardIsMemberOrVacant();
-        invariant_priceNeverBelowFloor();
+        invariant_priceInRangeAtExecution();
+        invariant_seatsAndCommunityAgree();
         invariant_seatStateOnlyByVoteOrForfeit();
         invariant_aKeptSeatBarsRejoining();
         invariant_aFrozenMemberCannotForfeit();

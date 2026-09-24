@@ -6,6 +6,7 @@ interface ICommunityInit {
     struct CommunityWiring {
         address config;
         address factory;
+        address seats;
         address community;
         address vault;
         address creator;

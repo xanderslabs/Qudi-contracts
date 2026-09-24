@@ -30,12 +30,12 @@ contract CreditCoreCommunityLegTest is Test {
     address treasuryMgr = makeAddr("treasuryManager");
     address allocationMs = makeAddr("allocationMultisig");
 
-    /// A registered community contract of community 0, standing in for a seats or ledger clone.
-    address communityZero = makeAddr("seatsOfCommunityZero");
+    /// A registered community contract of community 0, standing in for a community or ledger clone.
+    address communityZero = makeAddr("communityZero");
     /// A registered community contract of community 1.
-    address communityOne = makeAddr("seatsOfCommunityOne");
-    /// A registered community contract of community 0 that is NOT its seats: a ledger clone. The leg
-    /// kind is derived by comparing the caller against the seats address, so this is what a
+    address communityOne = makeAddr("communityOne");
+    /// A registered community contract of community 0 that is NOT its `Community`: a ledger clone. The leg
+    /// kind is derived by comparing the caller against the community's address, so this is what a
     /// Yield leg looks like.
     address ledgerOfZero = makeAddr("ledgerOfCommunityZero");
     address stranger = makeAddr("stranger");
@@ -53,8 +53,8 @@ contract CreditCoreCommunityLegTest is Test {
         factory.register(communityZero, 0);
         factory.register(communityOne, 1);
         factory.register(ledgerOfZero, 0);
-        factory.setSeats(0, communityZero);
-        factory.setSeats(1, communityOne);
+        factory.setCommunity(0, communityZero);
+        factory.setCommunity(1, communityOne);
         standing = new CreditStanding(IConfig(address(config)), address(factory), governance);
         cc = new CreditCoreHarness(
             IERC20(address(usdc)),
@@ -125,7 +125,7 @@ contract CreditCoreCommunityLegTest is Test {
     // Proof 2: a registered community contract cannot name a different community
     // -----------------------------------------------------------------
 
-    /// The rejected alternative is the one where the caller passes its own seats address for
+    /// The rejected alternative is the one where the caller passes its own community address for
     /// the factory to resolve. This is that rejection made explicit: the callee decides which
     /// community a caller belongs to, so naming another one reverts.
     function test_leg_registeredContractCannotNameAnotherCommunity() public {
@@ -168,7 +168,7 @@ contract CreditCoreCommunityLegTest is Test {
         assertEq(cc.expectedCash(), usdc.balanceOf(address(cc)));
     }
 
-    /// The kind is derived from the caller, never supplied (2026-09-21). The seats clone pays
+    /// The kind is derived from the caller, never supplied (2026-09-21). The community clone pays
     /// the mint leg and any other registered contract of that community pays a yield leg, so
     /// `AllocationAssigned` carries real provenance without a caller labelling itself. This is
     /// also what makes `Growth` and `Stabilization` unreachable here: no argument can name them.
@@ -183,7 +183,7 @@ contract CreditCoreCommunityLegTest is Test {
         cc.receiveCommunityLeg(0, LEG);
         vm.stopPrank();
 
-        // A ledger of the same community is not the seats address, so its leg is Yield.
+        // A ledger of the same community is not the community's address, so its leg is Yield.
         usdc.mint(ledgerOfZero, LEG);
         vm.startPrank(ledgerOfZero);
         usdc.transfer(address(cc), LEG);

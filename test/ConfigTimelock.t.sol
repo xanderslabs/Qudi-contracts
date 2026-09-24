@@ -53,7 +53,7 @@ contract ConfigTimelockTest is Test {
         vm.prank(riskCommittee);
         vm.expectRevert(); // TimelockUnexpectedOperationState: not ready
         lock.execute(address(cfg), 0, data, bytes32(0), bytes32(0));
-        assertEq(cfg.seatPriceFloor(), 50e6);
+        assertEq(cfg.seatPriceFloor(), 0);
 
         vm.warp(block.timestamp + 1);
         vm.prank(riskCommittee);

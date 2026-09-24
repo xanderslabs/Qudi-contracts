@@ -5,6 +5,7 @@ import {Clones} from "openzeppelin-contracts/contracts/proxy/Clones.sol";
 import {IConfig} from "./interfaces/IConfig.sol";
 import {ICommunityFactory} from "./interfaces/ICommunityFactory.sol";
 import {ICommunityInit} from "./interfaces/ICommunityInit.sol";
+import {ISeats} from "./interfaces/ISeats.sol";
 import {PoolTypes} from "./PoolTypes.sol";
 
 /// Anyone creates a community; the creator becomes founding steward and receives the founding
@@ -13,9 +14,10 @@ import {PoolTypes} from "./PoolTypes.sol";
 /// Clones are EIP-1167 minimal proxies over immutable implementations: a deployment cost
 /// device, never an upgrade device.
 ///
-/// `createCommunity` deploys **two** clones, seats and the ledger: a
-/// community is `Community` and `Ledger`, however many vaults or tiers it opens. It used to
-/// deploy seats alone and clone a further ledger per tier, and that was collapsed into one.
+/// `createCommunity` deploys **two** clones, the community and the ledger: a
+/// community is `Community` and `Ledger`, however many vaults or tiers it opens. Its seats are
+/// tokens in the one `Seats` contract, which this factory registers each community with. It used to
+/// deploy the community contract alone and clone a further ledger per tier, and that was collapsed into one.
 ///
 /// There is no tier opt-in. The host opt-in this factory used to carry is gone:
 /// every tier Qudi has deployed in `pools` is available to every community, the host picks one
@@ -25,7 +27,10 @@ import {PoolTypes} from "./PoolTypes.sol";
 /// reads `pools` here to resolve it.
 contract CommunityFactory is ICommunityFactory {
     IConfig public immutable config;
-    address public immutable seatsImplementation;
+    /// The one contract holding every community's seats. It trusts this factory alone to say
+    /// which addresses are communities.
+    ISeats public immutable seats;
+    address public immutable communityImplementation;
     address public immutable ledgerImplementation;
     /// One shared pool instance per pool type (PoolTypes.sol), indexed by the PoolTypes
     /// constant: a `Venue` in every slot, FLEX, CORE and TERM, since a community has
@@ -46,39 +51,52 @@ contract CommunityFactory is ICommunityFactory {
     /// same sites and the same one slot per entry, because the id was already known at every
     /// write; `isCommunityContract` reads it as `!= 0` and `communityIdOf` reads the id back out.
     /// The plus-one is what makes community 0 distinguishable from "not found", the same reason
-    /// `seatsIndex` below is 1-based.
+    /// `communityIndex` below is 1-based.
     ///
     /// `CreditCore.receiveCommunityLeg` is what needs the id: a community contract paying a leg
     /// names its community, and the callee resolves the caller here rather than trusting the
-    /// name. The alternative, having the caller pass its own seats address for the factory to
-    /// resolve through `seatsIndex`, was rejected: it lets a
+    /// name. The alternative, having the caller pass its own community address for the factory to
+    /// resolve through `communityIndex`, was rejected: it lets a
     /// registered community contract top up a community it does not belong to.
     mapping(address => uint256) internal contractRegistry;
-    /// 1-based index into `communities` for a registered seats contract; 0 means unregistered.
-    mapping(address => uint256) internal seatsIndex;
+    /// 1-based index into `communities` for a registered `Community` clone; 0 means unregistered.
+    mapping(address => uint256) internal communityIndex;
 
     error ZeroAddress();
+    error SeatsNotWiredToThisFactory();
 
     /// Parameter order is intentional, not incidental: the clone implementations
-    /// (`seatsImpl_`/`ledgerImpl_`) are grouped contiguously, each a single address; `pools_`
+    /// (`communityImpl_`/`ledgerImpl_`) are grouped contiguously, each a single address; `pools_`
     /// sits last since it is structurally different, a fixed-size array rather than a single
     /// address. There was a third implementation, for the per-community credit pool, until
     /// that contract was deleted.
-    constructor(address config_, address seatsImpl_, address ledgerImpl_, address[3] memory pools_) {
-        if (config_ == address(0) || seatsImpl_ == address(0) || ledgerImpl_ == address(0)) revert ZeroAddress();
+    ///
+    /// `Seats` is deployed first, naming this factory's address, and is refused here unless it
+    /// does: a `Seats` that trusted another factory would refuse every community this one creates.
+    constructor(
+        address config_,
+        address seats_,
+        address communityImpl_,
+        address ledgerImpl_,
+        address[3] memory pools_
+    ) {
+        if (config_ == address(0) || seats_ == address(0) || communityImpl_ == address(0) || ledgerImpl_ == address(0)) revert ZeroAddress();
         for (uint256 i; i < pools_.length; i++) {
             if (pools_[i] == address(0)) revert ZeroAddress();
         }
+        if (ISeats(seats_).factory() != address(this)) revert SeatsNotWiredToThisFactory();
         config = IConfig(config_);
-        seatsImplementation = seatsImpl_;
+        seats = ISeats(seats_);
+        communityImplementation = communityImpl_;
         ledgerImplementation = ledgerImpl_;
         pools = pools_;
     }
 
     function createCommunity(string calldata name, uint256 seatPrice) external returns (address community) {
         if (seatPrice < config.seatPriceFloor()) revert SeatPriceBelowFloor();
+        if (seatPrice > config.seatPriceCeiling()) revert SeatPriceAboveCeiling();
 
-        community = Clones.clone(seatsImplementation);
+        community = Clones.clone(communityImplementation);
         address ledger = Clones.clone(ledgerImplementation);
 
         uint256 communityId = communities.length;
@@ -86,6 +104,7 @@ contract CommunityFactory is ICommunityFactory {
         ICommunityInit.CommunityWiring memory w = ICommunityInit.CommunityWiring({
             config: address(config),
             factory: address(this),
+            seats: address(seats),
             community: community,
             vault: ledger,
             creator: msg.sender,
@@ -98,11 +117,12 @@ contract CommunityFactory is ICommunityFactory {
         CommunityEntry storage r = communities[communityId];
         r.community = community;
         r.ledger = ledger;
-        seatsIndex[community] = communityId + 1;
+        communityIndex[community] = communityId + 1;
         contractRegistry[community] = communityId + 1;
-        // Registered before either `initialize`, because the founding mint inside the seats one
-        // pays no seat fee but a later `join()` resolves its own community through the registry,
-        // and because `Venue` gates every entry point on
+        // Registered with `Seats` before `initialize`, because the founding seat is minted there.
+        seats.registerCommunity(community, communityId);
+        // Registered here before either `initialize`, because a later `join()` resolves its own
+        // community through the registry, and because `Venue` gates every entry point on
         // `factory.isCommunityContract(msg.sender)`: a ledger wired to a tier while still outside
         // the registry would be born unable to deposit into it.
         vaultRegistry[ledger] = true;
@@ -113,9 +133,9 @@ contract CommunityFactory is ICommunityFactory {
         emit CommunityCreated(communityId, msg.sender, community, ledger);
     }
 
-    /// The community's one ledger, or 0 if `seats` is not one this factory minted.
+    /// The community's one ledger, or 0 if `community` is not one this factory created.
     function ledgerOf(address community) external view returns (address) {
-        uint256 idxPlusOne = seatsIndex[community];
+        uint256 idxPlusOne = communityIndex[community];
         if (idxPlusOne == 0) return address(0);
         return communities[idxPlusOne - 1].ledger;
     }
@@ -124,13 +144,13 @@ contract CommunityFactory is ICommunityFactory {
     /// and every tier is available to every community, so this answers the same
     /// address for every `poolType` below `PoolTypes.COUNT` and 0 above it.
     function vaultOf(address community, uint8 poolType) external view returns (address) {
-        uint256 idxPlusOne = seatsIndex[community];
+        uint256 idxPlusOne = communityIndex[community];
         if (idxPlusOne == 0 || poolType >= PoolTypes.COUNT) return address(0);
         return communities[idxPlusOne - 1].ledger;
     }
 
     function vaultsOf(address community) external view returns (address[3] memory out) {
-        uint256 idxPlusOne = seatsIndex[community];
+        uint256 idxPlusOne = communityIndex[community];
         if (idxPlusOne == 0) return out;
         address ledger = communities[idxPlusOne - 1].ledger;
         for (uint8 t = 0; t < PoolTypes.COUNT; t++) {

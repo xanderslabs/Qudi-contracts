@@ -47,8 +47,8 @@ contract ImpactTaxonomyTest is Test {
         factory.setCommunityCount(2);
         communityA = new MockSeatStamps();
         communityB = new MockSeatStamps();
-        factory.setSeats(A, address(communityA));
-        factory.setSeats(B, address(communityB));
+        factory.setCommunity(A, address(communityA));
+        factory.setCommunity(B, address(communityB));
         cc = new CreditStandingHarness(IConfig(address(config)), address(factory), governance);
         ledger = address(new MockCreditCoreWiring(address(factory), address(config), address(cc)));
         vm.startPrank(governance);

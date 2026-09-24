@@ -2903,8 +2903,8 @@
     "file": "src/Community.sol",
     "function": "_isMember",
     "bound": "the frozen-state derivation, its effect on draw: a member a removal vote is open against is not a member, so `CreditCore.draw` refuses them",
-    "match": "        return seatStateOf[wallet] == SeatState.Active && !_frozen(wallet);",
-    "mutant": "        return seatStateOf[wallet] == SeatState.Active;",
+    "match": "        return s.state == SeatState.Active && !_frozen(wallet);",
+    "mutant": "        return s.state == SeatState.Active;",
     "status": "catalogued",
     "test": "test_proof2_aFrozenMemberCannotDraw"
   },
@@ -2913,8 +2913,8 @@
     "file": "src/Community.sol",
     "function": "_isMember",
     "bound": "the frozen-state derivation, its effect on shared deposit: the same bound as SM-11, pinned through `Ledger.deposit`",
-    "match": "        return seatStateOf[wallet] == SeatState.Active && !_frozen(wallet);",
-    "mutant": "        return seatStateOf[wallet] == SeatState.Active;",
+    "match": "        return s.state == SeatState.Active && !_frozen(wallet);",
+    "mutant": "        return s.state == SeatState.Active;",
     "status": "catalogued",
     "test": "test_proof2_aFrozenMemberCannotDepositIntoASharedVault",
     "note": "Same mutant as SM-11 by design: the derivation is catalogued once per effect, and each entry names the test that pins that effect alone."
@@ -2934,7 +2934,7 @@
     "file": "src/Community.sol",
     "function": "forfeit",
     "bound": "forfeit() requires an Active seat: a Suspended seat cannot relabel itself Left",
-    "match": "        if (seatStateOf[msg.sender] != SeatState.Active) revert NotMember();",
+    "match": "        if (s.state != SeatState.Active) revert NotMember();",
     "mutant": "",
     "status": "catalogued",
     "test": "test_proof5_aSuspendedSeatsOwnerCannotJoinAgain"
@@ -2954,17 +2954,18 @@
     "file": "src/Community.sol",
     "function": "join",
     "bound": "the bar on rejoining: `tokenOf` is never cleared, so AlreadyMember refuses a wallet whose seat is Active, Suspended or Left. This line is what closes the original rejoin defect",
-    "match": "        if (tokenOf[msg.sender] != 0) revert AlreadyMember();",
+    "match": "        if (seats.seatOf(address(this), msg.sender) != 0) revert AlreadyMember();",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_proof5_aSuspendedSeatsOwnerCannotJoinAgain, test_proof6_aForfeitedSeatIsLeftStaysAndBarsRejoining"
+    "test": "test_proof5_aSuspendedSeatsOwnerCannotJoinAgain, test_proof6_aForfeitedSeatIsLeftStaysAndBarsRejoining, test_proof3_aLeftOrSuspendedSeatBarsRejoining_butNotAnotherCommunity",
+    "note": "The match was re-pointed: the bar reads the seat from `Seats`. `Seats.mint` refuses a second seat too (SE-05), so with this line gone the join still reverts, with `AlreadySeated` instead of `AlreadyMember`, and the named tests see the wrong error."
   },
   {
     "id": "SM-17",
     "file": "src/Community.sol",
     "function": "castVote",
     "bound": "seasoned voters only, on every vote kind",
-    "match": "        if (!_seasonedBy(mintedAt[msg.sender], v.seasoningWindow, v.startedAt)) revert VoteIneligible();",
+    "match": "        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();",
     "mutant": "",
     "status": "catalogued",
     "test": "test_proof8_unseasonedSeatsCannotVote_removal, test_proof8_unseasonedSeatsCannotVote_hostVote, test_proof8_unseasonedSeatsCannotVote_priceVote",
@@ -2986,8 +2987,8 @@
     "file": "src/Community.sol",
     "function": "castVote",
     "bound": "eligibility is measured at the vote's start, not at the ballot: otherwise a seat minted after the proposal seasons into the electorate partway through the window",
-    "match": "        if (!_seasonedBy(mintedAt[msg.sender], v.seasoningWindow, v.startedAt)) revert VoteIneligible();",
-    "mutant": "        if (!_seasonedBy(mintedAt[msg.sender], v.seasoningWindow, block.timestamp)) revert VoteIneligible();",
+    "match": "        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();",
+    "mutant": "        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, block.timestamp)) revert VoteIneligible();",
     "status": "catalogued",
     "test": "test_proof8_unseasonedSeatsCannotVote_removal",
     "note": "The match was re-pointed to the `_seasonedBy` call."
@@ -2997,8 +2998,8 @@
     "file": "src/Community.sol",
     "function": "activeTokenOf",
     "bound": "the token id CreditStanding stamps impact against is 0 for a seat that is not Active: a Suspended or Left seat's impact leaves the account totals and the exposure cap in the transaction that sets the state",
-    "match": "        return seatStateOf[member] == SeatState.Active ? tokenOf[member] : 0;",
-    "mutant": "        return tokenOf[member];",
+    "match": "        return s.state == SeatState.Active ? tokenId : 0;",
+    "mutant": "        return tokenId;",
     "status": "catalogued",
     "test": "test_proof10_aRemovalEndsImpactInTheSameTransaction, test_proof10_leavingEndsImpactInTheSameTransaction"
   },
@@ -3007,8 +3008,8 @@
     "file": "src/Community.sol",
     "function": "activeTokenOf",
     "bound": "a frozen seat still reads its token id (prompt 2.4): a settle during the vote runs `_syncSeat`, which would otherwise wipe the member's impact for good, and a failed vote would hand back a member with nothing",
-    "match": "        return seatStateOf[member] == SeatState.Active ? tokenOf[member] : 0;",
-    "mutant": "        return seatStateOf[member] == SeatState.Active && !_frozen(member) ? tokenOf[member] : 0;",
+    "match": "        return s.state == SeatState.Active ? tokenId : 0;",
+    "mutant": "        return s.state == SeatState.Active && !_frozen(member) ? tokenId : 0;",
     "status": "catalogued",
     "test": "test_proof9_aFrozenMemberWhoSettlesKeepsTheirImpactWhenTheVoteFails",
     "note": "The protection is an absence, so its mutant adds the exclusion."
@@ -3018,7 +3019,7 @@
     "file": "src/Community.sol",
     "function": "executeRemoval",
     "bound": "an executed removal sets the seat Suspended",
-    "match": "        seatStateOf[member] = SeatState.Suspended;",
+    "match": "        seats.setState(tokenId, SeatState.Suspended);",
     "mutant": "",
     "status": "catalogued",
     "test": "test_proof4_anExecutedRemovalSuspendsTheSeat"
@@ -3028,7 +3029,7 @@
     "file": "src/Community.sol",
     "function": "forfeit",
     "bound": "forfeit() sets the seat Left and leaves it in the wallet",
-    "match": "        seatStateOf[msg.sender] = SeatState.Left;",
+    "match": "        seats.setState(tokenId, SeatState.Left);",
     "mutant": "",
     "status": "catalogued",
     "test": "test_proof6_aForfeitedSeatIsLeftStaysAndBarsRejoining"
@@ -3058,27 +3059,29 @@
     "file": "src/Community.sol",
     "function": "forfeit",
     "bound": "a seat that leaves is taken out of later denominators, at the forfeit site",
-    "match": "        _markDeparted(tokenOf[msg.sender]);",
-    "mutant": "",
+    "match": "        seats.setState(tokenId, SeatState.Left);\n        _markDeparted(s.seatNumber);",
+    "mutant": "        seats.setState(tokenId, SeatState.Left);",
     "status": "catalogued",
-    "test": "test_fix4_departedSeatsAreNotCounted, test_fix5_theDenominatorIsExactAt200SeatsWith40Departures"
+    "test": "test_fix4_departedSeatsAreNotCounted, test_fix5_theDenominatorIsExactAt200SeatsWith40Departures",
+    "note": "Multi-line match: `_markDeparted(s.seatNumber)` appears at both departure sites."
   },
   {
     "id": "SM-26",
     "file": "src/Community.sol",
     "function": "executeRemoval",
     "bound": "a removed seat is taken out of later denominators, at the removal site",
-    "match": "        _markDeparted(tokenOf[member]);",
-    "mutant": "",
+    "match": "        seats.setState(tokenId, SeatState.Suspended);\n        _markDeparted(s.seatNumber);",
+    "mutant": "        seats.setState(tokenId, SeatState.Suspended);",
     "status": "catalogued",
-    "test": "test_fix4_departedSeatsAreNotCounted, test_fix5_theDenominatorIsExactAt200SeatsWith40Departures"
+    "test": "test_fix4_departedSeatsAreNotCounted, test_fix5_theDenominatorIsExactAt200SeatsWith40Departures",
+    "note": "Multi-line match: `_markDeparted(s.seatNumber)` appears at both departure sites."
   },
   {
     "id": "SM-27",
     "file": "src/Community.sol",
     "function": "_mintSeat",
     "bound": "a new id's Fenwick node carries the departures below it, so departures before a mint still count in the ranges that node covers",
-    "match": "        if (below != 0) _departedTree[tokenId] = below;",
+    "match": "        if (below != 0) _departedTree[number] = below;",
     "mutant": "",
     "status": "catalogued",
     "test": "test_fix5_theDenominatorIsExactAt200SeatsWith40Departures"
@@ -3088,7 +3091,7 @@
     "file": "src/Community.sol",
     "function": "_startVote",
     "bound": "a removal's seasoned target is not counted in its own denominator",
-    "match": "        if (kind == VoteKind.Removal && tokenOf[target] <= last) denominator--;",
+    "match": "            if (t.seatNumber <= last) denominator--;",
     "mutant": "",
     "status": "catalogued",
     "test": "test_fix3_aSeasonedTargetIsNotCounted_anUnseasonedOneChangesNothing"
@@ -3098,10 +3101,11 @@
     "file": "src/Community.sol",
     "function": "_passed",
     "bound": "the floor of 3 yes votes",
-    "match": "        if (v.forCount < MIN_YES_VOTES) return false;",
+    "match": "        if (v.forCount < _minYes(v)) return false;",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_fix6_aVoteNeedsThreeYesVotes"
+    "test": "test_fix6_aVoteNeedsThreeYesVotes",
+    "note": "The floor is now `_minYes`, which is 3 for every kind but an election (SM-44 to SM-46)."
   },
   {
     "id": "SM-30",
@@ -3138,8 +3142,8 @@
     "file": "src/Community.sol",
     "function": "isSeasoned",
     "bound": "a Suspended or Left seat is never seasoned",
-    "match": "            seatStateOf[member] == SeatState.Active\n                && block.timestamp - mintedAt[member] >= config.memberSeasoningWindow();",
-    "mutant": "            mintedAt[member] != 0\n                && block.timestamp - mintedAt[member] >= config.memberSeasoningWindow();",
+    "match": "        return s.state == SeatState.Active && block.timestamp - s.mintedAt >= config.memberSeasoningWindow();",
+    "mutant": "        return s.mintedAt != 0 && block.timestamp - s.mintedAt >= config.memberSeasoningWindow();",
     "status": "catalogued",
     "test": "test_fix10_isSeasonedIsFalseForASuspendedOrLeftSeat"
   },
@@ -3196,5 +3200,365 @@
     "mutant": "",
     "status": "catalogued",
     "test": "test_termRecordMustCarryALock"
+  },
+  {
+    "id": "SE-01",
+    "file": "src/Seats.sol",
+    "function": "_update",
+    "bound": "the soulbound transfer guard: every transfer path, and a burn, ends in `_update`, and only a mint gets through",
+    "match": "        if (_ownerOf(tokenId) != address(0)) revert Soulbound();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof2_everyTransferAndApprovalPathReverts"
+  },
+  {
+    "id": "SE-02",
+    "file": "src/Seats.sol",
+    "function": "approve",
+    "bound": "no seat can be approved for a transfer",
+    "match": "    function approve(address, uint256) public pure override(ERC721, IERC721) {\n        revert Soulbound();\n    }\n",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof2_everyTransferAndApprovalPathReverts"
+  },
+  {
+    "id": "SE-03",
+    "file": "src/Seats.sol",
+    "function": "setApprovalForAll",
+    "bound": "no operator can be approved over a wallet's seats",
+    "match": "    function setApprovalForAll(address, bool) public pure override(ERC721, IERC721) {\n        revert Soulbound();\n    }\n",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof2_everyTransferAndApprovalPathReverts"
+  },
+  {
+    "id": "SE-04",
+    "file": "src/Seats.sol",
+    "function": "mint",
+    "bound": "the mint authorization: only a community the factory registered mints, and only in itself",
+    "match": "        if (idPlusOne == 0) revert NotCommunity();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof4_onlyARegisteredCommunityMintsAndChangesOnlyItsOwnSeats"
+  },
+  {
+    "id": "SE-05",
+    "file": "src/Seats.sol",
+    "function": "mint",
+    "bound": "one seat per wallet per community, for good: a kept seat in any state refuses a second",
+    "match": "        if (_seatOf[msg.sender][to] != 0) revert AlreadySeated();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof3_seatsItselfRefusesASecondSeatInTheSameCommunity"
+  },
+  {
+    "id": "SE-06",
+    "file": "src/Seats.sol",
+    "function": "setState",
+    "bound": "only a seat's own community changes its state",
+    "match": "        if (s.community != msg.sender) revert NotSeatCommunity();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof4_onlyARegisteredCommunityMintsAndChangesOnlyItsOwnSeats"
+  },
+  {
+    "id": "SE-07",
+    "file": "src/Seats.sol",
+    "function": "setState",
+    "bound": "Suspended and Left are final: a state changes only out of Active",
+    "match": "        if (s.state != ICommunity.SeatState.Active) revert InvalidStateChange();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_stateChangesAreActiveToSuspendedOrLeftOnly"
+  },
+  {
+    "id": "SE-08",
+    "file": "src/Seats.sol",
+    "function": "registerCommunity",
+    "bound": "only the factory registers a community",
+    "match": "        if (msg.sender != factory) revert NotFactory();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof4_onlyARegisteredCommunityMintsAndChangesOnlyItsOwnSeats"
+  },
+  {
+    "id": "SE-09",
+    "file": "src/Seats.sol",
+    "function": "mint",
+    "bound": "seat numbers count per community, from 1 for the founding seat",
+    "match": "        uint256 seatNumber = ++_seatCount[msg.sender];",
+    "mutant": "        uint256 seatNumber = ++_seatCount[address(0)];",
+    "status": "catalogued",
+    "test": "test_proof1_aWalletInThreeCommunitiesIsThreeSeatsOnOneContract"
+  },
+  {
+    "id": "SE-10",
+    "file": "src/Seats.sol",
+    "function": "setState",
+    "bound": "a seat that leaves Active leaves the Active count, which is `memberCount`",
+    "match": "        _activeCount[msg.sender]--;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof10_theCapSeats150AndRefuses151_andALeaverFreesAPlace, test_replay3000Steps_reportsPerMethodLandedCounts"
+  },
+  {
+    "id": "SM-34",
+    "file": "src/Community.sol",
+    "function": "_spendInvite",
+    "bound": "the host signature: an invite must be signed by the current host, so one signed by a former host dies at the handover",
+    "match": "        if (_signer(inviteHash, hostSig) != steward) revert BadHostSignature();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof5_joinWithoutAValidHostSignatureReverts, test_proof5_anInviteSignedByTheOldHostDiesAtTheHandover"
+  },
+  {
+    "id": "SM-35",
+    "file": "src/Community.sol",
+    "function": "_spendInvite",
+    "bound": "the joiner binding: the invite key signed this caller, so a watcher cannot spend the invite first",
+    "match": "        if (key == address(0) || key != invite.inviteKey) revert BadKeySignature();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof6_aKeySignatureForAnotherJoinerReverts"
+  },
+  {
+    "id": "SM-36",
+    "file": "src/Community.sol",
+    "function": "_spendInvite",
+    "bound": "expiry: an invite is valid until its expiry, not at it",
+    "match": "        if (block.timestamp >= invite.expiry) revert InviteExpired();",
+    "mutant": "        if (block.timestamp > invite.expiry) revert InviteExpired();",
+    "status": "catalogued",
+    "test": "test_proof7_anExpiredInviteReverts"
+  },
+  {
+    "id": "SM-37",
+    "file": "src/Community.sol",
+    "function": "_spendInvite",
+    "bound": "an invite is not valid before it was issued",
+    "match": "        if (block.timestamp < invite.issuedAt) revert InviteNotYetValid();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof7_anInviteIssuedInTheFutureReverts"
+  },
+  {
+    "id": "SM-38",
+    "file": "src/Community.sol",
+    "function": "_spendInvite",
+    "bound": "the TTL bound: an invite lives at most INVITE_MAX_TTL, even with the host's signature",
+    "match": "        if (invite.expiry - invite.issuedAt > maxTtl || invite.maxUses > maxUses) revert InviteOutOfBounds();",
+    "mutant": "        if (invite.maxUses > maxUses) revert InviteOutOfBounds();",
+    "status": "catalogued",
+    "test": "test_proof7_anInviteLongerOrLargerThanTheConfigAllowsReverts"
+  },
+  {
+    "id": "SM-39",
+    "file": "src/Community.sol",
+    "function": "_spendInvite",
+    "bound": "the uses bound: an invite seats at most INVITE_MAX_USES, even with the host's signature",
+    "match": "        if (invite.expiry - invite.issuedAt > maxTtl || invite.maxUses > maxUses) revert InviteOutOfBounds();",
+    "mutant": "        if (invite.expiry - invite.issuedAt > maxTtl) revert InviteOutOfBounds();",
+    "status": "catalogued",
+    "test": "test_proof7_anInviteLongerOrLargerThanTheConfigAllowsReverts"
+  },
+  {
+    "id": "SM-40",
+    "file": "src/Community.sol",
+    "function": "_spendInvite",
+    "bound": "the nonce: `revokeAllInvites` ends every invite signed before it",
+    "match": "        if (invite.hostNonce != hostNonce) revert InviteStaleNonce();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof7_everyInviteSignedBeforeANonceBumpReverts"
+  },
+  {
+    "id": "SM-41",
+    "file": "src/Community.sol",
+    "function": "_spendInvite",
+    "bound": "a revoked invite seats nobody",
+    "match": "        if (inviteRevoked[invite.inviteKey]) revert InviteWasRevoked();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof7_aRevokedInviteReverts"
+  },
+  {
+    "id": "SM-42",
+    "file": "src/Community.sol",
+    "function": "_spendInvite",
+    "bound": "the use count: an invite seats exactly `maxUses` members",
+    "match": "        if (inviteUses[invite.inviteKey] >= invite.maxUses) revert InviteUsedUp();",
+    "mutant": "        if (inviteUses[invite.inviteKey] > invite.maxUses) revert InviteUsedUp();",
+    "status": "catalogued",
+    "test": "test_proof8_aGroupInviteSeatsExactlyMaxUsesMembers, test_proof7_anOverUsedInviteReverts"
+  },
+  {
+    "id": "SM-43",
+    "file": "src/Community.sol",
+    "function": "_spendInvite",
+    "bound": "each seat counts one use of its invite",
+    "match": "        inviteUses[invite.inviteKey]++;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof8_aGroupInviteSeatsExactlyMaxUsesMembers, test_proof7_anOverUsedInviteReverts"
+  },
+  {
+    "id": "SM-44",
+    "file": "src/Community.sol",
+    "function": "_minYes",
+    "bound": "the kind check: only an election's floor drops below 3, so removal, host-removal and price votes keep the full floor",
+    "match": "        if (v.kind != VoteKind.Election) return MIN_YES_VOTES;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof11_everyOtherVoteKindStillNeedsThree"
+  },
+  {
+    "id": "SM-45",
+    "file": "src/Community.sol",
+    "function": "_minYes",
+    "bound": "an election's floor is min(3, voters): four voters still need 3, not 4",
+    "match": "        if (d > MIN_YES_VOTES) return MIN_YES_VOTES;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof11_fourVotersStillNeedThreeYesVotes"
+  },
+  {
+    "id": "SM-46",
+    "file": "src/Community.sol",
+    "function": "_minYes",
+    "bound": "an election's floor never drops below 1, so no election passes with no voters",
+    "match": "        return d == 0 ? 1 : d;",
+    "mutant": "        return d;",
+    "status": "catalogued",
+    "test": "test_proof11_noSeasonedVoterCanNeverElect"
+  },
+  {
+    "id": "SM-47",
+    "file": "src/Community.sol",
+    "function": "join",
+    "bound": "the member cap: the 150th seat is taken and the 151st refused",
+    "match": "        if (memberCount() >= config.memberCap()) revert CommunityFull();",
+    "mutant": "        if (memberCount() > config.memberCap()) revert CommunityFull();",
+    "status": "catalogued",
+    "test": "test_proof10_theCapSeats150AndRefuses151_andALeaverFreesAPlace"
+  },
+  {
+    "id": "SM-48",
+    "file": "src/Community.sol",
+    "function": "join",
+    "bound": "a $0 seat moves nothing and splits nothing",
+    "match": "        if (price == 0) {",
+    "mutant": "        if (false) {",
+    "status": "catalogued",
+    "test": "test_proof9_aFreeJoinSplitsNothingEvenWithNoCreditCoreWired"
+  },
+  {
+    "id": "SM-49",
+    "file": "src/Community.sol",
+    "function": "_requirePriceInRange",
+    "bound": "the price floor, at a price vote's proposal and execution",
+    "match": "        if (price < config.seatPriceFloor()) revert BelowFloor();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_priceVoteBelowFloorRevertsAtProposal, test_repriceBelowFloorReverts"
+  },
+  {
+    "id": "SM-50",
+    "file": "src/Community.sol",
+    "function": "_requirePriceInRange",
+    "bound": "the price ceiling, at a price vote's proposal and execution: $100 is allowed and a cent more is not",
+    "match": "        if (price > config.seatPriceCeiling()) revert AboveCeiling();",
+    "mutant": "        if (price >= config.seatPriceCeiling()) revert AboveCeiling();",
+    "status": "catalogued",
+    "test": "test_proof9_aPriceVoteRechecksTheCeilingAtExecution"
+  },
+  {
+    "id": "SM-51",
+    "file": "src/Community.sol",
+    "function": "_requirePriceInRange",
+    "bound": "a price vote cannot propose above the ceiling",
+    "match": "        if (price > config.seatPriceCeiling()) revert AboveCeiling();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof9_aPriceVoteIsBoundedByTheSameRange"
+  },
+  {
+    "id": "SM-52",
+    "file": "src/Community.sol",
+    "function": "executeSeatPriceVote",
+    "bound": "the range is re-checked at execution, so a ceiling lowered mid-vote is not undercut",
+    "match": "        _requirePriceInRange(v.newPrice);",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof9_aPriceVoteRechecksTheCeilingAtExecution"
+  },
+  {
+    "id": "SM-53",
+    "file": "src/Community.sol",
+    "function": "revokeInvite",
+    "bound": "only the host revokes an invite",
+    "match": "    function revokeInvite(address inviteKey) external {\n        if (msg.sender != steward) revert NotSteward();",
+    "mutant": "    function revokeInvite(address inviteKey) external {",
+    "status": "catalogued",
+    "test": "test_proof7_aRevokedInviteReverts"
+  },
+  {
+    "id": "SM-54",
+    "file": "src/Community.sol",
+    "function": "revokeAllInvites",
+    "bound": "only the host revokes every invite",
+    "match": "    function revokeAllInvites() external {\n        if (msg.sender != steward) revert NotSteward();",
+    "mutant": "    function revokeAllInvites() external {",
+    "status": "catalogued",
+    "test": "test_proof7_everyInviteSignedBeforeANonceBumpReverts"
+  },
+  {
+    "id": "SM-55",
+    "file": "src/Community.sol",
+    "function": "_spendInvite",
+    "bound": "an invite names its community, and another community's invite seats nobody here",
+    "match": "        if (invite.community != address(this)) revert InviteWrongCommunity();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_anInviteForAnotherCommunityReverts"
+  },
+  {
+    "id": "SM-56",
+    "file": "src/CommunityFactory.sol",
+    "function": "createCommunity",
+    "bound": "the price floor at creation",
+    "match": "        if (seatPrice < config.seatPriceFloor()) revert SeatPriceBelowFloor();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_floorEnforced"
+  },
+  {
+    "id": "SM-57",
+    "file": "src/CommunityFactory.sol",
+    "function": "createCommunity",
+    "bound": "the price ceiling at creation: $100 is allowed",
+    "match": "        if (seatPrice > config.seatPriceCeiling()) revert SeatPriceAboveCeiling();",
+    "mutant": "        if (seatPrice >= config.seatPriceCeiling()) revert SeatPriceAboveCeiling();",
+    "status": "catalogued",
+    "test": "test_proof9_aHundredDollarCommunityWorks"
+  },
+  {
+    "id": "SM-58",
+    "file": "src/CommunityFactory.sol",
+    "function": "createCommunity",
+    "bound": "a cent above the ceiling is refused at creation",
+    "match": "        if (seatPrice > config.seatPriceCeiling()) revert SeatPriceAboveCeiling();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof9_aboveTheCeilingRevertsAtCreation"
+  },
+  {
+    "id": "SM-59",
+    "file": "src/CommunityFactory.sol",
+    "function": "constructor",
+    "bound": "the factory refuses a `Seats` that trusts another factory",
+    "match": "        if (ISeats(seats_).factory() != address(this)) revert SeatsNotWiredToThisFactory();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_refusesASeatsWiredToAnotherFactory"
   }
 ]

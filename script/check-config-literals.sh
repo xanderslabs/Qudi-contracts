@@ -6,7 +6,7 @@
 # listed. When you introduce a new timed or numeric config parameter, add its launch value
 # here in the same change, or a consumer can hardcode the value and this check stays silent.
 set -euo pipefail
-banned='50e6|56 days|30 days|7 days|90 days|14 days|3 days|\b6667\b|\b2500\b|\b9950\b|\b600\b|\b4000\b|\b3000\b'
+banned='100e6|\b150\b|\b25\b|50e6|56 days|30 days|7 days|90 days|14 days|3 days|\b6667\b|\b2500\b|\b9950\b|\b600\b|\b4000\b|\b3000\b'
 hits=$(grep -rEn "$banned" src/ \
   --include='*.sol' \
   | grep -v 'src/Config.sol' \

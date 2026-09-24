@@ -345,7 +345,7 @@ contract CreditCoreStandingInvariantTest is StdInvariant, Test {
     /// counts are a stable number. Method
     /// picks and raw arguments come only from the step index.
     function test_replay4000Steps_reportsPerMethodLandedCounts() public {
-        bytes32 seed = keccak256("qudi.p1.4b.standing-replay.v1");
+        bytes32 seed = keccak256("qudi.standing-replay.v1");
         handler.setCheckEnabled(false);
         for (uint256 step; step < 4000; step++) {
             uint256 a0 = uint256(keccak256(abi.encode(seed, step, 0)));

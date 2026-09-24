@@ -2,6 +2,8 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {Seats} from "../src/Seats.sol";
+import {InviteSigner} from "./helpers/InviteSigner.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {CreditCore} from "../src/CreditCore.sol";
 import {ICreditCore} from "../src/interfaces/ICreditCore.sol";
@@ -37,7 +39,7 @@ import {MockCreditPoolForVault} from "./mocks/MockVaultSiblings.sol";
 /// `NullCreditPool` and the factory's credit-pool slot are deleted, so
 /// every assertion that money did not reach it now holds for two reasons instead of one: no
 /// path routes to it, and no path would even if one were wired.
-contract NoInterceptTest is Test {
+contract NoInterceptTest is InviteSigner {
     MockUSDC usdc;
     Config config;
     ComplianceRegistry registry;
@@ -81,13 +83,12 @@ contract NoInterceptTest is Test {
         registry = new ComplianceRegistry(screener);
         config = new Config(address(usdc), makeAddr("protocolTreasury"), address(registry));
 
-        address seatsImpl = address(new Community());
+        address communityImpl = address(new Community());
         address ledgerImpl = address(new Ledger());
 
-        // Two creations sit between this nonce read and the factory: the two vaults, each of
-        // which takes the factory address as a constructor argument. It was three until
-        // LockedQAMO was deleted.
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 2);
+        // Three creations sit between this nonce read and the factory: the two vaults and `Seats`,
+        // each of which takes the factory address as a constructor argument.
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 3);
         flexVault = new Venue(
             IERC20(address(usdc)), IConfig(address(config)), predicted, PoolTypes.FLEX, address(this), "F", "F"
         );
@@ -98,7 +99,8 @@ contract NoInterceptTest is Test {
         pools[PoolTypes.FLEX] = address(flexVault);
         pools[PoolTypes.CORE] = address(coreVault);
         pools[PoolTypes.TERM] = makeAddr("poolTerm");
-        factory = new CommunityFactory(address(config), seatsImpl, ledgerImpl, pools);
+        Seats seats = new Seats(predicted);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, pools);
         require(address(factory) == predicted, "factory precompute mismatch");
 
         standing = new CreditStandingHarness(IConfig(address(config)), address(factory), address(this));
@@ -118,7 +120,11 @@ contract NoInterceptTest is Test {
         usdc.approve(address(cc), 300_000e6);
         cc.fund(300_000e6);
 
+        // The host signs invites, so it is a keyed account rather than this contract.
+        address host = _keyed("host");
+        vm.prank(host);
         registry.attest(1);
+        vm.prank(host);
         community = factory.createCommunity("No Intercept Community", SEAT);
         pool = new MockCreditPoolForVault();
         vm.prank(allocationMs);
@@ -141,7 +147,7 @@ contract NoInterceptTest is Test {
         usdc.mint(who, SEAT);
         vm.startPrank(who);
         usdc.approve(community, SEAT);
-        Community(community).join();
+        _invitedJoin(community, who);
         flexVaultOf[who] = flexLedger.createVault(_vaultParams(PoolTypes.FLEX));
         coreVaultOf[who] = flexLedger.createVault(_vaultParams(PoolTypes.CORE));
         vm.stopPrank();

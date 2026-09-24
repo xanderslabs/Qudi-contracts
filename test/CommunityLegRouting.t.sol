@@ -2,6 +2,8 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {Seats} from "../src/Seats.sol";
+import {InviteSigner} from "./helpers/InviteSigner.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {CreditCore} from "../src/CreditCore.sol";
 import {CreditStanding} from "../src/CreditStanding.sol";
@@ -24,12 +26,12 @@ import {MockVenue} from "./mocks/MockVenue.sol";
 /// path to pay anything back out.
 ///
 /// Two communities, because "the right community id" is the whole point: a leg from one
-/// community's seats or ledger must not land on the other's balance.
+/// community's `Community` or ledger must not land on the other's balance.
 ///
 /// The Term interest leg, once counted as a third, pays through the same
 /// `Ledger.claimPoolLeg` path as every other tier since `LockedVault` was deleted, so the
 /// ledger proof covers it.
-contract CommunityLegRoutingTest is Test {
+contract CommunityLegRoutingTest is InviteSigner {
     MockUSDC usdc;
     Config config;
     ComplianceRegistry registry;
@@ -45,8 +47,8 @@ contract CommunityLegRoutingTest is Test {
     Ledger ledgerB;
 
     address screener = makeAddr("screener");
-    address hostA = makeAddr("hostA");
-    address hostB = makeAddr("hostB");
+    address hostA = _keyed("hostA");
+    address hostB = _keyed("hostB");
     address joiner = makeAddr("joiner");
     address protocolTreasury = makeAddr("protocolTreasury");
 
@@ -59,12 +61,12 @@ contract CommunityLegRoutingTest is Test {
         registry = new ComplianceRegistry(screener);
         config = new Config(address(usdc), protocolTreasury, address(registry));
 
-        address seatsImpl = address(new Community());
+        address communityImpl = address(new Community());
         address ledgerImpl = address(new Ledger());
 
-        // One creation sits between this nonce read and the factory: the FLEX vault, which takes
-        // the factory address as a constructor argument.
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
+        // Two creations sit between this nonce read and the factory: the FLEX vault, which takes
+        // the factory address as a constructor argument, and `Seats`, which takes it too.
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 2);
         flexVault = new Venue(
             IERC20(address(usdc)), IConfig(address(config)), predicted, PoolTypes.FLEX, address(this), "F", "F"
         );
@@ -72,7 +74,8 @@ contract CommunityLegRoutingTest is Test {
         pools[PoolTypes.FLEX] = address(flexVault);
         pools[PoolTypes.CORE] = makeAddr("pool1");
         pools[PoolTypes.TERM] = makeAddr("poolTerm");
-        factory = new CommunityFactory(address(config), seatsImpl, ledgerImpl, pools);
+        Seats seats = new Seats(predicted);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, pools);
         require(address(factory) == predicted, "factory precompute mismatch");
 
         standing = new CreditStanding(IConfig(address(config)), address(factory), address(this));
@@ -136,7 +139,7 @@ contract CommunityLegRoutingTest is Test {
         registry.attest(1);
         vm.startPrank(joiner);
         usdc.approve(address(communityA), SEAT);
-        communityA.join();
+        _invitedJoin(address(communityA), joiner);
         vm.stopPrank();
 
         assertEq(_idOf(address(communityA)), 0, "fixture: community A is id 0");
@@ -145,7 +148,7 @@ contract CommunityLegRoutingTest is Test {
         assertEq(usdc.balanceOf(hostA), expectedHost, "the host leg is unchanged");
         assertEq(usdc.balanceOf(protocolTreasury), expectedProtocol, "and so is the protocol leg");
         assertEq(expectedHost + expectedPool + expectedProtocol, SEAT, "the three legs sum to the price");
-        assertEq(usdc.balanceOf(address(communityA)), 0, "seats keeps nothing");
+        assertEq(usdc.balanceOf(address(communityA)), 0, "the community keeps nothing");
         assertEq(cc.expectedCash(), usdc.balanceOf(address(cc)), "the booked-cash mirror matches");
     }
 
@@ -160,7 +163,7 @@ contract CommunityLegRoutingTest is Test {
         registry.attest(1);
         vm.startPrank(joiner);
         usdc.approve(address(communityB), SEAT);
-        communityB.join();
+        _invitedJoin(address(communityB), joiner);
         vm.stopPrank();
 
         assertEq(_idOf(address(communityB)), 1);
@@ -235,7 +238,7 @@ contract CommunityLegRoutingTest is Test {
         vm.startPrank(m);
         registry.attest(1);
         usdc.approve(address(community), SEAT);
-        community.join();
+        _invitedJoin(address(community), m);
         usdc.approve(address(ledger), amount);
         uint256 vaultId = ledger.createVault(
             ILedger.VaultParams({

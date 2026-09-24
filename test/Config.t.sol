@@ -25,7 +25,12 @@ contract ConfigTest is Test {
     // ---------------------------------------------------------------------
 
     function test_launchDefaults() public view {
-        assertEq(cfg.seatPriceFloor(), 50e6);
+        assertEq(cfg.seatPriceFloor(), 0);
+        assertEq(cfg.seatPriceCeiling(), 100e6);
+        assertEq(cfg.memberCap(), 150);
+        (uint32 inviteUses, uint64 inviteTtl) = cfg.inviteLimits();
+        assertEq(inviteUses, 25);
+        assertEq(inviteTtl, 30 days);
         (uint16 h, uint16 p, uint16 pr) = cfg.mintSplit();
         assertEq(h, 3000); // host
         assertEq(p, 4000); // Community Credit Account
@@ -116,7 +121,7 @@ contract ConfigTest is Test {
     function test_noChargeParameterIsReachable() public {
         bytes32[] memory all = _allConfigKeys();
         // Count pinned to ConfigKeys.sol by check-config-key-enumeration.sh (CI).
-        assertEq(all.length, 77, "ConfigKeys count changed: update _allConfigKeys and re-audit");
+        assertEq(all.length, 81, "ConfigKeys count changed: update _allConfigKeys and re-audit");
 
         bytes32[] memory chargeShaped = _chargeShapedKeys();
         for (uint256 c; c < chargeShaped.length; c++) {
@@ -163,9 +168,13 @@ contract ConfigTest is Test {
     /// The complete ConfigKeys set, maintained in lockstep with ConfigKeys.sol. The count
     /// assertion in test_noChargeParameterIsReachable forces this to stay complete.
     function _allConfigKeys() internal pure returns (bytes32[] memory k) {
-        k = new bytes32[](77);
+        k = new bytes32[](81);
         uint256 i;
         k[i++] = K.SEAT_PRICE_FLOOR;
+        k[i++] = K.SEAT_PRICE_CEILING;
+        k[i++] = K.MEMBER_CAP;
+        k[i++] = K.INVITE_MAX_USES;
+        k[i++] = K.INVITE_MAX_TTL;
         k[i++] = K.MINT_SPLIT_HOST;
         k[i++] = K.MINT_SPLIT_POOL;
         k[i++] = K.MINT_SPLIT_PROTOCOL;
@@ -503,9 +512,9 @@ contract ConfigTest is Test {
     // ---------------------------------------------------------------------
 
     function testFuzz_scalarSetEmits(uint256 v) public {
-        v = bound(v, 1e6, 100_000e6);
+        v = bound(v, 1e6, 1000e6);
         vm.expectEmit(true, false, false, true);
-        emit Config.ParameterChanged(K.SEAT_PRICE_FLOOR, bytes32(uint256(50e6)), bytes32(v));
+        emit Config.ParameterChanged(K.SEAT_PRICE_FLOOR, bytes32(uint256(0)), bytes32(v));
         cfg.set(K.SEAT_PRICE_FLOOR, v);
         assertEq(cfg.seatPriceFloor(), v);
     }
@@ -597,10 +606,32 @@ contract ConfigTest is Test {
         cfg.set(K.REMOVAL_REPROPOSE_COOLDOWN, 180 days + 1);
     }
 
+    /// A free seat is allowed, so the floor may be 0. Each key's range holds at both ends.
+    function test_seatPriceMemberCapAndInviteBounds() public {
+        _assertRange(K.SEAT_PRICE_FLOOR, 0, 1000e6);
+        _assertRange(K.SEAT_PRICE_CEILING, 0, 1000e6);
+        _assertRange(K.MEMBER_CAP, 10, 1000);
+        _assertRange(K.INVITE_MAX_USES, 1, 150);
+        _assertRange(K.INVITE_MAX_TTL, 1 days, 90 days);
+    }
+
+    /// `lo` and `hi` are settable, and one past either end is refused. A `lo` of 0 has no value
+    /// below it.
+    function _assertRange(bytes32 key, uint256 lo, uint256 hi) internal {
+        cfg.set(key, lo);
+        cfg.set(key, hi);
+        if (lo != 0) {
+            vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, key));
+            cfg.set(key, lo - 1);
+        }
+        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, key));
+        cfg.set(key, hi + 1);
+    }
+
     function test_prospectiveOnly() public {
         uint256 valueBefore = cfg.seatPriceFloor();
         cfg.set(K.SEAT_PRICE_FLOOR, 75e6);
-        assertEq(valueBefore, 50e6);
+        assertEq(valueBefore, 0);
         assertEq(cfg.seatPriceFloor(), 75e6);
     }
 

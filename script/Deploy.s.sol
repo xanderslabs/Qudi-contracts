@@ -10,6 +10,7 @@ import {ManualStrategy} from "../src/ManualStrategy.sol";
 import {Venue} from "../src/Venue.sol";
 import {PoolTypes} from "../src/PoolTypes.sol";
 import {Community} from "../src/Community.sol";
+import {Seats} from "../src/Seats.sol";
 import {Ledger} from "../src/Ledger.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
 import {CommunityFactory} from "../src/CommunityFactory.sol";
@@ -59,7 +60,8 @@ interface IMintableTestUsdc {
 ///
 /// The circular constructor dependency between Venue and CommunityFactory
 /// (`Venue(usdc, config, factory, poolType, owner, name, symbol)` / `CommunityFactory(config,
-/// seats, ledger, pools)`, both immutable) is resolved by precomputing
+/// seats, community, ledger, pools)`, both immutable), and the same one between `Seats` and the
+/// factory, is resolved by precomputing
 /// the factory's CREATE address from the deployer's nonce. `_FACTORY_NONCE_OFFSET` below is the
 /// number of contract creations this script performs between reading the nonce and creating the
 /// factory; the factory's landing address is asserted against the precomputed one, so a miscount
@@ -87,22 +89,25 @@ interface IMintableTestUsdc {
 ///                  and verify the wiring by other means. The smoke community runs a
 ///                  contribute/withdraw round against CORE, an instant-withdrawal round
 ///                  against FLEX, each spending
-///                  `config.seatPriceFloor()` of the deployer's own USDC: on anvil every mint is
+///                  `_SMOKE_AMOUNT` (50 USDC) of the deployer's own USDC: on anvil every mint is
 ///                  free via `MockUSDC.mint`; on every other chain the deployer must already hold
 ///                  that much real USDC per round. CORE's round returns its principal
 ///                  (cancel); FLEX's round only instant-withdraws half back, leaving the other
 ///                  half as a standing balance in the smoke FLEX ledger. Separately,
-///                  `config.seatPriceFloor()` of USDC (regardless of `SKIP_SMOKE_COMMUNITY`) so it
+///                  `_SMOKE_AMOUNT` of USDC (regardless of `SKIP_SMOKE_COMMUNITY`) so it
 ///                  can pay real redemptions.
 ///
 /// Run: forge script script/Deploy.s.sol --rpc-url <url> --broadcast
 contract Deploy is Script {
-    /// registry, config; three pool types x (vault, instant venue, slow venue); the seats impl,
-    /// the ledger impl. 2 + 3*3 + 2 = 13 creations before the factory. It was one more until
-    /// the per-community credit-pool stub was deleted, and with it a third implementation. Changing what this script
-    /// deploys before the factory means changing this number in the same commit; the assertion
-    /// after the factory is created is what stops a miscount from shipping silently.
-    uint256 internal constant _FACTORY_NONCE_OFFSET = 13;
+    /// registry, config; three pool types x (vault, instant venue, slow venue); the community
+    /// impl, the ledger impl, `Seats`. 2 + 3*3 + 3 = 14 creations before the factory. Changing
+    /// what this script deploys before the factory means changing this number in the same
+    /// commit; the assertion after the factory is created is what stops a miscount from shipping
+    /// silently.
+    uint256 internal constant _FACTORY_NONCE_OFFSET = 14;
+
+    /// What each smoke round moves. It was the seat price floor, which is now 0.
+    uint256 internal constant _SMOKE_AMOUNT = 50e6;
 
     /// Chains the testnet stand-ins may be deployed on: anvil and Arc testnet. `ManualStrategy` is
     /// the one that still carries the guard (`_deployManualStrategy`). The credit-pool stub carried
@@ -133,7 +138,8 @@ contract Deploy is Script {
     Venue[3] internal vaults;
     ManualStrategy[3] internal instantVenues;
     ManualStrategy[3] internal slowVenues;
-    Community internal seatsImpl;
+    Community internal communityImpl;
+    Seats internal seats;
     Ledger internal ledgerImpl;
     CommunityFactory internal factory;
     CreditStanding internal standing;
@@ -161,8 +167,11 @@ contract Deploy is Script {
         // Creations only until the factory exists: see `_FACTORY_NONCE_OFFSET`.
         _deployPoolStack(usdc, predictedFactory, deployer);
 
-        seatsImpl = new Community();
+        communityImpl = new Community();
         ledgerImpl = new Ledger();
+        // `Seats` trusts one factory, fixed here, and the factory refuses a `Seats` that names
+        // any other.
+        seats = new Seats(predictedFactory);
 
         address[3] memory pools_;
         // Every slot is a Venue since 2026-09-21: TERM is an ordinary
@@ -170,7 +179,8 @@ contract Deploy is Script {
         for (uint8 i; i < PoolTypes.COUNT; i++) {
             pools_[i] = address(vaults[i]);
         }
-        factory = new CommunityFactory(address(config), address(seatsImpl), address(ledgerImpl), pools_);
+        factory =
+            new CommunityFactory(address(config), address(seats), address(communityImpl), address(ledgerImpl), pools_);
         // Loud, not silent: each vault's `factory` is immutable, so a nonce miscount here would
         // ship vaults that reject every real community ledger forever. The loop restates what each
         // vault was already constructed with (`predictedFactory`), so it follows once the first
@@ -273,7 +283,8 @@ contract Deploy is Script {
             console.log(string.concat("instantVenue[", _poolLabel(i), "]:"), address(instantVenues[i]));
             console.log(string.concat("slowVenue[", _poolLabel(i), "]:"), address(slowVenues[i]));
         }
-        console.log("seatsImpl:     ", address(seatsImpl));
+        console.log("communityImpl: ", address(communityImpl));
+        console.log("seats:         ", address(seats));
         console.log("ledgerImpl:    ", address(ledgerImpl));
         console.log("factory:       ", address(factory));
         console.log("creditStanding:", address(standing));
@@ -357,12 +368,14 @@ contract Deploy is Script {
 
     /// The smoke community created at the end, purely to prove clone-init, factory registration and
     /// the money paths work end to end. Its seat price is read from config rather than hardcoded
-    /// so it can never fall below the floor.
+    /// so it can never fall outside the range.
     function _createSmokeCommunity(address deployer, address usdc) internal {
         address communityAddr = factory.createCommunity("Smoke Community", config.seatPriceFloor());
+        require(seats.isRegistered(communityAddr), "smoke community not registered with Seats");
+        require(seats.balanceOf(deployer) == 1, "smoke founding seat not minted in Seats");
         require(factory.isCommunityContract(communityAddr), "smoke community not registered");
         require(factory.communityIdOf(communityAddr) == 1, "smoke community is not community 0");
-        console.log("smoke seats:   ", communityAddr);
+        console.log("smoke community:", communityAddr);
 
         // Every tier is available from the moment the community exists:
         // nothing opens one, and the ledger resolves each tier's vault from the factory's own
@@ -379,10 +392,10 @@ contract Deploy is Script {
             require(factory.vaultOf(communityAddr, t) == ledger, "smoke tier does not answer with the ledger");
         }
 
-        _smokeContributeWithdrawRound(deployer, usdc, ledger, PoolTypes.CORE, config.seatPriceFloor());
+        _smokeContributeWithdrawRound(deployer, usdc, ledger, PoolTypes.CORE, _SMOKE_AMOUNT);
 
         // ---- FLEX: one instant withdrawal, proving Ledger.withdrawInstant end to end ----
-        _smokeInstantWithdrawal(deployer, usdc, ledger, config.seatPriceFloor());
+        _smokeInstantWithdrawal(deployer, usdc, ledger, _SMOKE_AMOUNT);
 
         // ---- TERM: opened as an ordinary tier since 2026-09-21. It needs
         // no smoke round of its own: it is the same Ledger against the same Venue the

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity 0.8.30;
 
-import {ERC721} from "openzeppelin-contracts/contracts/token/ERC721/ERC721.sol";
+import {EIP712} from "openzeppelin-contracts/contracts/utils/cryptography/EIP712.sol";
+import {ECDSA} from "openzeppelin-contracts/contracts/utils/cryptography/ECDSA.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
 import {IConfig} from "./interfaces/IConfig.sol";
@@ -11,20 +12,26 @@ import {ICommunityInit} from "./interfaces/ICommunityInit.sol";
 import {ICommunity} from "./interfaces/ICommunity.sol";
 import {ICreditCore} from "./interfaces/ICreditCore.sol";
 import {ILedger} from "./interfaces/ILedger.sol";
+import {ISeats} from "./interfaces/ISeats.sol";
 
-/// Soulbound membership seat for a community. join() is open to any wallet that has attested for
-/// itself and is not screener-blocked, while a steward exists, and mints at the
-/// current price. The proceeds split, config-driven: 40% to the Community Credit
-/// Account, 30% to the host's wallet, 30% to the protocol treasury. No seat is ever
-/// transferable: every ERC721 mutation path other than mint and burn reverts, and
-/// nothing burns one either. A member leaves by forfeit() or is removed by a vote
-/// the steward proposes; a steward is replaced only by vote. The mint timestamp is stamped
-/// per seat and is the sole source of truth for member seasoning.
+/// A community's votes and settings. Its seats are tokens in the one `Seats` contract: this
+/// contract mints there at creation and at join(), and changes a seat's state there at forfeit()
+/// and executeRemoval(). `Seats` is the one record of a seat's state, mint time and number, and
+/// every seat read here answers from it. The only seat index kept here is the departed-seat tree
+/// the vote arithmetic needs, keyed by seat number.
 ///
-/// A seat is Active, Suspended or Left, and the last two are
-/// final. The seat stays in the wallet in both, keeping `tokenOf` and `mintedAt`, so the app
-/// still finds the community and `join()`'s `AlreadyMember` line bars a second mint. Only an
-/// Active seat with no unresolved removal vote against it is a member.
+/// join() needs an invite the current host signed and the invite key bound to the caller, from a
+/// wallet that has attested for itself and is not screener-blocked, while a steward exists and
+/// the community is under `MEMBER_CAP` Active seats. It mints at the current price, which the
+/// host sets from `SEAT_PRICE_FLOOR` to `SEAT_PRICE_CEILING` and the members change by vote. A
+/// paid seat splits, config-driven: 40% to the Community Credit Account, 30% to the host's
+/// wallet, 30% to the protocol treasury. A $0 seat moves no money. A member leaves by forfeit()
+/// or is removed by a vote the steward proposes; a steward is replaced only by vote. The mint
+/// timestamp is the sole source of truth for member seasoning.
+///
+/// A seat is Active, Suspended or Left, and the last two are final. The seat stays in the wallet
+/// in both, so the app still finds the community and join()'s `AlreadyMember` line bars a second
+/// mint. Only an Active seat with no unresolved removal vote against it is a member.
 ///
 /// Standing (Impact Units, conduct, phases, Trust Extension) is the singleton `CreditCore`'s,
 /// not a per-community clone. A seat mint and its 40% Community leg
@@ -32,34 +39,34 @@ import {ILedger} from "./interfaces/ILedger.sol";
 /// community's community id; it used to pay a per-community credit-pool
 /// clone with no path to pay any of it back out. Attribution of the leg to the minting member
 /// is later work; only the destination moved.
-contract Community is ERC721, ICommunity, ICommunityInit {
+contract Community is EIP712, ICommunity, ICommunityInit {
     using SafeERC20 for IERC20;
 
     IConfig internal config;
-    /// Stored but not read by any seats logic (seats never touches the vault). The
+    ISeats public seats;
+    /// Stored but not read by anything here (this contract never touches the vault). The
     /// factory populates the whole wiring struct at initialize(), so this field is kept even
-    /// though seats itself never reads it.
+    /// though nothing here reads it.
     address internal vault;
     address internal factory;
 
     address public steward;
     uint256 public seatPrice;
-    uint256 public memberCount;
     string public communityName;
 
-    /// Kept on a Suspended or Left seat: it is the record, and it is the bar on rejoining.
-    mapping(address => uint256) public tokenOf;
-    uint256 internal nextTokenId;
-
-    /// Seat mint timestamp per member (seasoning is measured from here). Kept on a
-    /// Suspended or Left seat, like `tokenOf`.
-    mapping(address => uint64) public mintedAt;
-
-    /// None until the wallet mints here. Set Active at mint, and changed exactly twice anywhere
-    /// in this contract: to Suspended by `executeRemoval`, to Left by `forfeit`.
-    mapping(address => SeatState) public seatStateOf;
-
     bool internal _initialized;
+
+    /// The invite gate. `revokeAllInvites` bumps `hostNonce`, which every invite signs, so one
+    /// transaction ends every invite signed before it. `inviteUses` counts the seats each invite
+    /// key has given, and `inviteRevoked` ends one invite.
+    uint256 public hostNonce;
+    mapping(address => uint256) public inviteUses;
+    mapping(address => bool) public inviteRevoked;
+
+    bytes32 internal constant INVITE_TYPEHASH = keccak256(
+        "Invite(address community,address inviteKey,uint64 issuedAt,uint64 expiry,uint32 maxUses,uint256 hostNonce)"
+    );
+    bytes32 internal constant JOIN_TYPEHASH = keccak256("Join(address community,address joiner)");
 
     /// One vote per slot, keyed by kind: `target` is the candidate for an election vote, the
     /// steward-at-proposal-time for a steward removal vote (informational only, execution always
@@ -106,7 +113,7 @@ contract Community is ERC721, ICommunity, ICommunityInit {
     /// Cleared when it passes and executes, which starts no cooldown.
     uint256 internal lastHostRemovalVoteId;
 
-    /// A Fenwick tree over token ids counting seats that left Active.
+    /// A Fenwick tree over seat numbers counting seats that left Active.
     /// `_departedUpTo(k)` is how many of seats 1 to k are Suspended or Left, in log n reads. It is
     /// written only at the two places a seat leaves Active, `forfeit` and `executeRemoval`, and a
     /// new id's node is filled in at mint from the nodes below it, so the tree grows with the ids.
@@ -114,10 +121,13 @@ contract Community is ERC721, ICommunity, ICommunityInit {
 
     /// A floor of 3 votes: a vote passes only with at least this many yes votes as well as the
     /// threshold. A seasoned denominator can be 0, which the threshold alone passes with no
-    /// ballots, or the host alone. A fixed constant, not a config key.
+    /// ballots, or the host alone. A fixed constant, not a config key. An election's floor is
+    /// lower when there are fewer voters (see `_minYes`).
     uint256 internal constant MIN_YES_VOTES = 3;
 
-    constructor() ERC721("Qudi Seat", "SEAT") {}
+    /// Clones share this contract's code, so the name and version are the implementation's, and
+    /// each clone's domain separator is rebuilt with its own address as the verifying contract.
+    constructor() EIP712("Qudi Community", "1") {}
 
     // ---- init ----
 
@@ -126,6 +136,7 @@ contract Community is ERC721, ICommunity, ICommunityInit {
         _initialized = true;
 
         config = IConfig(w.config);
+        seats = ISeats(w.seats);
         // The founding mint is a mint like any other, so the creator passes the same
         // compliance gates every join() caller passes: attested for themselves and not
         // screener-blocked. Checked here rather than in the factory because this is where the
@@ -137,44 +148,121 @@ contract Community is ERC721, ICommunity, ICommunityInit {
         seatPrice = w.seatPrice;
         communityName = w.name;
 
-        nextTokenId = 1;
-        // The founding steward's seat is unpaid: no USDC moves,
-        // no split runs, and the zero amounts in SeatMinted record that. Every later seat is
-        // a paid mint through join().
-        _mintSeat(steward);
+        // The founding steward's seat is unpaid and needs no invite: no USDC moves, no split
+        // runs, and the zero amounts in SeatMinted record that.
+        _mintSeat(steward, 0);
         emit SeatMinted(steward, 0, 0, 0, 0);
-    }
-
-    // ---- ERC721 name/symbol: literal, storage-independent so minimal-proxy clones (whose
-    // constructor never runs) still report the right identity ----
-
-    function name() public pure override returns (string memory) {
-        return "Qudi Seat";
-    }
-
-    function symbol() public pure override returns (string memory) {
-        return "SEAT";
     }
 
     // ---- membership ----
 
-    function join() external {
-        // No steward means no destination for the 30% host leg: the transfer in _split()
-        // would target address(0), which reverts in USDC. Joining reopens once the community
-        // elects a new steward.
+    function join(Invite calldata invite, bytes calldata hostSig, bytes calldata keySig) external {
+        // No steward means no one whose signature makes an invite, and no destination for the
+        // 30% host leg. Joining reopens once the community elects a new steward.
         if (stewardVacant()) revert StewardVacant();
         _requireMintable(msg.sender);
-        // The bar on rejoining. `tokenOf` is never cleared, so this refuses
-        // a wallet whose seat is Active, Suspended or Left alike: a kept seat blocks a second mint.
-        if (tokenOf[msg.sender] != 0) revert AlreadyMember();
+        // The bar on rejoining. A seat is never burned and `Seats` keeps it in the wallet, so this
+        // refuses a wallet whose seat is Active, Suspended or Left alike.
+        if (seats.seatOf(address(this), msg.sender) != 0) revert AlreadyMember();
+        if (memberCount() >= config.memberCap()) revert CommunityFull();
+        _spendInvite(invite, hostSig, keySig);
 
         // checks-effects-interactions: the seat exists before any sibling or token call runs,
         // so a sibling that re-entered would see the final membership state, not a stale one.
         uint256 price = seatPrice;
-        _mintSeat(msg.sender);
+        _mintSeat(msg.sender, price);
+        // A $0 seat moves nothing and splits nothing, so it needs no allowance and no wired
+        // `CreditCore`.
+        if (price == 0) {
+            emit SeatMinted(msg.sender, 0, 0, 0, 0);
+            return;
+        }
         IERC20(config.usdc()).safeTransferFrom(msg.sender, address(this), price);
         (uint256 toSteward, uint256 toPool, uint256 toProtocol) = _split(price);
         emit SeatMinted(msg.sender, price, toSteward, toPool, toProtocol);
+    }
+
+    /// Checks an invite and counts one use of it. The host signs the invite once, off chain; the
+    /// invite key, whose private half travels in the link, signs this caller. Binding the key's
+    /// signature to the caller means a watcher who copies a join from the mempool cannot spend
+    /// the invite first: the copy comes from the wrong address.
+    ///
+    /// `hostSig` must recover the current steward. An invite signed by a former host is dead the
+    /// moment the role changes hands, even if it is unexpired and unused, because the community
+    /// now answers to someone else.
+    function _spendInvite(Invite calldata invite, bytes calldata hostSig, bytes calldata keySig) internal {
+        if (invite.community != address(this)) revert InviteWrongCommunity();
+        if (block.timestamp < invite.issuedAt) revert InviteNotYetValid();
+        if (block.timestamp >= invite.expiry) revert InviteExpired();
+        (uint32 maxUses, uint64 maxTtl) = config.inviteLimits();
+        if (invite.expiry - invite.issuedAt > maxTtl || invite.maxUses > maxUses) revert InviteOutOfBounds();
+        if (invite.hostNonce != hostNonce) revert InviteStaleNonce();
+        if (inviteRevoked[invite.inviteKey]) revert InviteWasRevoked();
+        if (inviteUses[invite.inviteKey] >= invite.maxUses) revert InviteUsedUp();
+
+        bytes32 inviteHash = keccak256(
+            abi.encode(
+                INVITE_TYPEHASH,
+                invite.community,
+                invite.inviteKey,
+                invite.issuedAt,
+                invite.expiry,
+                invite.maxUses,
+                invite.hostNonce
+            )
+        );
+        if (_signer(inviteHash, hostSig) != steward) revert BadHostSignature();
+        bytes32 joinHash = keccak256(abi.encode(JOIN_TYPEHASH, address(this), msg.sender));
+        address key = _signer(joinHash, keySig);
+        if (key == address(0) || key != invite.inviteKey) revert BadKeySignature();
+
+        inviteUses[invite.inviteKey]++;
+    }
+
+    /// The EIP-712 signer of `structHash` in this community's domain, or 0 for a malformed
+    /// signature.
+    function _signer(bytes32 structHash, bytes calldata signature) internal view returns (address signer) {
+        (signer,,) = ECDSA.tryRecover(_hashTypedDataV4(structHash), signature);
+    }
+
+    /// Ends one invite, whatever uses it has left.
+    function revokeInvite(address inviteKey) external {
+        if (msg.sender != steward) revert NotSteward();
+        inviteRevoked[inviteKey] = true;
+        emit InviteRevoked(inviteKey);
+    }
+
+    /// Ends every invite signed so far, in one transaction.
+    function revokeAllInvites() external {
+        if (msg.sender != steward) revert NotSteward();
+        emit AllInvitesRevoked(++hostNonce);
+    }
+
+    // ---- seat reads, all from `Seats` ----
+
+    function tokenOf(address member) public view returns (uint256) {
+        return seats.seatOf(address(this), member);
+    }
+
+    /// The member's seat, or an empty one (state None) if they never held one here.
+    function _seat(address member) internal view returns (uint256 tokenId, ISeats.Seat memory s) {
+        tokenId = seats.seatOf(address(this), member);
+        if (tokenId != 0) s = seats.seatInfo(tokenId);
+    }
+
+    function seatStateOf(address member) external view returns (SeatState state) {
+        (, ISeats.Seat memory s) = _seat(member);
+        return s.state;
+    }
+
+    function mintedAt(address member) public view returns (uint64) {
+        (, ISeats.Seat memory s) = _seat(member);
+        return s.mintedAt;
+    }
+
+    /// Active seats, frozen ones included.
+    function memberCount() public view returns (uint256) {
+        return seats.activeCount(address(this));
     }
 
     /// The one membership gate every reader uses: vault creation, deposit and the shared
@@ -185,7 +273,8 @@ contract Community is ERC721, ICommunity, ICommunityInit {
     }
 
     function _isMember(address wallet) internal view returns (bool) {
-        return seatStateOf[wallet] == SeatState.Active && !_frozen(wallet);
+        (, ISeats.Seat memory s) = _seat(wallet);
+        return s.state == SeatState.Active && !_frozen(wallet);
     }
 
     /// Frozen means a removal vote against the member exists and has not resolved: before its
@@ -201,14 +290,16 @@ contract Community is ERC721, ICommunity, ICommunityInit {
         return _frozen(member);
     }
 
-    /// The seat's token id while it is Active, else 0. `CreditStanding` stamps a member's
+    /// The seat's `Seats` token id while it is Active, else 0. The id is unique across every
+    /// community and never reused. `CreditStanding` stamps a member's
     /// impact against this, so a Suspended or Left seat's impact stops
     /// counting in the same transaction that sets the state. **A frozen seat still reads its
     /// id.** `CreditStanding._syncSeat` deletes every seat-side mapping once the stamp stops
     /// matching, so a frozen member who settled during the vote would lose their impact for
     /// good, and a vote that then failed would hand back a member with nothing.
     function activeTokenOf(address member) external view returns (uint256) {
-        return seatStateOf[member] == SeatState.Active ? tokenOf[member] : 0;
+        (uint256 tokenId, ISeats.Seat memory s) = _seat(member);
+        return s.state == SeatState.Active ? tokenId : 0;
     }
 
     /// The singleton `CreditCore` owns the real debt, not the per-community
@@ -247,16 +338,16 @@ contract Community is ERC721, ICommunity, ICommunityInit {
     /// vote is open against cannot leave until it resolves: the seat's label records what
     /// the community decided, not what the member chose to avoid it.
     function forfeit() external {
-        if (seatStateOf[msg.sender] != SeatState.Active) revert NotMember();
+        (uint256 tokenId, ISeats.Seat memory s) = _seat(msg.sender);
+        if (s.state != SeatState.Active) revert NotMember();
         if (_frozen(msg.sender)) revert MemberFrozen();
         if (msg.sender == steward) revert StewardCannotForfeit();
         if (_hasOpenCreditTab(msg.sender)) revert OpenTabBlocks();
         if (_holdsAPersonalVault(msg.sender)) revert VaultHoldsBalance();
 
-        seatStateOf[msg.sender] = SeatState.Left;
-        memberCount--;
-        _markDeparted(tokenOf[msg.sender]);
-        emit SeatForfeited(msg.sender, tokenOf[msg.sender]);
+        seats.setState(tokenId, SeatState.Left);
+        _markDeparted(s.seatNumber);
+        emit SeatForfeited(msg.sender, tokenId);
     }
 
     function stewardVacant() public view returns (bool) {
@@ -288,14 +379,17 @@ contract Community is ERC721, ICommunity, ICommunityInit {
         v.seasoningWindow = seasoning;
         v.deadline = uint64(block.timestamp) + window;
 
-        // Mint time never decreases as the token id rises (ids come from
-        // `nextTokenId++`, stamped with `block.timestamp`, and no seat is ever burned), so the
-        // seats seasoned at the start are exactly ids 1 to `last`. Those still Active are `last`
-        // less the departed among them. A removal's target is Active (proposeRemoval checks it),
-        // so it was counted exactly when its id is in the prefix.
+        // Mint time never decreases as the seat number rises (numbers are given in order, each
+        // stamped with `block.timestamp`, and no seat is ever burned), so the seats seasoned at
+        // the start are exactly numbers 1 to `last`. Those still Active are `last` less the
+        // departed among them. A removal's target is Active (proposeRemoval checks it), so it was
+        // counted exactly when its number is in the prefix.
         uint256 last = _lastSeasonedId(seasoning, block.timestamp);
         uint256 denominator = last - _departedUpTo(last);
-        if (kind == VoteKind.Removal && tokenOf[target] <= last) denominator--;
+        if (kind == VoteKind.Removal) {
+            (, ISeats.Seat memory t) = _seat(target);
+            if (t.seatNumber <= last) denominator--;
+        }
         v.denominator = denominator;
         emit VoteStarted(voteId, uint8(kind), target);
     }
@@ -307,16 +401,21 @@ contract Community is ERC721, ICommunity, ICommunityInit {
         return mintTime + window <= start;
     }
 
-    /// The highest token id whose seat is seasoned at `start`, or 0 if none is. A binary search:
-    /// `_seasonedBy` holds for a prefix of the ids, because mint time never decreases with the id.
-    /// Invariant: `lo` is 0 or seasoned, `hi` is `nextTokenId` or not seasoned.
+    /// The highest seat number whose seat is seasoned at `start`, or 0 if none is. A binary
+    /// search: `_seasonedBy` holds for a prefix of the numbers, because mint time never decreases
+    /// with the number. Invariant: `lo` is 0 or seasoned, `hi` is one past the last seat or not
+    /// seasoned.
     function _lastSeasonedId(uint256 window, uint256 start) internal view returns (uint256 lo) {
-        uint256 hi = nextTokenId;
+        uint256 hi = _nextSeatNumber();
         while (hi - lo > 1) {
             uint256 mid = (lo + hi) / 2;
-            if (_seasonedBy(mintedAt[_ownerOf(mid)], window, start)) lo = mid;
+            if (_seasonedBy(seats.seatInfo(seats.seatAt(address(this), mid)).mintedAt, window, start)) lo = mid;
             else hi = mid;
         }
+    }
+
+    function _nextSeatNumber() internal view returns (uint256) {
+        return seats.seatCount(address(this)) + 1;
     }
 
     /// How many of seats 1 to `id` have left Active.
@@ -326,22 +425,52 @@ contract Community is ERC721, ICommunity, ICommunityInit {
         }
     }
 
-    /// Records that seat `id` left Active, at the two places that happens. Every existing node
-    /// covering `id` is below `nextTokenId`; a node minted later takes this into account at mint.
+    /// Records that seat number `id` left Active, at the two places that happens. Every existing
+    /// node covering `id` is below the next seat number; a node minted later takes this into
+    /// account at mint.
     function _markDeparted(uint256 id) internal {
-        uint256 end = nextTokenId;
+        uint256 end = _nextSeatNumber();
         for (; id < end; id += id & (~id + 1)) {
             _departedTree[id] += 1;
         }
     }
 
     /// The comparison a vote must clear to pass, parameterized by its own kind: at least
-    /// MIN_YES_VOTES yes votes and the threshold against the stored denominator.
+    /// `_minYes` yes votes and the threshold against the stored denominator.
     function _passed(uint256 voteId) internal view returns (bool) {
         Vote storage v = votes[voteId];
         (uint16 thresholdBps,) = _thresholdFor(v.kind);
-        if (v.forCount < MIN_YES_VOTES) return false;
+        if (v.forCount < _minYes(v)) return false;
         return uint256(v.forCount) * 10_000 >= uint256(thresholdBps) * v.denominator;
+    }
+
+    /// The yes votes a vote needs besides its threshold. Every kind needs MIN_YES_VOTES, so a
+    /// host cannot remove anyone alone, except an election, which needs as many as there are
+    /// voters, up to MIN_YES_VOTES, and never fewer than 1. Without that, a community that lost
+    /// its host with one or two seasoned members left could never elect another: nobody could
+    /// join, and no shared-vault withdrawal could ever be proposed. With no voter at all the floor
+    /// is still 1, so no election passes on no votes.
+    function _minYes(Vote storage v) internal view returns (uint256) {
+        if (v.kind != VoteKind.Election) return MIN_YES_VOTES;
+        uint256 d = v.denominator;
+        if (d > MIN_YES_VOTES) return MIN_YES_VOTES;
+        return d == 0 ? 1 : d;
+    }
+
+    /// A vote's tally and the bars it must clear, exactly as `_passed` reads them.
+    function voteTally(uint256 voteId) external view returns (VoteTally memory t) {
+        Vote storage v = votes[voteId];
+        (uint16 thresholdBps,) = _thresholdFor(v.kind);
+        t = VoteTally({
+            kind: v.kind,
+            target: v.target,
+            deadline: v.deadline,
+            denominator: v.denominator,
+            yes: v.forCount,
+            no: v.againstCount,
+            thresholdBps: thresholdBps,
+            minYes: _minYes(v)
+        });
     }
 
     /// True once a vote is settled in a way that can never still apply: its deadline has
@@ -398,23 +527,24 @@ contract Community is ERC721, ICommunity, ICommunityInit {
 
     /// Card-price changes are proposed by the steward and approved by the members
     /// (community vote, simple-majority default), binding future mints only: the price
-    /// actually charged is read at join(), and no minted seat is ever repriced.
+    /// actually charged is read at join(), and no minted seat is ever repriced. The price stays
+    /// inside the same floor and ceiling a community is created with.
     function proposeSeatPrice(uint256 newPrice) external {
         if (msg.sender != steward) revert NotSteward();
-        if (newPrice < config.seatPriceFloor()) revert BelowFloor();
+        _requirePriceInRange(newPrice);
         if (activePriceVoteId != 0 && !_resolvedAsFailed(activePriceVoteId)) revert VoteActive();
         activePriceVoteId = _startVote(VoteKind.Price, address(0), newPrice);
     }
 
-    /// Permissionless. The floor is re-checked live at execution: a floor raised by config
-    /// mid-vote must not be undercut by a stale proposal.
+    /// Permissionless. The range is re-checked live at execution: a floor raised or a ceiling
+    /// lowered by config mid-vote must not be undercut by a stale proposal.
     function executeSeatPriceVote() external {
         uint256 voteId = activePriceVoteId;
         if (voteId == 0) revert NoActiveVote();
         Vote storage v = votes[voteId];
         if (block.timestamp <= v.deadline) revert VoteWindowOpen();
         if (!_passed(voteId)) revert NotPassed();
-        if (v.newPrice < config.seatPriceFloor()) revert BelowFloor();
+        _requirePriceInRange(v.newPrice);
         activePriceVoteId = 0;
         seatPrice = v.newPrice;
         emit SeatPriceSet(v.newPrice);
@@ -433,7 +563,8 @@ contract Community is ERC721, ICommunity, ICommunityInit {
         if (stewardVacant()) revert StewardVacant();
         if (msg.sender != steward) revert NotSteward();
         if (member == steward) revert CannotRemoveSteward();
-        if (seatStateOf[member] != SeatState.Active) revert TargetNotMember();
+        (, ISeats.Seat memory s) = _seat(member);
+        if (s.state != SeatState.Active) revert TargetNotMember();
         // No removal while a vote to remove the steward is unresolved, so a
         // host facing one cannot freeze the members who would vote in it.
         uint256 hostVote = lastHostRemovalVoteId;
@@ -456,10 +587,10 @@ contract Community is ERC721, ICommunity, ICommunityInit {
         if (block.timestamp <= votes[voteId].deadline) revert VoteWindowOpen();
         if (!_passed(voteId)) revert NotPassed();
         activeRemovalVoteId[member] = 0;
-        seatStateOf[member] = SeatState.Suspended;
-        memberCount--;
-        _markDeparted(tokenOf[member]);
-        emit SeatSuspended(member, tokenOf[member]);
+        (uint256 tokenId, ISeats.Seat memory s) = _seat(member);
+        seats.setState(tokenId, SeatState.Suspended);
+        _markDeparted(s.seatNumber);
+        emit SeatSuspended(member, tokenId);
     }
 
     function castVote(uint256 voteId, bool support) external {
@@ -474,7 +605,7 @@ contract Community is ERC721, ICommunity, ICommunityInit {
         // for the seasoning window when the vote started, so a host cannot invite accounts the
         // day before a vote to carry it. Measured from `startedAt` under the window the vote
         // stored, with the predicate its denominator used.
-        if (!_seasonedBy(mintedAt[msg.sender], v.seasoningWindow, v.startedAt)) revert VoteIneligible();
+        if (!_seasonedBy(mintedAt(msg.sender), v.seasoningWindow, v.startedAt)) revert VoteIneligible();
         if (v.voted[msg.sender]) revert AlreadyVoted();
         v.voted[msg.sender] = true;
         if (support) {
@@ -487,7 +618,7 @@ contract Community is ERC721, ICommunity, ICommunityInit {
     /// Permissionless. The threshold bps is read live from config (no Appendix-A literal), the
     /// denominator is the seasoned Active count stored when the vote started, and the pinned
     /// rounding is unchanged: votesFor * 10_000 >= thresholdBps * denominator, integer-only, with
-    /// at least MIN_YES_VOTES votes for.
+    /// at least `_minYes` votes for.
     function executeRemoveSteward() external {
         uint256 voteId = activeStewardVoteId;
         if (voteId == 0) revert NoActiveVote();
@@ -542,22 +673,24 @@ contract Community is ERC721, ICommunity, ICommunityInit {
         usdc.safeTransfer(config.protocolTreasury(), toProtocol);
     }
 
-    function _mintSeat(address who) internal {
-        uint256 tokenId = nextTokenId++;
-        // The new id's Fenwick node covers ids (tokenId - lowbit, tokenId]. The new seat itself
-        // has not departed, so the node is the departed count over the ids just below it, read
-        // from the nodes already there. For an odd id that range is empty: no read at all.
-        uint256 low = tokenId & (~tokenId + 1);
+    function _mintSeat(address who, uint256 price) internal {
+        uint256 number = _nextSeatNumber();
+        // The new number's Fenwick node covers numbers (number - lowbit, number]. The new seat
+        // itself has not departed, so the node is the departed count over the numbers just below
+        // it, read from the nodes already there. For an odd number that range is empty.
+        uint256 low = number & (~number + 1);
         uint256 below;
-        for (uint256 j = tokenId - 1; j > tokenId - low; j -= j & (~j + 1)) {
+        for (uint256 j = number - 1; j > number - low; j -= j & (~j + 1)) {
             below += _departedTree[j];
         }
-        if (below != 0) _departedTree[tokenId] = below;
-        tokenOf[who] = tokenId;
-        mintedAt[who] = uint64(block.timestamp);
-        seatStateOf[who] = SeatState.Active;
-        memberCount++;
-        _mint(who, tokenId);
+        if (below != 0) _departedTree[number] = below;
+        seats.mint(who, price);
+    }
+
+    /// A seat price from `SEAT_PRICE_FLOOR` to `SEAT_PRICE_CEILING`, both read live.
+    function _requirePriceInRange(uint256 price) internal view {
+        if (price < config.seatPriceFloor()) revert BelowFloor();
+        if (price > config.seatPriceCeiling()) revert AboveCeiling();
     }
 
     /// Seat-mint gates: the account must have attested for itself, and must not be
@@ -572,36 +705,7 @@ contract Community is ERC721, ICommunity, ICommunityInit {
     /// `config.memberSeasoningWindow()`. Half-open and in seconds. A Suspended or Left seat keeps
     /// its `mintedAt` but is never seasoned: it is not a member.
     function isSeasoned(address member) external view returns (bool) {
-        return
-            seatStateOf[member] == SeatState.Active
-                && block.timestamp - mintedAt[member] >= config.memberSeasoningWindow();
-    }
-
-    // ---- soulbound: every mutation path other than mint/burn reverts ----
-
-    function transferFrom(address, address, uint256) public pure override {
-        revert Soulbound();
-    }
-
-    // The 3-arg safeTransferFrom is not virtual in ERC721; it delegates to the 4-arg
-    // overload below, which reverts, so it is soulbound too without a direct override.
-    function safeTransferFrom(address, address, uint256, bytes memory) public pure override {
-        revert Soulbound();
-    }
-
-    function approve(address, uint256) public pure override {
-        revert Soulbound();
-    }
-
-    function setApprovalForAll(address, bool) public pure override {
-        revert Soulbound();
-    }
-
-    /// Defense in depth for the soulbound rule: even if some inherited path bypassed the overrides
-    /// above, only mint (from == 0) and burn (to == 0) may reach the base ERC721 update.
-    function _update(address to, uint256 tokenId, address auth) internal override returns (address) {
-        address from = _ownerOf(tokenId);
-        if (from != address(0) && to != address(0)) revert Soulbound();
-        return super._update(to, tokenId, auth);
+        (, ISeats.Seat memory s) = _seat(member);
+        return s.state == SeatState.Active && block.timestamp - s.mintedAt >= config.memberSeasoningWindow();
     }
 }

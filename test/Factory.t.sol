@@ -2,9 +2,11 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {Config} from "../src/Config.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
 import {CommunityFactory} from "../src/CommunityFactory.sol";
+import {Seats} from "../src/Seats.sol";
 import {Ledger} from "../src/Ledger.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
 import {Venue} from "../src/Venue.sol";
@@ -18,6 +20,20 @@ import {Community} from "../src/Community.sol";
 import {ICommunity} from "../src/interfaces/ICommunity.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockVault, MockCreditPool} from "./mocks/MockSeatSiblings.sol";
+
+/// Deploys `Seats` naming the factory's address, then the factory, as a deployment must: `Seats`
+/// trusts one factory, fixed at its construction.
+function deployFactory(
+    Vm vm_,
+    address deployer,
+    address cfg,
+    address communityImpl,
+    address ledgerImpl,
+    address[3] memory pools
+) returns (CommunityFactory factory) {
+    Seats seats = new Seats(vm_.computeCreateAddress(deployer, vm_.getNonce(deployer) + 1));
+    factory = new CommunityFactory(cfg, address(seats), communityImpl, ledgerImpl, pools);
+}
 
 contract FactoryTest is Test {
     Config cfg;
@@ -33,8 +49,13 @@ contract FactoryTest is Test {
         usdc = new MockUSDC();
         cfg = new Config(address(usdc), makeAddr("treasury"), makeAddr("complianceRegistry"));
         poolAddrs = [makeAddr("vaultFlex"), makeAddr("vaultCoreL1"), makeAddr("vaultTerm")];
-        factory = new CommunityFactory(
-            address(cfg), address(new MockCommunityModule()), address(new MockCommunityModule()), poolAddrs
+        factory = deployFactory(
+            vm,
+            address(this),
+            address(cfg),
+            address(new MockCommunityModule()),
+            address(new MockCommunityModule()),
+            poolAddrs
         );
     }
 
@@ -48,13 +69,16 @@ contract FactoryTest is Test {
         assertEq(ws.community, community);
         assertEq(ws.config, address(cfg));
         assertEq(ws.factory, address(factory));
+        assertEq(ws.seats, address(factory.seats()), "the community is told the one Seats contract");
+        assertTrue(factory.seats().isRegistered(community), "and Seats knows it as a community");
         assertEq(ws.seatPrice, 50e6);
         assertEq(ws.name, "Lagos Circle");
 
-        // A community is two clones from the start, seats and its one ledger.
+        // A community is two clones from the start, the community and its one ledger.
         address ledger = factory.ledgerOf(community);
         assertTrue(ledger != address(0) && ledger != community);
-        assertEq(ws.vault, ledger, "seats is told its community's ledger");
+        assertEq(ws.vault, ledger, "the community is told its ledger");
+        assertFalse(factory.seats().isRegistered(ledger), "a ledger is not a community to Seats");
 
         assertFalse(factory.isCommunity(community)); // isCommunity is keyed on the ledger
         assertTrue(factory.isCommunity(ledger));
@@ -104,11 +128,22 @@ contract FactoryTest is Test {
     }
 
     function test_floorEnforced() public {
+        cfg.set(K.SEAT_PRICE_FLOOR, 50e6);
         vm.expectRevert(ICommunityFactory.SeatPriceBelowFloor.selector);
         factory.createCommunity("Cheap", 49e6);
         cfg.set(K.SEAT_PRICE_FLOOR, 100e6);
         vm.expectRevert(ICommunityFactory.SeatPriceBelowFloor.selector);
         factory.createCommunity("NowTooCheap", 50e6); // floor read live at use
+    }
+
+    /// A `Seats` that trusts another factory would refuse every community this one creates, so
+    /// the factory refuses it at construction.
+    function test_refusesASeatsWiredToAnotherFactory() public {
+        Seats wrong = new Seats(makeAddr("anotherFactory"));
+        address communityImpl = address(new MockCommunityModule());
+        address ledgerImpl = address(new MockCommunityModule());
+        vm.expectRevert(CommunityFactory.SeatsNotWiredToThisFactory.selector);
+        new CommunityFactory(address(cfg), address(wrong), communityImpl, ledgerImpl, poolAddrs);
     }
 
     function test_strangerCannotSpoofRegistry() public {
@@ -130,8 +165,8 @@ contract FactoryTest is Test {
 
 /// The real Ledger as the ledger implementation and a real `Venue` per tier, TERM
 /// included, so `createCommunity`'s clone-init and the ledger's own tier resolution are exercised end
-/// to end rather than just recorded by a mock. Seats stays MockCommunityModule: nothing here drives a
-/// seats function, and the factory has no seats-gated entry point left.
+/// to end rather than just recorded by a mock. The community stays MockCommunityModule: nothing here
+/// drives a community function.
 contract FactoryTierResolutionTest is Test {
     MockUSDC usdc;
     Config cfg;
@@ -154,8 +189,9 @@ contract FactoryTierResolutionTest is Test {
             poolAddrs[i] = address(vaults[i]);
         }
         coreVault = vaults[PoolTypes.CORE];
-        factory =
-            new CommunityFactory(address(cfg), address(new MockCommunityModule()), address(new Ledger()), poolAddrs);
+        factory = deployFactory(
+            vm, address(this), address(cfg), address(new MockCommunityModule()), address(new Ledger()), poolAddrs
+        );
     }
 
     /// `pools` is the whole of what decides which tiers exist, and it is Qudi's. A ledger reads it
@@ -205,14 +241,14 @@ contract FactoryTierResolutionTest is Test {
         ILedger(ledger).tierVault(PoolTypes.COUNT);
     }
 
-    function test_unregisteredSeatsResolveToNothing() public {
+    function test_unregisteredCommunityResolvesToNothing() public {
         assertEq(factory.ledgerOf(makeAddr("stranger")), address(0));
         assertEq(factory.vaultOf(makeAddr("stranger"), PoolTypes.FLEX), address(0));
         assertEq(factory.vaultsOf(makeAddr("stranger"))[PoolTypes.FLEX], address(0));
     }
 }
 
-/// Founding seat wiring: real Community as the seats implementation, mock vault/credit
+/// Founding seat wiring: real Community as the community implementation, mock vault/credit
 /// pool siblings. Separate fixture from FactoryTest because it needs a real ERC20 USDC
 /// and real Community, not the MockCommunityModule stand-in for all three clones.
 contract FactoryFoundingMintTest is Test {
@@ -230,7 +266,9 @@ contract FactoryFoundingMintTest is Test {
         registry.attest(1);
         cfg = new Config(address(usdc), treasury, address(registry));
         address[3] memory poolAddrs = [makeAddr("vaultFlex"), makeAddr("vaultCoreL1"), makeAddr("vaultTerm")];
-        factory = new CommunityFactory(address(cfg), address(new Community()), address(new MockVault()), poolAddrs);
+        factory = deployFactory(
+            vm, address(this), address(cfg), address(new Community()), address(new MockVault()), poolAddrs
+        );
     }
 
     /// The creator does not pay for their own founding seat.

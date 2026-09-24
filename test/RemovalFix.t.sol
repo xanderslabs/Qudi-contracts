@@ -5,36 +5,40 @@ import {Test} from "forge-std/Test.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {Config} from "../src/Config.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
+import {Community} from "../src/Community.sol";
+import {Seats} from "../src/Seats.sol";
 import {ICommunity} from "../src/interfaces/ICommunity.sol";
 import {ICommunityInit} from "../src/interfaces/ICommunityInit.sol";
 import {PoolTypes} from "../src/PoolTypes.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockVault, MockCreditCoreLeg} from "./mocks/MockSeatSiblings.sol";
-import {CommunityHarness} from "./helpers/CommunityHarness.sol";
+import {InviteSigner} from "./helpers/InviteSigner.sol";
 
 /// A vote's threshold counts the Active seats seasoned at its start, minus a removal's target; a
 /// vote needs at least 3 yes votes; and a host cannot freeze voters while a vote to remove the
 /// host runs, nor can a failed host vote be re-proposed inside the cooldown.
 ///
-/// A directly deployed seats contract wired to mock siblings, as `Seats.t.sol` is: every proof here
+/// A directly deployed community wired to a real `Seats` and mock siblings, as `Community.t.sol` is: every proof here
 /// is about the vote arithmetic and the seat states, and none moves money past the seat mint.
-contract RemovalFixTest is Test {
+contract RemovalFixTest is InviteSigner {
     Config config;
     ComplianceRegistry registry;
     MockUSDC usdc;
     MockVault vault;
     MockCreditCoreLeg core;
-    CommunityHarness community;
+    Community community;
+    Seats seats;
 
     address owner = makeAddr("owner");
     address treasury = makeAddr("treasury");
-    address host = makeAddr("host");
+    address host = _keyed("host");
 
     uint8 constant ACTIVE = 1;
 
-    /// This test contract is the seats contract's factory, as in `Seats.t.sol`: the community id
-    /// for `_split`, and no ledger, so `forfeit()`'s vault gate stays off.
+    /// This test contract is the community's factory, as in `Community.t.sol`: the community id
+    /// for `_split`, and no ledger, so `forfeit()`'s vault gate stays off. It is also the factory
+    /// `Seats` trusts.
     function communityIdOf(address) external pure returns (uint256) {
         return 1;
     }
@@ -55,10 +59,13 @@ contract RemovalFixTest is Test {
         core = new MockCreditCoreLeg(IERC20(address(usdc)));
         vm.prank(owner);
         config.setAddress(K.CREDIT_CORE, address(core));
-        community = new CommunityHarness();
+        community = new Community();
+        seats = new Seats(address(this));
+        seats.registerCommunity(address(community), 0);
         ICommunityInit.CommunityWiring memory w = ICommunityInit.CommunityWiring({
             config: address(config),
             factory: address(this),
+            seats: address(seats),
             community: address(community),
             vault: address(vault),
             creator: host,
@@ -90,10 +97,9 @@ contract RemovalFixTest is Test {
         registry.attest(1);
         uint256 price = community.seatPrice();
         usdc.mint(who, price);
-        vm.startPrank(who);
+        vm.prank(who);
         usdc.approve(address(community), price);
-        community.join();
-        vm.stopPrank();
+        _joinAs(address(community), who);
     }
 
     /// Joins members `from` to `to - 1`.
@@ -153,7 +159,7 @@ contract RemovalFixTest is Test {
         address target = _m(9);
 
         uint256 voteId = _proposeRemoval(target);
-        assertEq(community.denominatorOf(voteId), 4, "the host and three seasoned members");
+        assertEq(community.voteTally(voteId).denominator, 4, "the host and three seasoned members");
         _yes(voteId, _m(0));
         _yes(voteId, _m(1));
         _yes(voteId, _m(2));
@@ -179,7 +185,7 @@ contract RemovalFixTest is Test {
         vm.prank(_m(0));
         community.proposeRemoveSteward();
         uint256 voteId = community.activeStewardVoteId();
-        assertEq(community.denominatorOf(voteId), 7, "the host and six seasoned members");
+        assertEq(community.voteTally(voteId).denominator, 7, "the host and six seasoned members");
         for (uint256 i; i < 6; i++) {
             _yes(voteId, _m(i));
         }
@@ -202,10 +208,10 @@ contract RemovalFixTest is Test {
 
         vm.prank(host);
         community.proposeSeatPrice(80e6);
-        assertEq(community.denominatorOf(community.activePriceVoteId()), 5, "a price vote counts the five");
+        assertEq(community.voteTally(community.activePriceVoteId()).denominator, 5, "a price vote counts the five");
 
-        assertEq(community.denominatorOf(_proposeRemoval(_m(3))), 4, "a seasoned target is one fewer");
-        assertEq(community.denominatorOf(_proposeRemoval(_m(50))), 5, "an unseasoned target was never counted");
+        assertEq(community.voteTally(_proposeRemoval(_m(3))).denominator, 4, "a seasoned target is one fewer");
+        assertEq(community.voteTally(_proposeRemoval(_m(50))).denominator, 5, "an unseasoned target was never counted");
     }
 
     // =============================================================================
@@ -227,11 +233,13 @@ contract RemovalFixTest is Test {
         vm.prank(host);
         community.proposeSeatPrice(80e6);
         uint256 voteId = community.activePriceVoteId();
-        assertEq(community.denominatorOf(voteId), 4, "host and members 0 to 2: Left, Suspended and new are not in");
+        assertEq(
+            community.voteTally(voteId).denominator, 4, "host and members 0 to 2: Left, Suspended and new are not in"
+        );
 
         vm.prank(_m(2));
         community.forfeit();
-        assertEq(community.denominatorOf(voteId), 4, "a departure after the start does not move it");
+        assertEq(community.voteTally(voteId).denominator, 4, "a departure after the start does not move it");
     }
 
     // =============================================================================
@@ -260,6 +268,9 @@ contract RemovalFixTest is Test {
     /// mixed order. For cutoffs at, one second before, and one second after six mint times, each
     /// removal's stored denominator equals a count over every seat done here.
     function test_fix5_theDenominatorIsExactAt200SeatsWith40Departures() public {
+        // Up to 160 seats are Active at once here, above the launch member cap.
+        vm.prank(owner);
+        config.set(K.MEMBER_CAP, 200);
         _holders.push(host);
         for (uint256 i = 1; i < 20; i++) {
             _mintAndMaybeLeave(i);
@@ -327,7 +338,7 @@ contract RemovalFixTest is Test {
                 uint256 used = before - gasleft();
                 if (used > busiest) busiest = used;
                 uint256 voteId = community.activeRemovalVoteId(target);
-                assertEq(community.denominatorOf(voteId), _brute(window, target), "stored equals counted");
+                assertEq(community.voteTally(voteId).denominator, _brute(window, target), "stored equals counted");
                 nextTarget -= 7; // targets spread over seasoned and unseasoned seats
             }
         }
@@ -353,7 +364,7 @@ contract RemovalFixTest is Test {
         vm.prank(host);
         community.proposeSeatPrice(90e6);
         uint256 voteId = community.activePriceVoteId();
-        assertEq(community.denominatorOf(voteId), 2);
+        assertEq(community.voteTally(voteId).denominator, 2);
         _yes(voteId, host);
         _yes(voteId, _m(0));
         vm.warp(block.timestamp + _window() + 1);
@@ -367,7 +378,7 @@ contract RemovalFixTest is Test {
         vm.prank(_m(0));
         community.forfeit();
         uint256 removal = _proposeRemoval(_m(1));
-        assertEq(community.denominatorOf(removal), 1, "the host alone");
+        assertEq(community.voteTally(removal).denominator, 1, "the host alone");
         _yes(removal, host);
         vm.warp(block.timestamp + _window() + 1);
         vm.expectRevert(ICommunity.NotPassed.selector);

@@ -30,7 +30,7 @@ contract CreditCoreHandlerReplayTest is Test {
     address treasuryMgr = makeAddr("treasuryManager");
     address allocationMs = makeAddr("allocationMultisig");
 
-    bytes32 constant SEED = keccak256("qudi.p1.4c-fix.handler-replay.v1");
+    bytes32 constant SEED = keccak256("qudi.handler-replay.v1");
     uint256 constant STEPS = 4000;
 
     function setUp() public {

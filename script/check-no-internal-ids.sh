@@ -12,7 +12,6 @@ self="script/check-no-internal-ids.sh"
 # Matched case-sensitively: ids and document names.
 ids=(
   '(^|[^A-Za-z])[Ll][Bb]-?[0-9]'
-  '\bP[0-9]\.[0-9]'
   'P1\.'
   'P2\.'
   'P3\.'
@@ -35,8 +34,10 @@ ids=(
   '[Oo]pen [Qq]uestion [0-9]'
 )
 
-# Matched case-insensitively: words that only ever point at internal process.
+# Matched case-insensitively: words that only ever point at internal process, and unit names,
+# which turn up in lower case inside strings such as a replay seed's `p1.20`.
 words=(
+  '\bP[0-9]\.[0-9]'
   'ruling'
   'build report'
   'build prompt'

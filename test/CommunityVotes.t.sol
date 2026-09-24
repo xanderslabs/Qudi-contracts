@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity 0.8.30;
 
-import {SeatsTest} from "./Seats.t.sol";
+import {CommunityTest} from "./Community.t.sol";
 import {ICommunity} from "../src/interfaces/ICommunity.sol";
+import {ConfigKeys} from "../src/ConfigKeys.sol";
 
 /// Steward removal vote, election-when-vacant, and steward-default auto-removal.
-contract SeatsVotesTest is SeatsTest {
-    address cy = makeAddr("cy");
-    address dara = makeAddr("dara");
-    address efe = makeAddr("efe");
+contract CommunityVotesTest is CommunityTest {
+    address cy = _keyed("cy");
+    address dara = _keyed("dara");
+    address efe = _keyed("efe");
 
     function test_stewardVoteThreshold() public {
         _join(ada); // 6 members with steward
@@ -460,6 +461,8 @@ contract SeatsVotesTest is SeatsTest {
     }
 
     function test_priceVoteBelowFloorRevertsAtProposal() public {
+        vm.prank(owner);
+        config.set(ConfigKeys.SEAT_PRICE_FLOOR, 5e6); // the launch floor is 0
         vm.prank(steward);
         vm.expectRevert(ICommunity.BelowFloor.selector);
         community.proposeSeatPrice(1e6);
@@ -485,11 +488,11 @@ contract SeatsVotesTest is SeatsTest {
 
     function _joinOpen(address who) internal {
         _attest(who);
-        usdc.mint(who, community.seatPrice());
-        vm.startPrank(who);
-        usdc.approve(address(community), community.seatPrice());
-        community.join();
-        vm.stopPrank();
+        uint256 price = community.seatPrice();
+        usdc.mint(who, price);
+        vm.prank(who);
+        usdc.approve(address(community), price);
+        _joinAs(address(community), who);
     }
 
     /// Regression: a superseded vote id must never accept a late ballot, even after a

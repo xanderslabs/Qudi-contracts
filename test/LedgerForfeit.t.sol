@@ -2,6 +2,8 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {Seats} from "../src/Seats.sol";
+import {InviteSigner} from "./helpers/InviteSigner.sol";
 import {Config} from "../src/Config.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
 import {Community} from "../src/Community.sol";
@@ -18,9 +20,9 @@ import {MockCreditCoreLeg} from "./mocks/MockSeatSiblings.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
 /// What leaving does and does not do, over the real factory, the real
-/// seats contract and the real ledger, because `forfeit()`'s new gate is a call between two of
+/// community, `Seats` and ledger, because `forfeit()`'s new gate is a call between two of
 /// them and a stub would prove nothing about the wiring.
-contract LedgerForfeitTest is Test {
+contract LedgerForfeitTest is InviteSigner {
     MockUSDC usdc;
     Config config;
     ComplianceRegistry registry;
@@ -32,7 +34,7 @@ contract LedgerForfeitTest is Test {
 
     address owner = makeAddr("owner");
     address treasury = makeAddr("treasury");
-    address host = makeAddr("host");
+    address host = _keyed("host");
     address ada = makeAddr("ada");
     address bea = makeAddr("bea");
     address cid = makeAddr("cid");
@@ -50,18 +52,19 @@ contract LedgerForfeitTest is Test {
         vm.prank(owner);
         config.setAddress(K.CREDIT_CORE, address(core));
 
-        address seatsImpl = address(new Community());
+        address communityImpl = address(new Community());
         address ledgerImpl = address(new Ledger());
 
-        // The factory's constructor needs the three tier vaults, and each needs the factory's
-        // address: compute it from this contract's nonce, as Deploy.s.sol does.
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 3);
+        // The factory's constructor needs the three tier vaults and `Seats`, and each needs the
+        // factory's address: compute it from this contract's nonce, as Deploy.s.sol does.
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
         address[3] memory poolAddrs;
         for (uint8 t = 0; t < 3; t++) {
             pools[t] = new Venue(usdc, IConfig(address(config)), predicted, t, owner, "Qudi", "q");
             poolAddrs[t] = address(pools[t]);
         }
-        factory = new CommunityFactory(address(config), seatsImpl, ledgerImpl, poolAddrs);
+        Seats seats = new Seats(predicted);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, poolAddrs);
         assertEq(address(factory), predicted, "the tier vaults are wired to this factory");
 
         address[4] memory people = [host, ada, bea, cid];
@@ -71,8 +74,7 @@ contract LedgerForfeitTest is Test {
             usdc.mint(people[i], 1_000_000e6);
         }
 
-        // Read the floor before the prank: an argument that is itself a call would consume it.
-        uint256 seatPrice = config.seatPriceFloor();
+        uint256 seatPrice = 50e6;
         vm.prank(host);
         community = Community(factory.createCommunity("Test Community", seatPrice));
         ledger = Ledger(factory.ledgerOf(address(community)));
@@ -81,7 +83,7 @@ contract LedgerForfeitTest is Test {
             vm.startPrank(people[i]);
             usdc.approve(address(community), type(uint256).max);
             usdc.approve(address(ledger), type(uint256).max);
-            community.join();
+            _invitedJoin(address(community), people[i]);
             vm.stopPrank();
         }
         vm.prank(host);

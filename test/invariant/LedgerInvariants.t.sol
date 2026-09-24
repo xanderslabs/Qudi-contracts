@@ -16,7 +16,7 @@ import {PoolTypes} from "../../src/PoolTypes.sol";
 import {VaultStatus} from "../../src/VaultStatus.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockVenue} from "../mocks/MockVenue.sol";
-import {LedgerFactoryStub, LedgerSeatsStub, LedgerCreditCoreStub} from "../helpers/LedgerFixture.sol";
+import {LedgerFactoryStub, LedgerCommunityStub, LedgerCreditCoreStub} from "../helpers/LedgerFixture.sol";
 
 /// Drives one real ledger over two real `Venue` tiers, with several vault records in each so
 /// the tier position is genuinely divided rather than held by one record. Every verb no-ops
@@ -28,7 +28,7 @@ contract LedgerHandler is Test {
     Venue public coreVault;
     IConfig public config;
     MockUSDC public usdc;
-    LedgerSeatsStub public community;
+    LedgerCommunityStub public community;
 
     uint256 internal constant ACTORS = 4;
     address[ACTORS] public actors;
@@ -53,7 +53,7 @@ contract LedgerHandler is Test {
     mapping(uint256 => address) internal _requester;
     uint256[] internal _proposalIds;
 
-    constructor(Ledger ledger_, LedgerSeatsStub community_, uint256[VAULTS] memory ids) {
+    constructor(Ledger ledger_, LedgerCommunityStub community_, uint256[VAULTS] memory ids) {
         ledger = ledger_;
         flexVault = Venue(ledger_.tierVault(PoolTypes.FLEX));
         coreVault = Venue(ledger_.tierVault(PoolTypes.CORE));
@@ -215,7 +215,7 @@ contract LedgerInvariantTest is StdInvariant, Test {
     MockUSDC usdc;
     Config config;
     LedgerFactoryStub factory;
-    LedgerSeatsStub community;
+    LedgerCommunityStub community;
     LedgerCreditCoreStub creditCore;
     Ledger ledger;
     Venue flexVault;
@@ -259,7 +259,7 @@ contract LedgerInvariantTest is StdInvariant, Test {
         factory.setPool(PoolTypes.FLEX, address(flexVault));
         factory.setPool(PoolTypes.CORE, address(coreVault));
 
-        community = new LedgerSeatsStub();
+        community = new LedgerCommunityStub();
         creditCore = new LedgerCreditCoreStub(usdc);
         vm.prank(owner);
         config.setAddress(K.CREDIT_CORE, address(creditCore));
@@ -269,6 +269,7 @@ contract LedgerInvariantTest is StdInvariant, Test {
             ICommunityInit.CommunityWiring({
                 config: address(config),
                 factory: address(factory),
+                seats: address(0), // the ledger reads no seat
                 community: address(community),
                 vault: address(0),
                 creator: host,

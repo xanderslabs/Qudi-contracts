@@ -2,6 +2,8 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {Seats} from "../src/Seats.sol";
+import {InviteSigner} from "./helpers/InviteSigner.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {Config} from "../src/Config.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
@@ -51,13 +53,13 @@ contract SameTxProbe {
 }
 
 /// The host proposes a removal, the members vote, the proposal freezes the member, and a seat is
-/// never burned. These are eleven proofs, over the real factory, seats, ledger,
+/// never burned. These are eleven proofs, over the real factory, `Seats`, community, ledger,
 /// `CreditCore` and `CreditStanding`, because every one of them is a call between two of those
 /// contracts and a stub would prove nothing about the wiring.
 ///
 /// The fixture's five members all hold seats older than the seasoning window before any vote
 /// starts, so the community threshold is 3 of 5 and the target is one of the 5.
-contract RemovalTest is Test {
+contract RemovalTest is InviteSigner {
     MockUSDC usdc;
     Config config;
     ComplianceRegistry registry;
@@ -71,7 +73,7 @@ contract RemovalTest is Test {
     address treasuryMgr = makeAddr("treasuryManager");
     address allocationMs = makeAddr("allocationMultisig");
     address treasury = makeAddr("treasury");
-    address host = makeAddr("host");
+    address host = _keyed("host");
     address ada = makeAddr("ada");
     address bea = makeAddr("bea");
     address cid = makeAddr("cid");
@@ -88,14 +90,15 @@ contract RemovalTest is Test {
         registry = new ComplianceRegistry(address(this));
         config = new Config(address(usdc), treasury, address(registry));
 
-        address seatsImpl = address(new Community());
+        address communityImpl = address(new Community());
         address ledgerImpl = address(new Ledger());
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 3);
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
         address[3] memory poolAddrs;
         for (uint8 t = 0; t < 3; t++) {
             poolAddrs[t] = address(new Venue(usdc, IConfig(address(config)), predicted, t, governance, "Qudi", "q"));
         }
-        factory = new CommunityFactory(address(config), seatsImpl, ledgerImpl, poolAddrs);
+        Seats seats = new Seats(predicted);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, poolAddrs);
         assertEq(address(factory), predicted, "the tier vaults are wired to this factory");
 
         standing = new CreditStandingHarness(IConfig(address(config)), address(factory), governance);
@@ -124,7 +127,7 @@ contract RemovalTest is Test {
             registry.attest(1);
             usdc.mint(people[i], 1_000_000e6);
         }
-        uint256 price = config.seatPriceFloor();
+        uint256 price = 50e6;
         vm.prank(host);
         community = Community(factory.createCommunity("Removal Community", price));
         ledger = Ledger(factory.ledgerOf(address(community)));
@@ -133,7 +136,7 @@ contract RemovalTest is Test {
             usdc.approve(address(community), type(uint256).max);
             usdc.approve(address(ledger), type(uint256).max);
             usdc.approve(address(cc), type(uint256).max);
-            if (people[i] != host) community.join();
+            if (people[i] != host) _invitedJoin(address(community), people[i]);
             vm.stopPrank();
         }
         vm.prank(allocationMs);
@@ -410,8 +413,8 @@ contract RemovalTest is Test {
         assertEq(community.memberCount(), 4, "one fewer member");
         assertFalse(community.isMember(ada), "not a member");
         assertEq(community.tokenOf(ada), tokenId, "the record is kept");
-        assertEq(community.ownerOf(tokenId), ada, "and the seat is still in the member's wallet");
-        assertEq(community.balanceOf(ada), 1);
+        assertEq(factory.seats().ownerOf(tokenId), ada, "and the seat is still in the member's wallet");
+        assertEq(factory.seats().balanceOf(ada), 1);
     }
 
     // =============================================================================
@@ -427,9 +430,10 @@ contract RemovalTest is Test {
         vm.prank(ada);
         try community.forfeit() {} catch {}
 
+        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(address(community), ada);
         vm.expectRevert(ICommunity.AlreadyMember.selector);
         vm.prank(ada);
-        community.join();
+        community.join(inv, hostSig, keySig);
 
         assertEq(_state(ada), SUSPENDED, "carried for life on that wallet");
         assertFalse(community.isMember(ada));
@@ -449,13 +453,14 @@ contract RemovalTest is Test {
 
         assertEq(_state(ada), LEFT, "Left");
         assertEq(community.tokenOf(ada), tokenId, "the record is kept");
-        assertEq(community.ownerOf(tokenId), ada, "the seat is still in the wallet");
+        assertEq(factory.seats().ownerOf(tokenId), ada, "the seat is still in the wallet");
         assertEq(community.memberCount(), 4);
         assertFalse(community.isMember(ada));
 
+        (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(address(community), ada);
         vm.expectRevert(ICommunity.AlreadyMember.selector);
         vm.prank(ada);
-        community.join();
+        community.join(inv, hostSig, keySig);
     }
 
     // =============================================================================
@@ -498,11 +503,9 @@ contract RemovalTest is Test {
             vm.prank(who[i]);
             usdc.approve(address(community), type(uint256).max);
         }
-        vm.prank(early);
-        community.join();
+        _joinAs(address(community), early);
         vm.warp(block.timestamp + 1);
-        vm.prank(late);
-        community.join();
+        _joinAs(address(community), late);
         vm.warp(block.timestamp + config.memberSeasoningWindow() - 1);
     }
 
@@ -573,7 +576,7 @@ contract RemovalTest is Test {
     // =============================================================================
 
     function _secondCommunity() internal returns (Community communityB) {
-        uint256 price = config.seatPriceFloor();
+        uint256 price = 50e6;
         vm.prank(host);
         communityB = Community(factory.createCommunity("Second Community", price));
     }
@@ -587,7 +590,7 @@ contract RemovalTest is Test {
         for (uint256 i; i < 4; i++) {
             vm.startPrank(members[i]);
             usdc.approve(address(communityB), type(uint256).max);
-            communityB.join();
+            _invitedJoin(address(communityB), members[i]);
             vm.stopPrank();
         }
         vm.warp(block.timestamp + config.memberSeasoningWindow() + 1);
@@ -621,7 +624,8 @@ contract RemovalTest is Test {
         Community[2] memory both = [community, communityB];
         for (uint256 i; i < 2; i++) {
             probe.exec(address(usdc), abi.encodeCall(IERC20.approve, (address(both[i]), type(uint256).max)));
-            probe.exec(address(both[i]), abi.encodeCall(ICommunity.join, ()));
+            (ICommunity.Invite memory inv, bytes memory hostSig, bytes memory keySig) = _inviteFor(address(both[i]), p);
+            probe.exec(address(both[i]), abi.encodeCall(ICommunity.join, (inv, hostSig, keySig)));
         }
         standing.primeImpact(0, p, 100e6, 1000e6);
         standing.primeImpact(1, p, 400e6, 1000e6);
@@ -629,7 +633,7 @@ contract RemovalTest is Test {
         (uint256 capBefore, uint256 capAfter, uint256 totalAfter) =
             probe.capAround(address(communityB), abi.encodeCall(ICommunity.forfeit, ()), standing, p);
 
-        assertEq(communityB.ownerOf(communityB.tokenOf(p)), p, "the Left seat is still in the wallet");
+        assertEq(factory.seats().ownerOf(communityB.tokenOf(p)), p, "the Left seat is still in the wallet");
         assertEq(capBefore, 1_500e6);
         assertEq(capAfter, 300e6, "B's impact left the cap in the forfeiting transaction");
         assertEq(totalAfter, 100e6, "and the account total with it");

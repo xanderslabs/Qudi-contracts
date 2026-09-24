@@ -6,6 +6,11 @@ pragma solidity 0.8.30;
 interface IConfig {
     error UnknownPoolType();
     function seatPriceFloor() external view returns (uint256);
+    function seatPriceCeiling() external view returns (uint256);
+    /// The most Active seats a community holds.
+    function memberCap() external view returns (uint256);
+    /// The largest invite `join` accepts: its uses, and seconds from issue to expiry.
+    function inviteLimits() external view returns (uint32 maxUses, uint64 maxTtl);
     function mintSplit() external view returns (uint16 host, uint16 pool, uint16 protocol);
     function epochLength() external view returns (uint64);
     function withdrawTerm(uint8 poolType) external view returns (uint64);

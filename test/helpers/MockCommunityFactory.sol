@@ -63,19 +63,19 @@ contract MockCommunityFactory {
     }
 
     /// Registers `who` as a community contract belonging to `communityId`, the way `createCommunity`
-    /// and `openPool` register a real seats or ledger clone.
+    /// and `openPool` register a real community or ledger clone.
     function register(address who, uint256 communityId) external {
         _communityIdPlusOne[who] = communityId + 1;
     }
 
-    /// Mirrors `CommunityFactory.communityAt`: a community's seats address. `CreditCore` compares the
+    /// Mirrors `CommunityFactory.communityAt`: a community's address. `CreditCore` compares the
     /// caller against it to derive a leg's kind, so a test that cares which kind is emitted must
-    /// set this. Unset reads as `defaultSeats`, a `MockSeatStamps` no caller is, so every leg
+    /// set this. Unset reads as `defaultCommunity`, a `MockSeatStamps` no caller is, so every leg
     /// is still a Yield leg, and `CreditStanding`'s seat stamp has a `mintedAt` to read.
     mapping(uint256 => address) internal _communityOf;
     address public immutable defaultCommunity = address(new MockSeatStamps());
 
-    function setSeats(uint256 communityId, address community) external {
+    function setCommunity(uint256 communityId, address community) external {
         _communityOf[communityId] = community;
     }
 

@@ -2,6 +2,8 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {Seats} from "../../src/Seats.sol";
+import {InviteSigner} from "../helpers/InviteSigner.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {console} from "forge-std/console.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
@@ -381,7 +383,7 @@ contract DebtHandler is Test {
     }
 }
 
-contract CreditCoreDebtInvariantTest is StdInvariant, Test {
+contract CreditCoreDebtInvariantTest is StdInvariant, InviteSigner {
     MockUSDC usdc;
     Config config;
     ComplianceRegistry registry;
@@ -407,17 +409,19 @@ contract CreditCoreDebtInvariantTest is StdInvariant, Test {
         usdc = new MockUSDC();
         registry = new ComplianceRegistry(screener);
         config = new Config(address(usdc), makeAddr("treasury"), address(registry));
-        address seatsImpl = address(new Community());
+        address communityImpl = address(new Community());
         address ledgerImpl = address(new Ledger());
         // A real Flex vault for community 0, so the campaign's members can save and
-        // withdraw. One creation (the vault) sits between this nonce read and the factory.
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
+        // withdraw. Two creations (the vault and `Seats`) sit between this nonce read and the
+        // factory.
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 2);
         flexVault = new Venue(
             IERC20(address(usdc)), IConfig(address(config)), predicted, PoolTypes.FLEX, address(this), "F", "F"
         );
         address[3] memory pools = _dummyPools();
         pools[PoolTypes.FLEX] = address(flexVault);
-        factory = new CommunityFactory(address(config), seatsImpl, ledgerImpl, pools);
+        Seats seats = new Seats(predicted);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, pools);
         require(address(factory) == predicted, "factory precompute mismatch");
         standing = new CreditStandingHarness(IConfig(address(config)), address(factory), governance);
         cc = new CreditCoreHarness(
@@ -446,8 +450,12 @@ contract CreditCoreDebtInvariantTest is StdInvariant, Test {
         // each (a bigger fixed pool than the original 3, so the campaign spends far
         // more steps before every (account, community) pair has reached formal Default and
         // gone permanently ineligible), with enough attributed yield that the TE budget is real.
-        registry.attest(1); // the test contract is the founding creator of every community below
+        // A keyed host founds every community below, because the host signs each invite.
+        address host = _keyed("host");
+        vm.prank(host);
+        registry.attest(1);
         for (uint256 c; c < 2; c++) {
+            vm.prank(host);
             address community = factory.createCommunity("Community", SEAT);
             vm.prank(allocationMs);
             cc.allocate(c, ALLOCATION, ICreditCore.AllocationType.Growth);
@@ -458,7 +466,7 @@ contract CreditCoreDebtInvariantTest is StdInvariant, Test {
                 usdc.mint(m, SEAT);
                 vm.startPrank(m);
                 usdc.approve(community, SEAT);
-                Community(community).join();
+                _invitedJoin(community, m);
                 vm.stopPrank();
             }
         }
@@ -570,7 +578,7 @@ contract CreditCoreDebtInvariantTest is StdInvariant, Test {
     /// A fixed 4000-step deterministic replay, so the
     /// per-method landed counts are stable numbers.
     function test_replay4000Steps_reportsPerMethodLandedCounts() public {
-        bytes32 seed = keccak256("qudi.p1.5.debt-replay.v1");
+        bytes32 seed = keccak256("qudi.debt-replay.v1");
         handler.setCheckEnabled(false);
         for (uint256 step; step < 4000; step++) {
             uint256 a0 = uint256(keccak256(abi.encode(seed, step, 0)));

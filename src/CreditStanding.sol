@@ -162,8 +162,8 @@ contract CreditStanding is ICreditStanding, Ownable2Step {
 
     // ---- the seat stamp ----
 
-    /// The seat's **token id**, not its `mintedAt`. `Community` assigns ids from `nextTokenId++`,
-    /// so every seat ever minted has its own, without the hole a timestamp carries: two seats
+    /// The seat's **token id**, not its `mintedAt`. `Seats` assigns ids in order across every
+    /// community and never reuses one, so every seat ever minted has its own, without the hole a timestamp carries: two seats
     /// minted in the same block share a `mintedAt` to the second.
     ///
     /// **`activeTokenOf`, not `tokenOf`.** A seat is never burned

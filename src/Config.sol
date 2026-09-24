@@ -52,28 +52,20 @@ contract Config is Ownable2Step {
         _init(K.HOST_VOTE_WINDOW, 7 days);
         _init(K.COMMUNITY_VOTE_THRESHOLD_BPS, 5001);
         _init(K.COMMUNITY_VOTE_WINDOW, 7 days);
-        // The shared-vault withdrawal.
-        // Quorum 20% of the vault's qualifying contributors, approval two thirds of the votes
-        // cast. The three-vote floor is not a parameter: it is a hard
-        // constant in Ledger, because no configured percentage should be able to let a
-        // community of two pass anything.
-        _init(K.SHARED_WITHDRAWAL_QUORUM_BPS, 2000);
-        _init(K.SHARED_WITHDRAWAL_APPROVAL_BPS, 6667);
-        // A qualifying contributor: at least $10, at least 14 days
-        // before the proposal. The seasoning matches the seat one because it answers the
-        // same question, whether a stake is old enough to be real.
+        // A shared vault payout counts a member who deposited at least $10, first at least 14 days
+        // before the request. The seasoning matches the seat one because it answers the same
+        // question, whether a stake is old enough to be real.
         _init(K.QUALIFYING_CONTRIBUTOR_MIN_DEPOSIT, 10e6);
         _init(K.QUALIFYING_CONTRIBUTOR_SEASONING, 14 days);
-        // Long enough that a host who is slow, travelling or waiting on
-        // the recipient does not lose a passed vote, short enough that money is not frozen for
-        // a month.
-        _init(K.SHARED_PROPOSAL_REVERT_DELAY, 14 days);
         // After a failed removal vote the steward waits
         // this long to propose removing the same member again, so a member is frozen at most one
         // week in a month.
         _init(K.REMOVAL_REPROPOSE_COOLDOWN, 30 days);
         // A nominee has a week to take up the host role, the same length as a vote.
         _init(K.HANDOVER_ACCEPT_WINDOW, 7 days);
+        // Enough for every venue in personal and shared form many times over, and small enough
+        // that the ledger's impact views, which walk a member's list, stay cheap.
+        _init(K.MAX_VAULTS_PER_MEMBER, 32);
         // Canonical stages, elapsed seconds from drawTimestamp.
         _init(K.STAGE_GRACE_START, 60 days);
         _init(K.STAGE_LATE_START, 65 days);
@@ -227,22 +219,15 @@ contract Config is Ownable2Step {
         if (key == K.HOST_VOTE_WINDOW) return (1 days, 30 days);
         if (key == K.COMMUNITY_VOTE_THRESHOLD_BPS) return (5001, 10_000);
         if (key == K.COMMUNITY_VOTE_WINDOW) return (1 days, 30 days);
-        // The quorum is a floor on participation, so it may be raised but never removed: 500 bps
-        // keeps a governed change from setting it to zero and letting one voter carry a pot.
-        // The approval bar keeps the same lower bound as every other vote in the
-        // contract, a simple majority. The upper bounds are sanity ranges, not design values.
-        if (key == K.SHARED_WITHDRAWAL_QUORUM_BPS) return (500, 10_000);
-        if (key == K.SHARED_WITHDRAWAL_APPROVAL_BPS) return (5001, 10_000);
-        // A revert delay of zero would make a passed proposal revertible the instant its window
-        // closed, which is a race against the execution it is meant to wait for; 30 days is the
-        // "frozen for a month" the launch value was chosen against.
-        if (key == K.SHARED_PROPOSAL_REVERT_DELAY) return (1 days, 30 days);
         // Both ends are set: at least 7 days so a timelocked change cannot make
         // it zero and let a steward re-freeze a member the moment a vote fails, at most 180.
         if (key == K.REMOVAL_REPROPOSE_COOLDOWN) return (7 days, 180 days);
         // At least a day, so a nominee has time to see the nomination; at most the 30 days
         // every other window in this contract gets.
         if (key == K.HANDOVER_ACCEPT_WINDOW) return (1 days, 30 days);
+        // At least 1, or no member could open a vault. At most 64, so a member's impact read
+        // walks a bounded list.
+        if (key == K.MAX_VAULTS_PER_MEMBER) return (1, 64);
         // The launch values are $10 and 14 days; these sanity ranges are not design
         // values. Both floors sit above zero because a floor must never repeal the mechanism: at zero either bar disappears
         // and a dust deposit made a second before the proposal would carry a vote, which is the
@@ -379,25 +364,10 @@ contract Config is Ownable2Step {
         return (uint16(values[K.COMMUNITY_VOTE_THRESHOLD_BPS]), uint64(values[K.COMMUNITY_VOTE_WINDOW]));
     }
 
-    /// The two bars a shared-vault withdrawal must clear. Both are
-    /// counts of people: `quorumBps` of the vault's qualifying contributors must vote, and
-    /// `approvalBps` of the votes cast must say yes. The vote window is `communityVote`'s, and
-    /// the three-vote floor is Ledger's constant.
-    function sharedWithdrawalVote() external view returns (uint16 quorumBps, uint16 approvalBps) {
-        return (uint16(values[K.SHARED_WITHDRAWAL_QUORUM_BPS]), uint16(values[K.SHARED_WITHDRAWAL_APPROVAL_BPS]));
-    }
-
-    /// The two bars a qualifying contributor clears: at least
-    /// `minDeposit` into the shared vault, at least `seasoning` before the proposal. The ledger
-    /// measures the seasoning against the proposal's own creation time, not the current block.
+    /// Who a shared vault payout counts: at least `minDeposit` into the vault, with a first deposit at
+    /// least `seasoning` before the request.
     function qualifyingContributor() external view returns (uint256 minDeposit, uint64 seasoning) {
         return (values[K.QUALIFYING_CONTRIBUTOR_MIN_DEPOSIT], uint64(values[K.QUALIFYING_CONTRIBUTOR_SEASONING]));
-    }
-
-    /// How long after a passed proposal's window closes before anyone may revert it and return
-    /// the earmark to the vault (a revert, never an expiry).
-    function sharedProposalRevertDelay() external view returns (uint64) {
-        return uint64(values[K.SHARED_PROPOSAL_REVERT_DELAY]);
     }
 
     /// Seconds after a failed removal vote's deadline before the same member may be proposed
@@ -409,6 +379,11 @@ contract Config is Ownable2Step {
     /// Seconds a nominated successor has to accept the host role.
     function handoverAcceptWindow() external view returns (uint64) {
         return uint64(values[K.HANDOVER_ACCEPT_WINDOW]);
+    }
+
+    /// The most vaults one member's list in one community may hold.
+    function maxVaultsPerMember() external view returns (uint256) {
+        return values[K.MAX_VAULTS_PER_MEMBER];
     }
 
     /// The five canonical stage boundaries, elapsed seconds from drawTimestamp.

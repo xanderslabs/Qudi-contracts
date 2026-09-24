@@ -83,9 +83,6 @@ contract DebtHandler is Test {
     /// A save or a withdrawal that moved CreditCore's USDC balance or its booked cash. Only
     /// CreditCore's own entry points may move either.
     bool public payoutMovedCore;
-    uint256[] internal _requestIds;
-    mapping(uint256 => address) internal _requester;
-    mapping(uint256 => uint256) internal _requestedAmount;
 
     constructor(
         CreditCoreHarness cc_,
@@ -306,11 +303,13 @@ contract DebtHandler is Test {
         _checkAll();
     }
 
-    function withdrawInstant(uint256 mi, uint256 pct) external {
+    /// A withdrawal is one pushed payment. No venue holds anything in this fixture, so the venue
+    /// always pays it in the same transaction, whatever the member owes.
+    function withdraw(uint256 mi, uint256 pct) external {
         address m = _m(mi);
-        uint256 amount = ledger.vaultBalance(vaultOf[m]) * (pct % 100 + 1) / 100;
+        uint256 amount = ledger.vaultValue(vaultOf[m]) * (pct % 100 + 1) / 100;
         if (amount == 0) {
-            _bump("withdrawInstant", false);
+            _bump("withdraw", false);
             _checkAll();
             return;
         }
@@ -318,61 +317,13 @@ contract DebtHandler is Test {
         uint256 before = usdc.balanceOf(m);
         bytes32 stage = _stageBefore(m);
         vm.prank(m);
-        try ledger.withdrawInstant(vaultOf[m], amount) {
+        try ledger.requestWithdraw(vaultOf[m], amount) {
             totalRequested += amount;
             totalPaidOut += usdc.balanceOf(m) - before;
-            _bump("withdrawInstant", true);
-            _bumpWithdrawStage("withdrawInstant", stage);
+            _bump("withdraw", true);
+            _bumpWithdrawStage("withdraw", stage);
         } catch {
-            _bump("withdrawInstant", false);
-        }
-        _noteCore(bal, booked);
-        _checkAll();
-    }
-
-    function requestWithdraw(uint256 mi, uint256 pct) external {
-        address m = _m(mi);
-        uint256 amount = ledger.vaultBalance(vaultOf[m]) * (pct % 100 + 1) / 100;
-        if (amount == 0) {
-            _bump("requestWithdraw", false);
-            _checkAll();
-            return;
-        }
-        vm.prank(m);
-        try ledger.requestWithdraw(vaultOf[m], amount) returns (uint256 id) {
-            _requestIds.push(id);
-            _requester[id] = m;
-            _requestedAmount[id] = amount;
-            _bump("requestWithdraw", true);
-        } catch {
-            _bump("requestWithdraw", false);
-        }
-        _checkAll();
-    }
-
-    /// Executes a pending request at its own release time, whatever the member owes by then.
-    /// No venue holds anything in this fixture, so the vault always pays it instantly.
-    function executeWithdraw(uint256 idSeed) external {
-        if (_requestIds.length == 0) {
-            _bump("executeWithdraw", false);
-            _checkAll();
-            return;
-        }
-        uint256 id = _requestIds[idSeed % _requestIds.length];
-        address m = _requester[id];
-        uint256 due = ledger.releaseAfter(id);
-        if (block.timestamp < due) vm.warp(due);
-        (uint256 bal, uint256 booked) = _coreCash();
-        uint256 before = usdc.balanceOf(m);
-        bytes32 stage = _stageBefore(m);
-        vm.prank(m);
-        try ledger.executeWithdraw(id) {
-            totalRequested += _requestedAmount[id];
-            totalPaidOut += usdc.balanceOf(m) - before;
-            _bump("executeWithdraw", true);
-            _bumpWithdrawStage("executeWithdraw", stage);
-        } catch {
-            _bump("executeWithdraw", false);
+            _bump("withdraw", false);
         }
         _noteCore(bal, booked);
         _checkAll();
@@ -497,15 +448,7 @@ contract CreditCoreDebtInvariantTest is StdInvariant, InviteSigner {
             handler.setVaultOf(
                 m,
                 flexLedger.createVault(
-                    ILedger.VaultParams({
-                        poolType: VenueIds.FLEX,
-                        shared: false,
-                        lockedUntil: 0,
-                        contribution: 0,
-                        name: "savings",
-                        target: 0,
-                        targetDate: 0
-                    })
+                    ILedger.VaultParams({venueId: VenueIds.FLEX, shared: false, lockedUntil: 0, name: "savings"})
                 )
             );
         }
@@ -567,14 +510,8 @@ contract CreditCoreDebtInvariantTest is StdInvariant, InviteSigner {
         console.log("creditYield ", handler.lands("creditYield"), "/", handler.tries("creditYield"));
         console.log("donate      ", handler.lands("donate"), "/", handler.tries("donate"));
         console.log("save        ", handler.lands("save"), "/", handler.tries("save"));
-        console.log("withdrawInst", handler.lands("withdrawInstant"), "/", handler.tries("withdrawInstant"));
-        console.log("requestWd   ", handler.lands("requestWithdraw"), "/", handler.tries("requestWithdraw"));
-        console.log("executeWd   ", handler.lands("executeWithdraw"), "/", handler.tries("executeWithdraw"));
-        console.log(
-            "withdrawals in Default Recovery",
-            handler.landsInStage("withdrawInstant", "inDefaultRecovery")
-                + handler.landsInStage("executeWithdraw", "inDefaultRecovery")
-        );
+        console.log("withdraw    ", handler.lands("withdraw"), "/", handler.tries("withdraw"));
+        console.log("withdrawals in Default Recovery", handler.landsInStage("withdraw", "inDefaultRecovery"));
     }
 
     /// A fixed 4000-step deterministic replay, so the
@@ -601,12 +538,8 @@ contract CreditCoreDebtInvariantTest is StdInvariant, InviteSigner {
                 try handler.donate(a1) {} catch {}
             } else if (pick == 6) {
                 try handler.save(a1, a2) {} catch {}
-            } else if (pick == 7) {
-                try handler.withdrawInstant(a1, a2) {} catch {}
-            } else if (pick == 8) {
-                try handler.requestWithdraw(a1, a2) {} catch {}
             } else {
-                try handler.executeWithdraw(a1) {} catch {}
+                try handler.withdraw(a1, a2) {} catch {}
             }
         }
         handler.setCheckEnabled(true);
@@ -622,16 +555,10 @@ contract CreditCoreDebtInvariantTest is StdInvariant, InviteSigner {
         emit log_named_uint("donate attempts   ", handler.tries("donate"));
         emit log_named_uint("save landed       ", handler.lands("save"));
         emit log_named_uint("save attempts     ", handler.tries("save"));
-        emit log_named_uint("withdrawInst landed", handler.lands("withdrawInstant"));
-        emit log_named_uint("withdrawInst tries ", handler.tries("withdrawInstant"));
-        emit log_named_uint("requestWd landed  ", handler.lands("requestWithdraw"));
-        emit log_named_uint("requestWd attempts", handler.tries("requestWithdraw"));
-        emit log_named_uint("executeWd landed  ", handler.lands("executeWithdraw"));
-        emit log_named_uint("executeWd attempts", handler.tries("executeWithdraw"));
-        uint256 inDefault = handler.landsInStage("withdrawInstant", "inDefaultRecovery")
-            + handler.landsInStage("executeWithdraw", "inDefaultRecovery");
-        uint256 withTab = handler.landsInStage("withdrawInstant", "withOpenTab")
-            + handler.landsInStage("executeWithdraw", "withOpenTab");
+        emit log_named_uint("withdraw landed   ", handler.lands("withdraw"));
+        emit log_named_uint("withdraw attempts ", handler.tries("withdraw"));
+        uint256 inDefault = handler.landsInStage("withdraw", "inDefaultRecovery");
+        uint256 withTab = handler.landsInStage("withdraw", "withOpenTab");
         emit log_named_uint("withdrawals landed in Default Recovery", inDefault);
         emit log_named_uint("withdrawals landed with a pre-Default open tab", withTab);
         // A 1-in-3 landed bar fits a verb whose attempts are

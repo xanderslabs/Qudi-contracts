@@ -150,6 +150,7 @@ contract CommunityVotesTest is CommunityTest {
 
     function test_electBlockedWhileStewardSeated() public {
         _join(ada);
+        _season(); // a candidate must be seasoned, so the seat is what refuses here
         vm.prank(ada);
         vm.expectRevert(ICommunity.StewardNotVacant.selector);
         community.electSteward(ada);
@@ -299,7 +300,7 @@ contract CommunityVotesTest is CommunityTest {
         community.executeRemoveSteward();
 
         vm.prank(ada);
-        vm.expectRevert(ICommunity.NotMember.selector);
+        vm.expectRevert(ICommunity.CandidateIneligible.selector);
         community.electSteward(dara); // dara never joined
     }
 

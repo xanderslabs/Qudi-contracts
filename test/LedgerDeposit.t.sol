@@ -6,9 +6,8 @@ import {ILedger} from "../src/interfaces/ILedger.sol";
 import {IConfig} from "../src/interfaces/IConfig.sol";
 import {VenueIds} from "./helpers/VenueIds.sol";
 
-/// The money-in half of the ledger's unit suite, carried forward from `Ledger.t.sol` onto
-/// the vault record: the gates a deposit passes, that it is never a repayment, that a record's
-/// balance tracks the tier vault's price, and that the credit leg reaches `CreditCore`.
+/// The money-in half of the ledger's unit suite: the gates a deposit passes, and that a record's
+/// value tracks the venue's price after the split.
 contract LedgerDepositTest is LedgerFixture {
     uint256 mine;
 
@@ -20,10 +19,11 @@ contract LedgerDepositTest is LedgerFixture {
     function test_deposit_buysUnitsOneToOneWithShares() public {
         _deposit(ada, mine, 100e6);
         assertEq(ledger.vaultUnits(mine), 100e6);
-        assertEq(ledger.vaultBalance(mine), 100e6);
-        assertEq(ledger.vaultPrincipal(mine), 100e6);
+        assertEq(ledger.vaultValue(mine), 100e6);
+        assertEq(ledger.vaultCapital(mine), 100e6);
         assertEq(coreVault.balanceOf(address(ledger)), 100e6);
-        assertEq(ledger.tierUnits(VenueIds.CORE), 100e6);
+        assertEq(ledger.venueUnits(VenueIds.CORE), 100e6);
+        assertEq(ledger.venueShares(VenueIds.CORE), 100e6);
         assertEq(ledger.personalUnitsOf(ada), 100e6);
     }
 
@@ -43,13 +43,18 @@ contract LedgerDepositTest is LedgerFixture {
 
         registry.setBlocked(ada, false);
         _deposit(ada, mine, 1e6);
-        assertGt(ledger.vaultBalance(mine), 0);
+        assertGt(ledger.vaultValue(mine), 0);
     }
 
     function test_deposit_unknownVaultReverts() public {
         vm.expectRevert(ILedger.UnknownVault.selector);
         vm.prank(ada);
         ledger.deposit(999, 1e6);
+    }
+
+    function test_deposit_zeroReverts() public {
+        vm.expectRevert(ILedger.ZeroAmount.selector);
+        _deposit(ada, mine, 0);
     }
 
     function test_deposit_closedVaultReverts() public {
@@ -60,11 +65,10 @@ contract LedgerDepositTest is LedgerFixture {
         ledger.deposit(mine, 1e6);
     }
 
-    /// The tier opt-in this test used to pin is deleted. A tier nothing has touched
-    /// works the moment a member names it, and the ledger resolves Qudi's vault for it itself.
-    /// The full statement, over the real factory, is `test/LedgerNoTierGate.t.sol`.
+    /// A venue nothing has touched works the moment a member names it, and the ledger resolves
+    /// Qudi's venue for it itself.
     function test_createVault_reachesATierNothingHasTouched() public {
-        assertEq(ledger.tierUnits(VenueIds.FLEX), 0);
+        assertEq(ledger.venueUnits(VenueIds.FLEX), 0);
         vm.prank(ada);
         uint256 id = ledger.createVault(_params(VenueIds.FLEX, false, 0, "untouched tier"));
         _deposit(ada, id, 100e6);
@@ -79,61 +83,26 @@ contract LedgerDepositTest is LedgerFixture {
         ledger.createVault(_params(VenueIds.COUNT, false, 0, "not a tier"));
     }
 
-    /// A shared vault is the host's to open: host-created and community-wide.
-    function test_createVault_sharedIsTheHosts() public {
-        vm.expectRevert(ILedger.NotHost.selector);
-        vm.prank(ada);
-        ledger.createVault(_params(VenueIds.FLEX, true, 0, "not yours to open"));
-    }
-
-    /// A maturity already in the past is a lock that never locked, far more likely a mistyped
-    /// date than an intention. The same refusal `Venue`'s constructor makes.
-    function test_createVault_refusesAMaturityInThePast() public {
-        vm.warp(block.timestamp + 10 days);
-        vm.expectRevert(ILedger.VaultLocked.selector);
-        vm.prank(ada);
-        ledger.createVault(_params(VenueIds.FLEX, false, uint64(block.timestamp - 1), "already matured"));
-    }
-
-    /// The record keeps every axis the member stated, including the ones the contract never
-    /// reads: the app shows them back, and the struct is the design's.
-    function test_createVault_storesTheWholeRecord() public {
+    /// The record stores the owner, kind, venue, lock and status. The name is emitted and not
+    /// stored.
+    function test_createVault_storesTheRecordAndEmitsTheName() public {
+        uint64 lock = uint64(block.timestamp + 90 days);
+        vm.expectEmit(true, true, true, true, address(ledger));
+        emit ILedger.VaultCreated(ledger.vaultCount() + 1, VenueIds.TERM, ada, false, lock, "School fees");
         vm.prank(ada);
         uint256 id = ledger.createVault(
-            ILedger.VaultParams({
-                poolType: VenueIds.FLEX,
-                shared: false,
-                lockedUntil: uint64(block.timestamp + 90 days),
-                contribution: 1, // Scheduled
-                name: "School fees",
-                target: 5_000e6,
-                targetDate: uint64(block.timestamp + 180 days)
-            })
+            ILedger.VaultParams({venueId: VenueIds.TERM, shared: false, lockedUntil: lock, name: "School fees"})
         );
-        (
-            uint8 poolType,
-            bool shared,
-            address vaultOwner,
-            uint64 lockedUntil,
-            uint8 contribution,
-            uint8 status,
-            string memory name,
-            uint256 target,
-            uint64 targetDate
-        ) = ledger.vaults(id);
-        assertEq(poolType, VenueIds.FLEX);
-        assertFalse(shared);
+        (address vaultOwner, bool shared, uint8 venueId, uint64 lockedUntil, uint8 status) = ledger.vaults(id);
         assertEq(vaultOwner, ada);
-        assertEq(lockedUntil, uint64(block.timestamp + 90 days));
-        assertEq(contribution, 1);
+        assertFalse(shared);
+        assertEq(venueId, VenueIds.TERM);
+        assertEq(lockedUntil, lock);
         assertEq(status, 1); // Active
-        assertEq(name, "School fees");
-        assertEq(target, 5_000e6);
-        assertEq(targetDate, uint64(block.timestamp + 180 days));
     }
 
-    /// A record's balance tracks its tier vault's price, and `vaultEarned` is the gain above
-    /// what was put in.
+    /// A record's value tracks its venue's price less the 30% the split takes, and `vaultEarned`
+    /// is the value above what was put in.
     function test_balance_tracksTheTierPrice_earnedIsTheGain() public {
         uint256 hers = _personal(bea, VenueIds.CORE, 0);
         _deposit(ada, mine, 100e6);
@@ -142,13 +111,13 @@ contract LedgerDepositTest is LedgerFixture {
         usdc.mint(address(this), 40e6);
         usdc.approve(address(coreVenue), 40e6);
         coreVenue.fund(40e6); // +10% in the strategy
-        // A year lets the Venue's growth cap through the whole gain. The Venue takes no fee, so
-        // the tier price rises the full 10%.
+        // A year lets the Venue's growth cap through the whole gain. The venue price rises the
+        // full 10%, and the ledger keeps 70% of it for the vaults.
         vm.warp(block.timestamp + 365 days);
 
-        assertApproxEqAbs(ledger.vaultBalance(mine), 110e6, 2);
-        assertApproxEqAbs(ledger.vaultBalance(hers), 330e6, 2);
-        assertApproxEqAbs(ledger.vaultEarned(mine), 10e6, 2);
-        assertEq(ledger.vaultPrincipal(mine), 100e6);
+        assertApproxEqAbs(ledger.vaultValue(mine), 107e6, 2);
+        assertApproxEqAbs(ledger.vaultValue(hers), 321e6, 2);
+        assertApproxEqAbs(ledger.vaultEarned(mine), 7e6, 2);
+        assertEq(ledger.vaultCapital(mine), 100e6);
     }
 }

@@ -45,10 +45,9 @@ contract Community is EIP712, ICommunity, ICommunityInit {
 
     IConfig internal config;
     ISeats public seats;
-    /// Stored but not read by anything here (this contract never touches the vault). The
-    /// factory populates the whole wiring struct at initialize(), so this field is kept even
-    /// though nothing here reads it.
-    address internal vault;
+    /// This community's `Ledger`. A closure vote reads whether its shared vaults hold money and,
+    /// once passed, closes it.
+    address internal ledger;
     address internal factory;
 
     address public steward;
@@ -145,6 +144,14 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     /// lower when there are fewer voters (see `_minYes`).
     uint256 internal constant MIN_YES_VOTES = 3;
 
+    /// The latest closure vote. Kept after it fails, because the cooldown runs from its deadline.
+    uint256 public closureVoteId;
+    /// Set when a closure vote executes. Terminal: nobody joins, no invite works, and the host role
+    /// no longer changes hands.
+    bool public closed;
+    /// The latest deadline of any removal vote. A closure cannot be proposed or executed before it.
+    uint64 internal _removalWindowEnd;
+
     /// Clones share this contract's code, so the name and version are the implementation's, and
     /// each clone's domain separator is rebuilt with its own address as the verifying contract.
     constructor() EIP712("Qudi Community", "1") {}
@@ -162,7 +169,7 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         // screener-blocked. Checked here rather than in the factory because this is where the
         // creator's seat is actually minted.
         _requireMintable(w.creator);
-        vault = w.vault;
+        ledger = w.vault;
         factory = w.factory;
         steward = w.creator;
         seatPrice = w.seatPrice;
@@ -177,6 +184,9 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     // ---- membership ----
 
     function join(address inviteKey, bytes calldata keySig) external {
+        // Someone joining while members vote on closing would pay for a seat in a community about
+        // to close, and a closed community takes nobody.
+        _requireOpen();
         // No steward means no one to answer for an invite, and no destination for the 30% host
         // leg. Joining reopens once the community has a host again.
         if (stewardVacant()) revert StewardVacant();
@@ -234,6 +244,7 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     /// spent invite cannot be refilled under the same link.
     function createInvite(address inviteKey, uint16 maxUses, uint64 expiry) external {
         if (msg.sender != steward) revert NotSteward();
+        _requireOpen();
         if (_invites[inviteKey].expiry != 0) revert InviteAlreadyRegistered();
         if (expiry <= block.timestamp) revert InviteExpired();
         (uint32 usesCap, uint64 maxTtl) = config.inviteLimits();
@@ -344,8 +355,8 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     /// A community whose ledger is somehow unregistered reads as nothing held, matching the rest
     /// of the codebase's "unset disables the check" posture.
     function _holdsAPersonalVault(address member) internal view returns (bool) {
-        address ledger = ICommunityFactory(factory).ledgerOf(address(this));
-        return ledger != address(0) && ILedger(ledger).personalUnitsOf(member) != 0;
+        address l = ICommunityFactory(factory).ledgerOf(address(this));
+        return l != address(0) && ILedger(l).personalUnitsOf(member) != 0;
     }
 
     /// Member-initiated exit. A member cannot leave holding anything they have a claim on:
@@ -380,13 +391,13 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         return steward == address(0);
     }
 
-    /// Only a vote to remove the host takes the host-vote threshold, more than two thirds,
-    /// because it overrides the one role the community chose. Every other kind is a community
-    /// vote at more than half. That includes an election: a seat left empty should be easy to
+    /// A vote to remove the host takes the host-vote threshold, more than two thirds, because it
+    /// overrides the one role the community chose, and so does a vote to close, because it cannot
+    /// be undone. Every other kind is a community vote at more than half. That includes an election: a seat left empty should be easy to
     /// fill, since with no host nobody can join and no shared vault can pay out. A handover's
     /// objection period takes only the community vote's window from here.
     function _thresholdFor(VoteKind kind) internal view returns (uint16 thresholdBps, uint64 window) {
-        if (kind == VoteKind.StewardRemoval) return config.hostVote();
+        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Closure) return config.hostVote();
         return config.communityVote();
     }
 
@@ -483,13 +494,14 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     }
 
     /// The yes votes a vote needs besides its threshold. Every kind needs MIN_YES_VOTES, so a
-    /// host cannot remove anyone alone, except an election, which needs as many as there are
-    /// voters, up to MIN_YES_VOTES, and never fewer than 1. Without that, a community that lost
+    /// host cannot remove anyone alone, except an election and a closure, which need as many as
+    /// there are voters, up to MIN_YES_VOTES, and never fewer than 1. A small community can still
+    /// close by agreeing, and the host can never close it alone. Without that, a community that lost
     /// its host with one or two seasoned members left could never elect another: nobody could
     /// join, and no shared-vault withdrawal could ever be proposed. With no voter at all the floor
     /// is still 1, so no election passes on no votes.
     function _minYes(Vote storage v) internal view returns (uint256) {
-        if (v.kind != VoteKind.Election) return MIN_YES_VOTES;
+        if (v.kind != VoteKind.Election && v.kind != VoteKind.Closure) return MIN_YES_VOTES;
         uint256 d = v.denominator;
         if (d > MIN_YES_VOTES) return MIN_YES_VOTES;
         return d == 0 ? 1 : d;
@@ -537,6 +549,8 @@ contract Community is EIP712, ICommunity, ICommunityInit {
 
     function proposeRemoveSteward() external {
         if (!_isMember(msg.sender)) revert NotMember();
+        // A closed community needs no host changes.
+        if (closed) revert CommunityIsClosed();
         // Nothing to remove while the role is empty, and allowing it would let one member park a
         // pointless vote in activeStewardVoteId that blocks electSteward() for the whole window,
         // over and over, leaving the community leaderless. Vacancy is electSteward()'s to resolve.
@@ -560,9 +574,11 @@ contract Community is EIP712, ICommunity, ICommunityInit {
 
     function electSteward(address candidate) external {
         if (!_isMember(msg.sender)) revert NotMember();
-        // A steward who is not a member would break stewardIsMemberOrVacant, so the candidacy is
-        // where membership must be enforced first; execution checks it again.
-        if (!_isMember(candidate)) revert NotMember();
+        if (closed) revert CommunityIsClosed();
+        // The bar a handover nominee meets: a seasoned Active member no removal vote is open
+        // against, so nobody can join and stand for host on day one. Execution checks membership
+        // again.
+        if (!_canHost(candidate)) revert CandidateIneligible();
         if (!stewardVacant()) revert StewardNotVacant();
         if (activeStewardVoteId != 0 && !_resolvedAsFailed(activeStewardVoteId)) revert VoteActive();
 
@@ -618,7 +634,10 @@ contract Community is EIP712, ICommunity, ICommunityInit {
             if (!_resolvedAsFailed(last)) revert VoteActive();
             if (block.timestamp < votes[last].deadline + config.removalReproposeCooldown()) revert RemovalCooldown();
         }
-        activeRemovalVoteId[member] = _startVote(VoteKind.Removal, member, 0);
+        uint256 voteId = _startVote(VoteKind.Removal, member, 0);
+        activeRemovalVoteId[member] = voteId;
+        uint64 deadline = votes[voteId].deadline;
+        if (deadline > _removalWindowEnd) _removalWindowEnd = deadline;
     }
 
     /// Permissionless after the window, if passed. The seat becomes Suspended for good and stays
@@ -660,6 +679,7 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         } else {
             v.againstCount++;
         }
+        emit VoteCast(voteId, msg.sender, support);
     }
 
     /// Permissionless. The threshold bps is read live from config (no Appendix-A literal), the
@@ -713,6 +733,7 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     /// The host names a successor. Nothing changes until the nominee accepts and the members
     /// have had the objection period; the host keeps every power meanwhile.
     function nominateSuccessor(address nominee) external {
+        if (closed) revert CommunityIsClosed();
         if (msg.sender != steward) revert NotSteward();
         if (_hostVoteOpen()) revert HostVoteOpen();
         if (_handoverPending()) revert NominationPending();
@@ -752,6 +773,7 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         if (v.voted[msg.sender]) revert AlreadyVoted();
         v.voted[msg.sender] = true;
         v.againstCount++;
+        emit HandoverObjected(voteId, msg.sender);
         // Objections only grow, so once they are over half the handover can never complete. It
         // fails here and the cooldown starts now; waiting for the deadline would let the host
         // cancel first, which starts no cooldown, and nominate again the same day.
@@ -799,6 +821,7 @@ contract Community is EIP712, ICommunity, ICommunityInit {
     /// since the vote is theirs to finish, and not with a nomination pending, which the host
     /// cancels first.
     function resignHost() external {
+        if (closed) revert CommunityIsClosed();
         if (msg.sender != steward) revert NotSteward();
         if (_hostVoteOpen()) revert HostVoteOpen();
         if (_handoverPending()) revert NominationPending();
@@ -822,7 +845,54 @@ contract Community is EIP712, ICommunity, ICommunityInit {
         }
     }
 
-    // ---- pool opening ----
+    // ---- closure ----
+
+    /// Closing is the members' decision. The host proposes; the seasoned members vote at the
+    /// host-vote bar. Refused while any other vote about who is in or who hosts is open, while a
+    /// handover is pending, and while a shared vault holds money, and within
+    /// `REMOVAL_REPROPOSE_COOLDOWN` of a failed closure vote.
+    function proposeClosure() external {
+        if (msg.sender != steward) revert NotSteward();
+        _requireClosable();
+        uint256 last = closureVoteId;
+        if (last != 0) {
+            if (!_resolvedAsFailed(last)) revert VoteActive();
+            if (block.timestamp < votes[last].deadline + config.removalReproposeCooldown()) revert ClosureCooldown();
+        }
+        closureVoteId = _startVote(VoteKind.Closure, address(0), 0);
+    }
+
+    /// Anyone, once the vote has passed and its window closed. Every condition is checked again,
+    /// because something may have opened since the vote started. Closing ends the host term, so
+    /// every live invite stops working, and closes the ledger.
+    function executeClosure() external {
+        uint256 voteId = closureVoteId;
+        if (voteId == 0) revert NoActiveVote();
+        if (block.timestamp <= votes[voteId].deadline) revert VoteWindowOpen();
+        if (!_passed(voteId)) revert NotPassed();
+        _requireClosable();
+        closed = true;
+        hostTerm++;
+        ILedger(ledger).closeCommunity();
+        emit CommunityClosed();
+    }
+
+    function _requireClosable() internal view {
+        if (closed) revert CommunityIsClosed();
+        uint256 hostVote = activeStewardVoteId;
+        if (block.timestamp <= _removalWindowEnd || (hostVote != 0 && !_resolvedAsFailed(hostVote))) {
+            revert VoteActive();
+        }
+        if (_handoverPending()) revert NominationPending();
+        if (ILedger(ledger).sharedVaultsHoldMoney()) revert SharedVaultHoldsMoney();
+    }
+
+    /// Joining and new invites wait while a closure vote is open, and stop once it has passed.
+    function _requireOpen() internal view {
+        if (closed) revert CommunityIsClosed();
+        uint256 id = closureVoteId;
+        if (id != 0 && !_resolvedAsFailed(id)) revert ClosureVoteOpen();
+    }
 
     // ---- internal ----
 

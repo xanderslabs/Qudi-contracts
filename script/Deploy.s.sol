@@ -77,14 +77,12 @@ interface IMintableTestUsdc {
 ///   SKIP_SMOKE_COMMUNITY  optional, "true" to skip the end-of-script smoke community. The smoke community is
 ///                  a permanent artifact with the deployer as its founding steward and no removal
 ///                  path, so a deployment whose community directory is not throwaway should skip it
-///                  and verify the wiring by other means. The smoke community runs a
-///                  contribute/withdraw round against CORE, an instant-withdrawal round
-///                  against FLEX, each spending
-///                  `_SMOKE_AMOUNT` (50 USDC) of the deployer's own USDC: on anvil every mint is
-///                  free via `MockUSDC.mint`; on every other chain the deployer must already hold
-///                  that much real USDC per round. CORE's round returns its principal
-///                  (cancel); FLEX's round only instant-withdraws half back, leaving the other
-///                  half as a standing balance in the smoke FLEX ledger. Separately,
+///                  and verify the wiring by other means. The smoke community opens one
+///                  personal vault in each of the three venues and deposits
+///                  `_SMOKE_AMOUNT` (50 USDC) of the deployer's own USDC into each: on anvil every
+///                  mint is free via `MockUSDC.mint`; on every other chain the deployer must
+///                  already hold that much real USDC per vault. The deposits stay as standing
+///                  balances, and the Term one is locked for a day. Separately,
 ///                  `_SMOKE_AMOUNT` of USDC (regardless of `SKIP_SMOKE_COMMUNITY`) so it
 ///                  can pay real redemptions.
 ///
@@ -96,7 +94,7 @@ contract Deploy is Script {
     /// shipping silently.
     uint256 internal constant _FACTORY_NONCE_OFFSET = 5;
 
-    /// What each smoke round moves. It was the seat price floor, which is now 0.
+    /// What each smoke vault takes. It was the seat price floor, which is now 0.
     uint256 internal constant _SMOKE_AMOUNT = 50e6;
 
     /// Chains the testnet stand-ins may be deployed on: anvil and Arc testnet. `ManualStrategy` is
@@ -361,31 +359,16 @@ contract Deploy is Script {
             require(factory.vaultOf(communityAddr, t) == ledger, "smoke tier does not answer with the ledger");
         }
 
-        _smokeContributeWithdrawRound(deployer, usdc, ledger, _CORE, _SMOKE_AMOUNT);
-
-        // ---- FLEX: one instant withdrawal, proving Ledger.withdrawInstant end to end ----
-        _smokeInstantWithdrawal(deployer, usdc, ledger, _SMOKE_AMOUNT);
-
-        // ---- TERM: opened as an ordinary tier since 2026-09-21. It needs
-        // no smoke round of its own: it is the same Ledger against the same Venue the
-        // FLEX round above already proves, differing only in which venues sit under it and how
-        // long its declared withdrawal period is.
+        for (uint8 t; t < _VENUES; t++) {
+            _smokeDeposit(deployer, usdc, ledger, t, _SMOKE_AMOUNT);
+        }
     }
 
-    /// One contribute/withdraw round against the CORE ledger: contribute `amount`, queue its
-    /// full withdrawal, then cancel the request rather than waiting out CORE's exit time (the
-    /// venue label `exitSeconds`, a real wait this script cannot fast-forward on a live chain). `cancelWithdraw` has no cooldown of its own, so this proves `contribute` ->
-    /// `Venue.deposit` -> `requestWithdraw` -> `cancelWithdraw` end to end without waiting on
-    /// wall-clock time.
-    function _smokeContributeWithdrawRound(
-        address deployer,
-        address usdc,
-        address ledger,
-        uint8 poolType,
-        uint256 amount
-    ) internal {
+    /// One personal vault in venue `venueId`, and one deposit of `amount` into it. A Term vault
+    /// carries a one-day lock, because a Locked-kind venue takes no vault without one.
+    function _smokeDeposit(address deployer, address usdc, address ledger, uint8 venueId, uint256 amount) internal {
         if (block.chainid == _ANVIL_CHAIN_ID) {
-            // MockUSDC's `mint` is open to anyone; funding the round this way keeps the script
+            // MockUSDC's `mint` is open to anyone; funding the deposit this way keeps the script
             // runnable against a fresh anvil chain with no other setup than what the
             // USDC_ADDRESS doc comment already asks for.
             IMintableTestUsdc(usdc).mint(deployer, amount);
@@ -393,53 +376,14 @@ contract Deploy is Script {
 
         IERC20(usdc).approve(ledger, amount);
         Ledger smokeLedger = Ledger(ledger);
-        uint256 vaultId = smokeLedger.createVault(_smokeVaultParams(poolType, "Smoke savings"));
-        smokeLedger.deposit(vaultId, amount);
-        require(smokeLedger.vaultBalance(vaultId) == amount, "smoke deposit did not credit the vault");
-
-        uint256 requestId = smokeLedger.requestWithdraw(vaultId, amount);
-        smokeLedger.cancelWithdraw(requestId);
-        require(smokeLedger.vaultBalance(vaultId) == amount, "smoke withdraw round did not restore the balance");
-
-        console.log("smoke contribute/withdraw round: OK, amount:", amount);
-    }
-
-    /// One instant withdrawal against the FLEX ledger: contribute `amount`, then withdraw half of
-    /// it same-block via `Ledger.withdrawInstant`. Half, not the full amount, so the smoke
-    /// FLEX pool is left holding a real standing balance the app can show; the vault serves the
-    /// payout from idle USDC either way, since nothing has called `rebalance()` to push the
-    /// contribution out to the venues yet.
-    function _smokeInstantWithdrawal(address deployer, address usdc, address ledger, uint256 amount) internal {
-        if (block.chainid == _ANVIL_CHAIN_ID) {
-            IMintableTestUsdc(usdc).mint(deployer, amount);
-        }
-
-        IERC20(usdc).approve(ledger, amount);
-        Ledger smokeLedger = Ledger(ledger);
-        uint256 vaultId = smokeLedger.createVault(_smokeVaultParams(_FLEX, "Smoke flex"));
-        smokeLedger.deposit(vaultId, amount);
-        require(smokeLedger.vaultBalance(vaultId) == amount, "smoke FLEX deposit did not credit the vault");
-
-        uint256 walletBefore = IERC20(usdc).balanceOf(deployer);
-        uint256 withdrawAmount = amount / 2;
-        smokeLedger.withdrawInstant(vaultId, withdrawAmount);
-        require(
-            smokeLedger.vaultBalance(vaultId) == amount - withdrawAmount,
-            "smoke FLEX instant withdrawal did not debit the vault"
+        uint64 lockedUntil = vaults[venueId].labels().kind == IVenue.Kind.Locked ? uint64(block.timestamp + 1 days) : 0;
+        uint256 vaultId = smokeLedger.createVault(
+            ILedger.VaultParams({venueId: venueId, shared: false, lockedUntil: lockedUntil, name: "Smoke savings"})
         );
-        require(
-            IERC20(usdc).balanceOf(deployer) == walletBefore + withdrawAmount,
-            "smoke FLEX instant withdrawal did not pay out wallet"
-        );
+        smokeLedger.deposit(vaultId, amount);
+        require(smokeLedger.vaultValue(vaultId) == amount, "smoke deposit did not credit the vault");
+        require(smokeLedger.vaultCapital(vaultId) == amount, "smoke deposit did not record its capital");
 
-        console.log("smoke FLEX instant withdrawal: OK, amount:", withdrawAmount);
-    }
-
-    /// An open, personal, anytime record: the plainest vault the smoke rounds can use, so what
-    /// they prove is the tier wiring and the money path rather than any one axis combination.
-    function _smokeVaultParams(uint8 poolType, string memory name_) internal pure returns (ILedger.VaultParams memory) {
-        return ILedger.VaultParams({
-            poolType: poolType, shared: false, lockedUntil: 0, contribution: 0, name: name_, target: 0, targetDate: 0
-        });
+        console.log("smoke deposit: OK, venue:", _poolLabel(venueId));
     }
 }

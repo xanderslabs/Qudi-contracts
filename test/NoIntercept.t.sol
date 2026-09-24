@@ -157,15 +157,7 @@ contract NoInterceptTest is InviteSigner {
     /// An open, personal, anytime record: the plainest vault these proofs can save into, so what
     /// they show is the payout path and not any one axis combination.
     function _vaultParams(uint8 poolType) internal pure returns (ILedger.VaultParams memory) {
-        return ILedger.VaultParams({
-            poolType: poolType,
-            shared: false,
-            lockedUntil: 0,
-            contribution: 0,
-            name: "savings",
-            target: 0,
-            targetDate: 0
-        });
+        return ILedger.VaultParams({venueId: poolType, shared: false, lockedUntil: 0, name: "savings"});
     }
 
     /// Opens a CreditCore advance of `debt` for `who`, and has the community's credit pool report the
@@ -202,11 +194,14 @@ contract NoInterceptTest is InviteSigner {
         vm.stopPrank();
     }
 
-    /// A slow venue holding the slow tier's ceiling, so a large enough request cannot be paid
-    /// instantly and the ledger hands it to the vault's FIFO queue.
+    /// The slow strategy `_addSlowVenue` lists. It gives nothing back until `_releaseSlow`.
+    MockStrategy slowV;
+
+    /// A slow venue holding the slow tier's ceiling and giving nothing back yet, so a large enough
+    /// request cannot be paid at once and waits in the vault's FIFO queue.
     function _addSlowVenue() internal {
         MockStrategy instantV = new MockStrategy(IERC20(address(usdc)), address(flexVault));
-        MockStrategy slowV = new MockStrategy(IERC20(address(usdc)), address(flexVault));
+        slowV = new MockStrategy(IERC20(address(usdc)), address(flexVault));
         flexVault.addStrategy(address(instantV), 0);
         flexVault.addStrategy(address(slowV), 2 days);
         flexVault.setCap(address(instantV), type(uint256).max);
@@ -219,6 +214,11 @@ contract NoInterceptTest is InviteSigner {
         bps[1] = 2500;
         flexVault.setWeights(vs, bps);
         flexVault.rebalance();
+        slowV.setWithdrawCap(0);
+    }
+
+    function _releaseSlow() internal {
+        slowV.setWithdrawCap(type(uint256).max);
     }
 
     struct Snap {
@@ -252,7 +252,7 @@ contract NoInterceptTest is InviteSigner {
     // Proof 1: every payout path pays in full
     // =================================================================
 
-    /// `Ledger.withdrawInstant`, which redeems from the vault on the instant path.
+    /// `Ledger.requestWithdraw` in a liquid venue, which pays in the same transaction.
     function testFuzz_payout_flexInstant(uint8 stageSeed, uint256 debtSeed, uint256 payoutSeed, uint256 when) public {
         Stage stage = Stage(stageSeed % 6);
         uint256 debt = bound(debtSeed, 1e6, 50e6);
@@ -275,32 +275,7 @@ contract NoInterceptTest is InviteSigner {
 
         Snap memory before = _snap(member);
         vm.prank(member);
-        flexLedger.withdrawInstant(flexVaultOf[member], payout);
-        _assertPaidInFull(member, before, payout);
-    }
-
-    /// `Ledger.executeWithdraw`'s instant branch: a queued ledger request that the vault
-    /// pays at once through `redeem`.
-    function testFuzz_payout_ledgerRequestInstantBranch(
-        uint8 stageSeed,
-        uint256 debtSeed,
-        uint256 payoutSeed,
-        uint256 when
-    ) public {
-        Stage stage = Stage(stageSeed % 6);
-        uint256 debt = bound(debtSeed, 1e6, 50e6);
-        uint256 payout = bound(payoutSeed, 1e6, 2000e6);
-
-        uint64 ts = _openAdvance(member, debt);
-        _contributeFlex(member, payout);
-        vm.prank(member);
-        uint256 id = flexLedger.requestWithdraw(flexVaultOf[member], payout);
-        // At least 31 days, so the request is past any release time older code set.
-        _warpInto(ts, stage, when, 31 days);
-
-        Snap memory before = _snap(member);
-        vm.prank(member);
-        flexLedger.executeWithdraw(id);
+        flexLedger.requestWithdraw(flexVaultOf[member], payout);
         _assertPaidInFull(member, before, payout);
     }
 
@@ -343,12 +318,10 @@ contract NoInterceptTest is InviteSigner {
         _contributeFlex(member, payout);
         _addSlowVenue();
         vm.prank(member);
-        uint256 id = flexLedger.requestWithdraw(flexVaultOf[member], payout);
-        _warpInto(ts, stage, when, 31 days);
-        vm.prank(member);
-        flexLedger.executeWithdraw(id);
+        flexLedger.requestWithdraw(flexVaultOf[member], payout);
         assertGt(flexVault.queuedShares(address(flexLedger)), 0, "fixture: request did not reach the queue");
-        flexVault.rebalance(); // the blocked queue drains the venues back to idle
+        _warpInto(ts, stage, when, 31 days);
+        _releaseSlow();
 
         uint256 owed = flexVault.queuedRedeemEstimate(1);
         Snap memory before = _snap(member);
@@ -369,11 +342,8 @@ contract NoInterceptTest is InviteSigner {
         _contributeFlex(member, payout);
         _addSlowVenue();
         vm.prank(member);
-        uint256 id = flexLedger.requestWithdraw(flexVaultOf[member], payout);
-        vm.warp(flexLedger.releaseAfter(id));
-        vm.prank(member);
-        flexLedger.executeWithdraw(id);
-        flexVault.rebalance();
+        flexLedger.requestWithdraw(flexVaultOf[member], payout);
+        _releaseSlow();
         usdc.setBlocked(member, true);
         flexVault.processQueue(5);
         usdc.setBlocked(member, false);
@@ -398,8 +368,8 @@ contract NoInterceptTest is InviteSigner {
 
         Snap memory before = _snap(member);
         _contributeFlex(member, amount);
-        assertEq(flexLedger.vaultPrincipal(flexVaultOf[member]), amount, "savings principal short of the deposit");
-        assertEq(flexLedger.vaultBalance(flexVaultOf[member]), amount, "savings balance short of the deposit");
+        assertEq(flexLedger.vaultCapital(flexVaultOf[member]), amount, "savings capital short of the deposit");
+        assertEq(flexLedger.vaultValue(flexVaultOf[member]), amount, "savings value short of the deposit");
         assertEq(pool.paymentsReceived(member), 0, "the credit pool received a repayment");
         assertEq(usdc.balanceOf(address(cc)), before.core, "CreditCore received part of the deposit");
         assertEq(cc.obligationOf(member).principal, before.principal, "the deposit moved the debt");
@@ -409,9 +379,10 @@ contract NoInterceptTest is InviteSigner {
     // Proof 3: no withdrawal is delayed because a member owes
     // =================================================================
 
-    /// A queued request by a member with an open advance releases at exactly its profile's
-    /// ordinary term, in every stage the advance can be open in, for Flex and for a Core profile.
-    function testFuzz_queuedWithdrawal_releasesOnOrdinaryTerm(uint8 stageSeed, uint256 debtSeed, uint256 when) public {
+    /// A withdrawal by a member with an open advance is paid in the same transaction, in every
+    /// stage the advance can be open in, for Flex and for Core: the ledger has no wait of its own
+    /// to lengthen for someone who owes.
+    function testFuzz_withdrawal_notDelayedByDebt(uint8 stageSeed, uint256 debtSeed, uint256 when) public {
         Stage stage = Stage(stageSeed % 5); // an advance is open from Tenor through Default Recovery
         uint64 ts = _openAdvance(member, bound(debtSeed, 1e6, 50e6));
         _contributeFlex(member, 100e6);
@@ -423,20 +394,12 @@ contract NoInterceptTest is InviteSigner {
         _warpInto(ts, stage, when, 0);
         assertTrue(cc.hasOpenTab(member), "fixture: the advance is not open");
 
-        vm.startPrank(member);
-        uint256 flexId = flexLedger.requestWithdraw(flexVaultOf[member], 60e6);
-        uint256 coreId = coreLedger.requestWithdraw(coreVaultOf[member], 60e6);
-        vm.stopPrank();
-        uint256 requestedAt = block.timestamp;
-        assertEq(flexLedger.releaseAfter(flexId), requestedAt + flexVault.labels().exitSeconds, "Flex delayed");
-        assertEq(coreLedger.releaseAfter(coreId), requestedAt + coreVault.labels().exitSeconds, "Core delayed");
-
-        // And it actually executes at that moment, not only reports it.
-        vm.warp(requestedAt + flexVault.labels().exitSeconds);
         uint256 before = usdc.balanceOf(member);
-        vm.prank(member);
-        flexLedger.executeWithdraw(flexId);
-        assertEq(usdc.balanceOf(member), before + 60e6, "the Flex request did not execute on its term");
+        vm.startPrank(member);
+        flexLedger.requestWithdraw(flexVaultOf[member], 60e6);
+        coreLedger.requestWithdraw(coreVaultOf[member], 60e6);
+        vm.stopPrank();
+        assertEq(usdc.balanceOf(member), before + 120e6, "a request by a member who owes was delayed");
     }
 
     /// The instant Flex path is not blocked by an open advance, or by a pool reporting a tab.
@@ -450,8 +413,8 @@ contract NoInterceptTest is InviteSigner {
         assertGt(pool.tabOutstanding(member), 0, "fixture: the pool reports no tab");
 
         vm.prank(member);
-        flexLedger.withdrawInstant(flexVaultOf[member], 100e6);
-        assertEq(flexLedger.vaultBalance(flexVaultOf[member]), 0, "the instant withdrawal did not complete");
+        flexLedger.requestWithdraw(flexVaultOf[member], 100e6);
+        assertEq(flexLedger.vaultValue(flexVaultOf[member]), 0, "the instant withdrawal did not complete");
     }
 
     // =================================================================
@@ -469,16 +432,12 @@ contract NoInterceptTest is InviteSigner {
         _addSlowVenue(); // 300e6 of the 400e6 stays instant
 
         vm.prank(member);
-        uint256 idHead = flexLedger.requestWithdraw(flexVaultOf[member], 350e6);
+        flexLedger.requestWithdraw(flexVaultOf[member], 350e6);
         vm.prank(behind);
-        uint256 idBehind = flexLedger.requestWithdraw(flexVaultOf[behind], 50e6);
+        flexLedger.requestWithdraw(flexVaultOf[behind], 50e6);
         _warpInto(ts, Stage.DefaultRecovery, 0, 31 days);
-        vm.prank(member);
-        flexLedger.executeWithdraw(idHead);
-        vm.prank(behind);
-        flexLedger.executeWithdraw(idBehind);
         assertEq(flexVault.queuedShares(address(flexLedger)), 400e6, "fixture: both requests must be queued");
-        flexVault.rebalance();
+        _releaseSlow();
 
         usdc.setBlocked(member, true);
         uint256 behindBefore = usdc.balanceOf(behind);
@@ -509,7 +468,7 @@ contract NoInterceptTest is InviteSigner {
         _contributeFlex(member, 100e6);
 
         _assertOk(address(cc), abi.encodeWithSignature("hasOpenTab(address)", member));
-        _assertOk(address(flexLedger), abi.encodeWithSignature("vaultBalance(uint256)", flexVaultOf[member]));
+        _assertOk(address(flexLedger), abi.encodeWithSignature("vaultValue(uint256)", flexVaultOf[member]));
 
         // As the owner, so an existing `setClaimPath` would succeed.
         _assertNoSelector(address(cc), abi.encodeWithSignature("setClaimPath(address,bool)", address(this), true));

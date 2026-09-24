@@ -14,13 +14,17 @@ import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockCreditCoreLeg} from "../mocks/MockSeatSiblings.sol";
 import {InviteSigner} from "./InviteSigner.sol";
 
-/// Stands in for a community's ledger where a test only needs `forfeit`'s vault gate to read
-/// nothing held.
+/// Stands in for a community's ledger where a test only needs `forfeit`'s vault gate and a closure
+/// proposal's shared-vault check to read nothing held.
 contract MockMemberLedger is ICommunityInit {
     function initialize(CommunityWiring calldata) external {}
 
     function personalUnitsOf(address) external pure returns (uint256) {
         return 0;
+    }
+
+    function sharedVaultsHoldMoney() external pure returns (bool) {
+        return false;
     }
 }
 

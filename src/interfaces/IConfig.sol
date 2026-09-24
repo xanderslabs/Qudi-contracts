@@ -15,15 +15,14 @@ interface IConfig {
     function epochLength() external view returns (uint64);
     function hostVote() external view returns (uint16 thresholdBps, uint64 window);
     function communityVote() external view returns (uint16 thresholdBps, uint64 window);
-    /// The shared-vault withdrawal's two bars, both counts of people.
-    function sharedWithdrawalVote() external view returns (uint16 quorumBps, uint16 approvalBps);
-    /// Seconds after a passed proposal's window closes before it becomes revertible.
+    /// Who a shared vault payout counts: at least `minDeposit` in, first at least `seasoning` ago.
     function qualifyingContributor() external view returns (uint256 minDeposit, uint64 seasoning);
-    function sharedProposalRevertDelay() external view returns (uint64);
     /// Seconds after a failed removal vote's deadline before the same member may be proposed
     /// again.
     function removalReproposeCooldown() external view returns (uint64);
     function handoverAcceptWindow() external view returns (uint64);
+    /// The most vaults one member's list in one community may hold.
+    function maxVaultsPerMember() external view returns (uint256);
     function stageBoundaries()
         external
         view

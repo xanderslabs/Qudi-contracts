@@ -118,30 +118,22 @@ library ConfigKeys {
     // The ceiling on `ManualStrategy.setRate`, the annual rate its pre-funded yield is released at.
     // Not a charge on an obligation, for the same reason.
     bytes32 constant MANUAL_RATE_CEILING_BPS = keccak256("qudi.MANUAL_RATE_CEILING_BPS");
-    // The shared-vault withdrawal. None of the three puts a charge on an obligation: they decide when a
-    // community's own pot may pay a recipient it voted for, and a member still repays exactly
-    // the principal drawn.
-    // Quorum: the share of a vault's qualifying contributors that must vote for the count to
-    // stand. Counts of people, never of money.
-    bytes32 constant SHARED_WITHDRAWAL_QUORUM_BPS = keccak256("qudi.SHARED_WITHDRAWAL_QUORUM_BPS");
-    // Approval: the share of the votes cast that must say yes. Two thirds.
-    bytes32 constant SHARED_WITHDRAWAL_APPROVAL_BPS = keccak256("qudi.SHARED_WITHDRAWAL_APPROVAL_BPS");
-    // Who counts as a qualifying contributor: someone who has
-    // deposited at least $10 into the shared vault at least 14 days before the proposal. Both
-    // are the electorate's shape and neither is a charge on an obligation: they decide
-    // who may vote on a community's own pot, and a member still repays exactly the principal
-    // drawn. Deliberately narrow, because there is no per-member claim
-    // on a shared vault's money: eligibility to vote is not a claim, and no money path reads
-    // the per-member figures these two bars are checked against.
+    // Who counts in a shared vault payout's headcount: someone who has deposited at least $10
+    // into the shared vault, with a first deposit at least 14 days before the request. Neither is a
+    // charge on an obligation: they decide who may vote on a community's own pot, and a member
+    // still repays exactly the principal drawn.
     bytes32 constant QUALIFYING_CONTRIBUTOR_MIN_DEPOSIT = keccak256("qudi.QUALIFYING_CONTRIBUTOR_MIN_DEPOSIT");
     bytes32 constant QUALIFYING_CONTRIBUTOR_SEASONING = keccak256("qudi.QUALIFYING_CONTRIBUTOR_SEASONING");
-    // How long after a PASSED proposal's window closes before anyone may revert it and return
-    // the earmark to the vault. The release is a revert and never an expiry.
-    bytes32 constant SHARED_PROPOSAL_REVERT_DELAY = keccak256("qudi.SHARED_PROPOSAL_REVERT_DELAY");
     // How long after a failed removal vote's deadline before the steward may propose removing the
     // same member again. Without it a steward could
     // re-propose each time a vote fails and keep a member frozen indefinitely.
+    // The same cooldown also follows a failed shared vault payout request on that vault, and a failed
+    // closure vote.
     bytes32 constant REMOVAL_REPROPOSE_COOLDOWN = keccak256("qudi.REMOVAL_REPROPOSE_COOLDOWN");
     // How long a nominated successor has to accept the host role before the nomination lapses.
     bytes32 constant HANDOVER_ACCEPT_WINDOW = keccak256("qudi.HANDOVER_ACCEPT_WINDOW");
+    // The most vaults one member's list in one community may hold: personal vaults they own and
+    // shared vaults they deposited into. The ledger's impact views walk the list, so the bound is
+    // what keeps them within gas. Not a charge on an obligation.
+    bytes32 constant MAX_VAULTS_PER_MEMBER = keccak256("qudi.MAX_VAULTS_PER_MEMBER");
 }

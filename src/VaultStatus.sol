@@ -11,23 +11,14 @@ library VaultStatus {
     uint8 constant CLOSED = 2;
 }
 
-/// How a member says they intend to fund a vault (the contribution axis).
-/// The ledger stores it on the record and never reads it: enforcing a schedule on chain would
-/// need a keeper and a penalty, and neither is part of the design. It is the member's stated intent, which
-/// the app shows back to them.
-library Contribution {
-    uint8 constant ANYTIME = 0;
-    uint8 constant SCHEDULED = 1;
-    uint8 constant ONE_TIME = 2;
-    uint8 constant COUNT = 3;
-}
-
-/// A shared-withdrawal proposal's lifecycle. LIVE holds an earmark;
-/// EXECUTED and REVERTED are both terminal and both release it, one by paying the recipient and
-/// one by returning it to the balance. Nothing expires.
+/// A shared vault payout request's lifecycle. LIVE holds an earmark while its vote runs, PASSED
+/// holds it until someone executes, and EXECUTED is terminal. FAILED is never stored: a LIVE request
+/// whose window closed without passing is failed, so its earmark is released and the cooldown runs
+/// with no transaction.
 library ProposalStatus {
     uint8 constant NONE = 0;
     uint8 constant LIVE = 1;
-    uint8 constant EXECUTED = 2;
-    uint8 constant REVERTED = 3;
+    uint8 constant PASSED = 2;
+    uint8 constant EXECUTED = 3;
+    uint8 constant FAILED = 4;
 }

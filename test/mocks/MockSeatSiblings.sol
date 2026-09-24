@@ -76,6 +76,9 @@ contract MockCreditCoreLeg {
         return openTab[member];
     }
 
+    /// The ledger reads only `closed`, to route a closed account's credit fee to the treasury.
+    function communityCreditOf(uint256) external pure returns (ICreditCore.CommunityCredit memory v) {}
+
     function receiveCommunityLeg(uint256 communityId, uint256 amount) external {
         if (usdc.balanceOf(address(this)) < _booked + amount) revert LegNotFunded();
         _booked += amount;

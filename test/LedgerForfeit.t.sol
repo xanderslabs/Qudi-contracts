@@ -17,6 +17,7 @@ import {VenueIds} from "./helpers/VenueIds.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockCreditCoreLeg} from "./mocks/MockSeatSiblings.sol";
+import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
 /// What leaving does and does not do, over the real factory, the real
@@ -95,17 +96,15 @@ contract LedgerForfeitTest is InviteSigner {
         usdc.approve(address(ledger), type(uint256).max);
     }
 
+    /// An open personal vault in Flex, or a locked one in Term when `lockedUntil` is set.
     function _personal(address who, uint64 lockedUntil) internal returns (uint256 id) {
         vm.prank(who);
         id = ledger.createVault(
             ILedger.VaultParams({
-                poolType: VenueIds.FLEX,
+                venueId: lockedUntil == 0 ? VenueIds.FLEX : VenueIds.TERM,
                 shared: false,
                 lockedUntil: lockedUntil,
-                contribution: 0,
-                name: "personal",
-                target: 0,
-                targetDate: 0
+                name: "personal"
             })
         );
     }
@@ -118,29 +117,21 @@ contract LedgerForfeitTest is InviteSigner {
     function test_leavingASharedVault_leavesTheBalanceBehind() public {
         vm.prank(host);
         uint256 pot = ledger.createVault(
-            ILedger.VaultParams({
-                poolType: VenueIds.FLEX,
-                shared: true,
-                lockedUntil: 0,
-                contribution: 0,
-                name: "shared",
-                target: 0,
-                targetDate: 0
-            })
+            ILedger.VaultParams({venueId: VenueIds.FLEX, shared: true, lockedUntil: 0, name: "shared"})
         );
         vm.prank(ada);
         ledger.deposit(pot, 500e6);
         vm.prank(bea);
         ledger.deposit(pot, 200e6);
 
-        uint256 balanceBefore = ledger.vaultBalance(pot);
+        uint256 balanceBefore = ledger.vaultValue(pot);
         uint256 adaWalletBefore = usdc.balanceOf(ada);
 
         vm.prank(ada);
         community.forfeit();
 
         assertFalse(community.isMember(ada), "ada left");
-        assertEq(ledger.vaultBalance(pot), balanceBefore, "the balance stayed in the vault");
+        assertEq(ledger.vaultValue(pot), balanceBefore, "the balance stayed in the vault");
         assertEq(usdc.balanceOf(ada), adaWalletBefore, "nothing came back with her");
         assertEq(ledger.vaultUnits(pot), 700e6);
 
@@ -151,7 +142,7 @@ contract LedgerForfeitTest is InviteSigner {
         ledger.deposit(pot, 1e6);
         vm.expectRevert(ILedger.SharedVaultNeedsAProposal.selector);
         vm.prank(ada);
-        ledger.withdrawInstant(pot, 1e6);
+        ledger.requestWithdraw(pot, 1e6);
     }
 
     // ---- proof 14 ----
@@ -177,7 +168,7 @@ contract LedgerForfeitTest is InviteSigner {
 
         vm.expectRevert(ILedger.VaultLocked.selector);
         vm.prank(ada);
-        ledger.withdrawInstant(id, 100e6);
+        ledger.requestWithdraw(id, 100e6);
 
         vm.expectRevert(ICommunity.VaultHoldsBalance.selector);
         vm.prank(ada);
@@ -186,7 +177,7 @@ contract LedgerForfeitTest is InviteSigner {
         // They wait it out, withdraw, and then they may leave. No shortcuts.
         vm.warp(maturity);
         vm.prank(ada);
-        ledger.withdrawInstant(id, 100e6);
+        ledger.requestWithdraw(id, 100e6);
         vm.prank(ada);
         community.forfeit();
         assertFalse(community.isMember(ada));
@@ -202,7 +193,7 @@ contract LedgerForfeitTest is InviteSigner {
         vm.startPrank(ada);
         ledger.deposit(first, 100e6);
         ledger.deposit(second, 50e6);
-        ledger.withdrawInstant(first, 100e6);
+        ledger.requestWithdraw(first, 100e6);
         vm.stopPrank();
 
         vm.expectRevert(ICommunity.VaultHoldsBalance.selector);
@@ -210,7 +201,7 @@ contract LedgerForfeitTest is InviteSigner {
         community.forfeit();
 
         vm.prank(ada);
-        ledger.withdrawInstant(second, 50e6);
+        ledger.requestWithdraw(second, 50e6);
         vm.prank(ada);
         community.forfeit();
         assertFalse(community.isMember(ada));
@@ -223,36 +214,40 @@ contract LedgerForfeitTest is InviteSigner {
         assertFalse(community.isMember(cid));
     }
 
-    /// Units frozen in a pending withdrawal request still count as held: the money has not left
-    /// the community yet, so neither may the member.
-    function test_forfeit_countsUnitsFrozenInAPendingRequest() public {
+    /// A withdrawal leaves the vault at the request: the venue owes the member directly from
+    /// then on, so a request the venue has not paid yet no longer holds the member back. If they
+    /// cancel it after leaving, the money comes back to the personal vault they keep.
+    function test_forfeit_aQueuedWithdrawalIsAlreadyTheMembers() public {
         vm.prank(ada);
         uint256 id = ledger.createVault(
-            ILedger.VaultParams({
-                poolType: VenueIds.CORE,
-                shared: false,
-                lockedUntil: 0,
-                contribution: 0,
-                name: "personal",
-                target: 0,
-                targetDate: 0
-            })
+            ILedger.VaultParams({venueId: VenueIds.CORE, shared: false, lockedUntil: 0, name: "personal"})
         );
-        vm.startPrank(ada);
+        vm.prank(ada);
         ledger.deposit(id, 100e6);
-        uint256 req = ledger.requestWithdraw(id, 100e6);
+        // Core's money goes into a strategy that gives nothing back, so the venue cannot pay yet.
+        MockStrategy slow = new MockStrategy(IERC20(address(usdc)), address(pools[VenueIds.CORE]));
+        address[] memory list = new address[](1);
+        list[0] = address(slow);
+        uint16[] memory w = new uint16[](1);
+        w[0] = 10_000;
+        vm.startPrank(owner);
+        pools[VenueIds.CORE].addStrategy(address(slow), 0);
+        pools[VenueIds.CORE].setCap(address(slow), type(uint256).max);
+        pools[VenueIds.CORE].setWeights(list, w);
         vm.stopPrank();
+        pools[VenueIds.CORE].rebalance();
+        slow.setWithdrawCap(0);
 
-        vm.expectRevert(ICommunity.VaultHoldsBalance.selector);
         vm.prank(ada);
-        community.forfeit();
-
-        vm.warp(block.timestamp + pools[VenueIds.CORE].labels().exitSeconds);
-        vm.prank(ada);
-        ledger.executeWithdraw(req);
+        uint256 req = ledger.requestWithdraw(id, 100e6);
+        assertEq(ledger.personalUnitsOf(ada), 0);
         vm.prank(ada);
         community.forfeit();
         assertFalse(community.isMember(ada));
+
+        vm.prank(ada);
+        ledger.cancelWithdraw(req);
+        assertEq(ledger.vaultUnits(id), 100e6, "a departed member keeps their personal vault");
     }
 
     /// The gate is additive rather than a replacement: the open-tab gate still blocks on its

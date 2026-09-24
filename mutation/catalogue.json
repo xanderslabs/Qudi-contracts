@@ -1903,135 +1903,68 @@
   {
     "id": "UL-01",
     "file": "src/Ledger.sol",
-    "function": "_requirePersonalWithdrawer",
-    "bound": "the record's own lock: no withdrawal before `lockedUntil` (the lock moved off the tier vault, whose lockMaturity is 0)",
-    "match": "        if (v.lockedUntil != 0 && block.timestamp < v.lockedUntil) revert VaultLocked();\n    }\n",
-    "mutant": "    }\n",
+    "function": "requestWithdraw",
+    "bound": "a personal vault's own lock: no withdrawal request before `lockedUntil`",
+    "match": "        if (msg.sender != v.owner) revert NotVaultOwner();\n        if (block.timestamp < v.lockedUntil) revert VaultLocked();\n        if (amount == 0) revert ZeroAmount();",
+    "mutant": "        if (msg.sender != v.owner) revert NotVaultOwner();\n        if (amount == 0) revert ZeroAmount();",
     "status": "catalogued",
-    "test": "test_lockedUntil_isTheLedgersLockAndTheTierVaultsIsZero, test_lockedAndOpenVaultsShareOneTierVault, test_forfeit_revertsOnALockedPersonalVaultBeforeMaturity",
-    "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
-  },
-  {
-    "id": "UL-02",
-    "file": "src/Ledger.sol",
-    "function": "executeWithdraw",
-    "bound": "the lock re-check at execution, where the money actually leaves: a lock that let the last step through would be a lock on the paperwork",
-    "match": "        if (v.lockedUntil != 0 && block.timestamp < v.lockedUntil) revert VaultLocked();\n        if (block.timestamp < releaseAfter(id)) revert CooldownActive();",
-    "mutant": "        if (block.timestamp < releaseAfter(id)) revert CooldownActive();",
-    "status": "redundant",
-    "test": "test_lockedUntil_isTheLedgersLockAndTheTierVaultsIsZero",
-    "note": "Marked redundant because it could not be reached. `test_lockedVault_refusesTheRequestAndPaysOutOnlyAfterMaturity` pins the reachability argument and starts failing at its first line if the lock ever comes off the request path. The lock stays on the request. `WITHDRAW_TERM_TERM` is 0, which does not disturb the argument, because it rests on time being monotonic from the request to the execution and not on any gap between them: a same-block execution has the request's own timestamp, which the request already proved was at or after `lockedUntil`.",
-    "proof": "Unreachable. The lock is checked twice on the queued path, and the first check is the binding one: `requestWithdraw` runs `_requirePersonalWithdrawer`, which reverts `VaultLocked` on exactly this condition (UL-01). `lockedUntil` is written once, in `createVault`, and no path writes it again, so it is fixed for the life of the record. `executeWithdraw` settles a request that `requestWithdraw` already created, so its block timestamp is at or after the request's. A request that got through therefore proves `block.timestamp >= lockedUntil` at the request, and monotonic time carries that to every later execution: `block.timestamp < v.lockedUntil` cannot hold here. Measured rather than argued: the mutant below was applied by hand and the whole suite passed, 517 of 517 at the time, which is the same result stated from the other direction. The entry is kept rather than deleted because the bound would become live the moment the lock came off the request path, and re-pointing is cheaper than rediscovering it."
-  },
-  {
-    "id": "UL-03",
-    "file": "src/Ledger.sol",
-    "function": "proposeWithdrawal",
-    "bound": "the earmark ceiling: a proposal may not reserve more units than no live proposal has already spoken for",
-    "match": "        if (units > availableUnits(vaultId)) revert ExceedsAvailable();",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_earmark_cannotBeSpentTwice, test_reservedUnits_cannotBeClaimedByASecondProposal, test_priceRises_doesNotShrinkTheReservation",
-    "note": "P3-FIX: the bound moved from dollars to units. Re-pointed, not deleted."
+    "test": "test_proof9_aRequestBeforeTheUnlockDateReverts, test_forfeit_revertsOnALockedPersonalVaultBeforeMaturity",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "UL-04",
     "file": "src/Ledger.sol",
-    "function": "proposeWithdrawal",
-    "bound": "the reservation itself: without it the units are never held back and two proposals can claim the same ones",
-    "match": "        earmarkedUnits[vaultId] += units;\n",
-    "mutant": "",
+    "function": "earmarkedUnits",
+    "bound": "an open payout request (live in its window, or passed and unexecuted) earmarks its units",
+    "match": "        return s == ProposalStatus.LIVE || s == ProposalStatus.PASSED ? _payouts[id].units : 0;",
+    "mutant": "        return 0;",
     "status": "catalogued",
-    "test": "test_earmark_cannotBeSpentTwice, test_reservedUnits_cannotBeClaimedByASecondProposal, test_sharedWithdrawal_proposedEarmarkedVotedExecuted",
-    "note": "P3-FIX: the bound moved from dollars to units. Re-pointed, not deleted."
+    "test": "test_earmark_isInUnitsAndLeavesExactlyAsReserved",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "UL-05",
     "file": "src/Ledger.sol",
     "function": "availableUnits",
-    "bound": "the reservation subtraction: what a proposal may claim is the vault's units LESS the units already reserved",
-    "match": "        uint256 u = vaultUnits[vaultId];\n        uint256 e = earmarkedUnits[vaultId];\n        return u > e ? u - e : 0;",
+    "bound": "available units are the vault's units less the earmark",
+    "match": "        return vaultUnits[vaultId] - earmarkedUnits(vaultId);",
     "mutant": "        return vaultUnits[vaultId];",
     "status": "catalogued",
-    "test": "test_earmark_cannotBeSpentTwice, test_reservedUnits_cannotBeClaimedByASecondProposal",
-    "note": "P3-FIX: the bound moved from dollars to units. Re-pointed, not deleted."
+    "test": "test_earmark_isInUnitsAndLeavesExactlyAsReserved",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "UL-06",
     "file": "src/Ledger.sol",
-    "function": "_requirePersonalWithdrawer",
+    "function": "requestWithdraw",
     "bound": "the shared vault's closed member-withdrawal path: the only way out of one is a proposal, which is what makes the earmark a reservation rather than a hint",
     "match": "        if (v.shared) revert SharedVaultNeedsAProposal();",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_earmark_sharedVaultHasNoMemberWithdrawalPath, test_leavingASharedVault_leavesTheBalanceBehind",
+    "test": "test_sharedVault_hasNoMemberWithdrawalPath, test_leavingASharedVault_leavesTheBalanceBehind",
     "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
-  },
-  {
-    "id": "UL-07",
-    "file": "src/Ledger.sol",
-    "function": "_passed",
-    "bound": "the three-vote floor: no vote passes on fewer than three, whatever the percentages say",
-    "match": "        if (cast < MIN_VOTES) return false;",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_sharedWithdrawal_twoVotesNeverPasses",
-    "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
-  },
-  {
-    "id": "UL-08",
-    "file": "src/Ledger.sol",
-    "function": "_passed",
-    "bound": "the quorum: a share of the vault's qualifying contributors at proposal time must vote",
-    "match": "        if (cast * 10_000 < uint256(quorumBps) * p.depositorsAtProposal) return false;",
-    "mutant": "",
-    "status": "catalogued",
-    "test": "test_quorum_threeVotesOfTwentyDepositorsDoesNotPass, test_quorum_fourVotesOfTwentyDepositorsIsExactlyTheBarAndPasses",
-    "note": "The quorum and the three-vote floor overlap at four depositors, which is the electorate `LedgerSharedWithdrawal.t.sol` runs, and the entry was pointed at a test from that file. It was not covered: at four depositors the floor decides every proposal and this line can be deleted with nothing failing, which is what the mutation gate found. `LedgerVoteBars.t.sol` runs twenty depositors, where a 20% quorum is four votes and the floor is three, and that is the first size at which the two come apart."
-  },
-  {
-    "id": "UL-09",
-    "file": "src/Ledger.sol",
-    "function": "_passed",
-    "bound": "the approval bar: two thirds of the votes CAST must say yes, counted as people and never weighted by balance",
-    "match": "        return uint256(p.forVotes) * 10_000 >= uint256(approvalBps) * cast;",
-    "mutant": "        return p.forVotes > p.againstVotes;",
-    "status": "catalogued",
-    "test": "test_approval_aMajorityBelowTheBarDoesNotPass, test_approval_atTheBarItPasses, test_approval_countsPeopleNotBalances, test_approval_theLargestDepositorOnTheWinningSideChangesNothing",
-    "note": "Pointed at `test_sharedWithdrawal_oneDepositorOneVote` at first, which does not kill the mutant: at three yes and one no the real bar and `forVotes > againstVotes` both pass, so the test cannot tell them apart. The killing case is a majority that is still under the bar, four yes to two no, which `LedgerVoteBars.t.sol` runs."
   },
   {
     "id": "UL-10",
     "file": "src/Ledger.sol",
     "function": "voteOnWithdrawal",
-    "bound": "the electorate cutoff: the ballot gate asks whether the caller qualified as of the proposal's creation time, never as of the current block, so a member who qualifies later does not vote on a proposal that was already running",
-    "match": "        if (!_qualifiesAt(p.vaultId, msg.sender, p.openedAt)) revert NotDepositor();",
-    "mutant": "        if (!_qualifiesAt(p.vaultId, msg.sender, uint64(block.timestamp))) revert NotDepositor();",
+    "bound": "only a member counted in the request's headcount votes",
+    "match": "        if (_stakes[p.vaultId][msg.sender].countedIn != id) revert NotCounted();",
+    "mutant": "",
     "status": "catalogued",
-    "test": "test_sharedWithdrawal_electorateIsFrozenAtProposal, test_qualifyingLaterBuysNoVoteOnAnOlderProposal",
-    "note": "Re-pointed when the raw `_depositorSince` comparison was replaced with the two qualifying-contributor bars. The bound is the same one: the electorate is frozen when the proposal opens."
+    "test": "test_proof11_theHeadcountCountsOnlyQualifyingMembers, test_proof11_theHeadcountIsASnapshot, test_proof12_headcountZeroIsRefused",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "UL-11",
     "file": "src/Ledger.sol",
     "function": "executeWithdrawal",
-    "bound": "the vote itself: execution requires a passing count, not merely a closed window",
-    "match": "        if (!_passed(proposalId)) revert NotPassed();\n\n        uint256 vaultId = p.vaultId;",
-    "mutant": "\n        uint256 vaultId = p.vaultId;",
-    "status": "catalogued",
-    "test": "test_sharedWithdrawal_twoVotesNeverPasses",
-    "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
-  },
-  {
-    "id": "UL-12",
-    "file": "src/Ledger.sol",
-    "function": "revertWithdrawal",
-    "bound": "the revert delay on a PASSED proposal: a passed vote is not revertible out from under the execution it is waiting for",
-    "match": "        if (_passed(proposalId) && block.timestamp < p.deadline + config.sharedProposalRevertDelay()) {\n            revert RevertDelayNotElapsed();\n        }\n",
+    "bound": "only a passed request executes",
+    "match": "        if (p.status != ProposalStatus.PASSED) revert NotPassed();",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_passedProposal_becomesRevertibleAfterTheDelay",
-    "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
+    "test": "test_proof12_headcountFive_twoYesFails, test_proof12_headcountZeroIsRefused",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "UL-13",
@@ -2048,23 +1981,12 @@
     "id": "UL-14",
     "file": "src/Ledger.sol",
     "function": "closeCommunity",
-    "bound": "a community cannot close while a SHARED vault holds a balance: nobody holds an individual claim on one, so there would be no path left to pay it out",
-    "match": "            if (v.shared && v.status == VaultStatus.ACTIVE && vaultUnits[id] != 0) {\n                revert SharedVaultHoldsBalance();\n            }\n",
-    "mutant": "",
+    "bound": "a community cannot close while a SHARED vault holds units: nobody holds a claim on one, so there would be no path left to pay it out",
+    "match": "        if (_sharedUnits != 0) revert SharedVaultHoldsBalance();\n        uint256 n = _wired.length;",
+    "mutant": "        uint256 n = _wired.length;",
     "status": "catalogued",
-    "test": "test_communityCannotCloseWhileASharedVaultHoldsABalance, test_communityClosesOnceEverySharedVaultIsEmptied",
-    "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
-  },
-  {
-    "id": "UL-15",
-    "file": "src/Ledger.sol",
-    "function": "closeCommunity",
-    "bound": "the shared-only scope of that guard: a personal balance must NOT block closure, and its owner withdraws afterwards",
-    "match": "            if (v.shared && v.status == VaultStatus.ACTIVE && vaultUnits[id] != 0) {",
-    "mutant": "            if (v.status == VaultStatus.ACTIVE && vaultUnits[id] != 0) {",
-    "status": "catalogued",
-    "test": "test_communityCanCloseWhileAPersonalVaultHoldsABalance",
-    "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
+    "test": "test_communityCannotCloseWhileASharedVaultHoldsABalance, test_lockedSharedVault_blocksClosureUntilItsDate",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "UL-16",
@@ -2074,30 +1996,19 @@
     "match": "        if (communityClosed) revert CommunityIsClosed();\n        if (amount == 0) revert ZeroAmount();",
     "mutant": "        if (amount == 0) revert ZeroAmount();",
     "status": "catalogued",
-    "test": "test_closed_refusesDeposits, test_closed_putsNoFurtherPrincipalToWork",
+    "test": "test_closed_refusesDeposits, test_closed_refusesDepositsAndPaysWithdrawals",
     "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
   },
   {
     "id": "UL-18",
     "file": "src/Ledger.sol",
-    "function": "requestWithdraw",
-    "bound": "the queued-path ceiling: a request may not exceed the record's own unreserved units",
-    "match": "        uint256 units = _tierVault[v.poolType].convertToShares(amount);\n        if (units > vaultUnits[vaultId] - _frozenUnits[vaultId]) revert ExceedsWithdrawable();\n        _frozenUnits[vaultId] += units;",
-    "mutant": "        uint256 units = _tierVault[v.poolType].convertToShares(amount);\n        _frozenUnits[vaultId] += units;",
+    "function": "_unitsFor",
+    "bound": "a withdrawal or payout request cannot take more than the vault holds",
+    "match": "            if (amount > tv.convertToAssets(Math.mulDiv(available, b.shares, b.units))) revert ExceedsWithdrawable();",
+    "mutant": "",
     "status": "catalogued",
-    "test": "test_requestWithdraw_ceilingIsTheWholeBalance",
-    "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
-  },
-  {
-    "id": "UL-19",
-    "file": "src/Ledger.sol",
-    "function": "withdrawInstant",
-    "bound": "the same ceiling on the path that skips the queue. Mutation UL-04 survived this once before: `vaultUnits -= units` underflows one line later, and that arithmetic backstop is what hid the missing coverage",
-    "match": "        if (l.kind != IVenue.Kind.Open || l.exitSeconds != 0) revert InstantPathBlocked();\n\n        uint256 units = _tierVault[v.poolType].convertToShares(amount);\n        if (units > vaultUnits[vaultId] - _frozenUnits[vaultId]) revert ExceedsWithdrawable();",
-    "mutant": "        if (l.kind != IVenue.Kind.Open || l.exitSeconds != 0) revert InstantPathBlocked();\n\n        uint256 units = _tierVault[v.poolType].convertToShares(amount);",
-    "status": "catalogued",
-    "test": "test_withdrawInstant_ceilingIsTheWholeBalance",
-    "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
+    "test": "test_withdraw_moreThanTheVaultHoldsReverts, test_request_cannotAskForMoreThanTheVaultHolds",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "UL-20",
@@ -2113,7 +2024,7 @@
   {
     "id": "UL-21",
     "file": "src/Ledger.sol",
-    "function": "_requirePersonalWithdrawer",
+    "function": "requestWithdraw",
     "bound": "the personal vault's owner-only exit",
     "match": "        if (v.shared) revert SharedVaultNeedsAProposal();\n        if (msg.sender != v.owner) revert NotVaultOwner();",
     "mutant": "        if (v.shared) revert SharedVaultNeedsAProposal();",
@@ -2125,23 +2036,12 @@
     "id": "UL-22",
     "file": "src/Ledger.sol",
     "function": "deposit",
-    "bound": "the full-credit principal: the whole amount is credited to the record, whatever the member owes",
-    "match": "        vaultPrincipal[vaultId] += amount;\n",
-    "mutant": "",
+    "bound": "a deposit adds its amount to the vault's capital",
+    "match": "        vaultCapital[vaultId] += amount;\n\n        if (v.shared) {",
+    "mutant": "\n        if (v.shared) {",
     "status": "catalogued",
-    "test": "test_deposit_buysUnitsOneToOneWithShares, test_balance_tracksTheTierPrice_earnedIsTheGain",
-    "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
-  },
-  {
-    "id": "UL-23",
-    "file": "src/Ledger.sol",
-    "function": "releaseAfter",
-    "bound": "the venue's stated exit time, and nothing added for owing",
-    "match": "        return r.requestedAt + _tierVault[vaults[r.vaultId].poolType].labels().exitSeconds;",
-    "mutant": "        return r.requestedAt;",
-    "status": "catalogued",
-    "test": "test_requestWithdraw_freezesUnitsAndRecordsRelease",
-    "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
+    "test": "test_deposit_buysUnitsOneToOneWithShares, test_proof2_aGainIsSplit15To15To70",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "SM-06",
@@ -2151,7 +2051,7 @@
     "match": "        if (_holdsAPersonalVault(msg.sender)) revert VaultHoldsBalance();",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_forfeit_revertsWhileAPersonalVaultHoldsABalance, test_forfeit_revertsOnALockedPersonalVaultBeforeMaturity, test_forfeit_succeedsOnceEveryPersonalVaultIsZero, test_forfeit_countsUnitsFrozenInAPendingRequest",
+    "test": "test_forfeit_revertsWhileAPersonalVaultHoldsABalance, test_forfeit_revertsOnALockedPersonalVaultBeforeMaturity, test_forfeit_succeedsOnceEveryPersonalVaultIsZero",
     "note": "P3, the Ledger rewrite. The four entries UL-01 to UL-04 named sites in the per-member ledger this task replaced; these are the money bounds of the per-record one."
   },
   {
@@ -2159,7 +2059,7 @@
     "file": "src/Community.sol",
     "function": "_holdsAPersonalVault",
     "bound": "the gate's own reading: a non-zero personal unit balance is what blocks, not merely the existence of a ledger",
-    "match": "        return ledger != address(0) && ILedger(ledger).personalUnitsOf(member) != 0;",
+    "match": "        return l != address(0) && ILedger(l).personalUnitsOf(member) != 0;",
     "mutant": "        return false;",
     "status": "catalogued",
     "test": "test_forfeit_revertsWhileAPersonalVaultHoldsABalance, test_forfeit_isUnchangedForAMemberHoldingNothing",
@@ -2459,56 +2359,46 @@
   {
     "id": "UL-24",
     "file": "src/Ledger.sol",
-    "function": "deposit",
-    "bound": "the amount bar: a contributor qualifies only once their cumulative deposits into this shared vault reach QUALIFYING_CONTRIBUTOR_MIN_DEPOSIT, so a dust deposit buys no vote and does not widen the quorum base",
-    "match": "            if (_qualifiedSince[vaultId][msg.sender] == 0 && contributed >= minDeposit) {",
-    "mutant": "            if (_qualifiedSince[vaultId][msg.sender] == 0) {",
+    "function": "_countHeadcount",
+    "bound": "headcount exclusion: under `QUALIFYING_CONTRIBUTOR_MIN_DEPOSIT` put in",
+    "match": "            if (m == recipient || k.deposited < minDeposit || block.timestamp < k.firstAt + seasoning) continue;",
+    "mutant": "            if (m == recipient || block.timestamp < k.firstAt + seasoning) continue;",
     "status": "catalogued",
-    "test": "test_belowTheAmountBar_cannotVote, test_belowTheAmountBar_isNotCountedInQuorum, test_theDustDepositorsDoNotRaiseTheQuorum, test_theAmountBarIsCumulative",
-    "note": "The qualifying contributor, a deliberate narrow exception to the rule against per-member claims on a shared vault: eligibility to vote is not a claim on money, and no money path reads either per-member figure."
+    "test": "test_proof11_theHeadcountCountsOnlyQualifyingMembers",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "UL-25",
     "file": "src/Ledger.sol",
-    "function": "_qualifiesAt",
-    "bound": "the seasoning bar: the crossing must be at least QUALIFYING_CONTRIBUTOR_SEASONING before the instant asked about, half-open at the far end",
-    "match": "        return at >= since + seasoning;",
-    "mutant": "        return true;",
+    "function": "_countHeadcount",
+    "bound": "headcount exclusion: a first deposit less than `QUALIFYING_CONTRIBUTOR_SEASONING` before the request",
+    "match": "            if (m == recipient || k.deposited < minDeposit || block.timestamp < k.firstAt + seasoning) continue;",
+    "mutant": "            if (m == recipient || k.deposited < minDeposit) continue;",
     "status": "catalogued",
-    "test": "test_insideTheSeasoningWindow_cannotVote, test_theSeasoningBoundaryIsHalfOpen, test_theSeasoningClockStartsAtTheCrossing",
-    "note": "The qualifying contributor, a deliberate narrow exception to the rule against per-member claims on a shared vault: eligibility to vote is not a claim on money, and no money path reads either per-member figure."
-  },
-  {
-    "id": "UL-26",
-    "file": "src/Ledger.sol",
-    "function": "_qualifyingContributorsAt",
-    "bound": "the quorum denominator's own cutoff: contributors are counted as of `at` less the seasoning, not as of `at`, which is what keeps the base the same electorate the ballot gate admits",
-    "match": "        uint64 cutoff = at - seasoning;",
-    "mutant": "        uint64 cutoff = at;",
-    "status": "catalogued",
-    "test": "test_insideTheSeasoningWindow_isNotCountedInQuorum, test_qualifyingLaterBuysNoVoteOnAnOlderProposal",
-    "note": "The qualifying contributor, a deliberate narrow exception to the rule against per-member claims on a shared vault: eligibility to vote is not a claim on money, and no money path reads either per-member figure."
+    "test": "test_proof11_theHeadcountCountsOnlyQualifyingMembers",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "UL-27",
     "file": "src/Ledger.sol",
     "function": "proposeWithdrawal",
-    "bound": "the record's own lock on the shared path: no proposal may open while the vault is locked, so a passing vote cannot drain a locked shared vault",
-    "match": "        if (v.lockedUntil != 0 && block.timestamp < v.lockedUntil) revert VaultLocked();\n        if (recipient == address(0)) revert ZeroAddress();",
-    "mutant": "        if (recipient == address(0)) revert ZeroAddress();",
+    "bound": "no payout request on a shared vault before its unlock date",
+    "match": "        if (msg.sender != community.steward()) revert NotHost();\n        if (block.timestamp < v.lockedUntil) revert VaultLocked();",
+    "mutant": "        if (msg.sender != community.steward()) revert NotHost();",
     "status": "catalogued",
-    "test": "test_lockedSharedVault_refusesAProposalUntilMaturity, test_lockedSharedVault_blocksClosureUntilItsDateAndThenReleasesIt",
-    "note": "Before this gate, `lockedUntil` was read on three personal paths only and a shared vault's lock evaporated on a passing vote. The gate sits at proposal rather than at execution so a vote that cannot legally execute never starts. Applied by hand and both named tests failed, which is the kill measured rather than argued."
+    "test": "test_onlyTheHostRequests_onAnUnlockedSharedVault, test_lockedSharedVault_blocksClosureUntilItsDate",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "UL-28",
     "file": "src/Ledger.sol",
     "function": "createVault",
-    "bound": "a record in a Locked venue must carry a lock: a Locked venue does not anticipate withdrawals",
-    "match": "        if (tv.labels().kind == IVenue.Kind.Locked && p.lockedUntil == 0) revert TermRecordMustBeLocked();",
+    "bound": "a Locked-kind venue takes only a vault with an unlock date in the future",
+    "match": "            if (p.lockedUntil <= block.timestamp) revert LockRequired();",
     "mutant": "",
     "status": "catalogued",
-    "test": "test_termRecordMustCarryALock"
+    "test": "test_proof1_aLockedKindVenueWithoutALockReverts",
+    "note": "Re-pointed when the ledger moved to one pushed withdrawal and the headcount payout vote."
   },
   {
     "id": "SE-01",
@@ -2705,7 +2595,7 @@
     "file": "src/Community.sol",
     "function": "_minYes",
     "bound": "the kind check: only an election's floor drops below 3, so removal, host-removal and price votes keep the full floor",
-    "match": "        if (v.kind != VoteKind.Election) return MIN_YES_VOTES;",
+    "match": "        if (v.kind != VoteKind.Election && v.kind != VoteKind.Closure) return MIN_YES_VOTES;",
     "mutant": "",
     "status": "catalogued",
     "test": "test_proof11_everyOtherVoteKindStillNeedsThree"
@@ -2728,7 +2618,7 @@
     "match": "        return d == 0 ? 1 : d;",
     "mutant": "        return d;",
     "status": "catalogued",
-    "test": "test_proof11_noSeasonedVoterCanNeverElect"
+    "test": "test_proof11_noSeasonedVoterCanNeverPass"
   },
   {
     "id": "SM-47",
@@ -2935,8 +2825,8 @@
     "file": "src/Community.sol",
     "function": "nominateSuccessor",
     "bound": "only the host nominates a successor",
-    "match": "    function nominateSuccessor(address nominee) external {\n        if (msg.sender != steward) revert NotSteward();",
-    "mutant": "    function nominateSuccessor(address nominee) external {",
+    "match": "    function nominateSuccessor(address nominee) external {\n        if (closed) revert CommunityIsClosed();\n        if (msg.sender != steward) revert NotSteward();",
+    "mutant": "    function nominateSuccessor(address nominee) external {\n        if (closed) revert CommunityIsClosed();",
     "status": "catalogued",
     "test": "test_proof2_onlyASeasonedActiveUnfrozenMemberOtherThanTheHostCanBeNominated"
   },
@@ -3135,8 +3025,8 @@
     "file": "src/Community.sol",
     "function": "resignHost",
     "bound": "no resignation while a vote to remove the host is open",
-    "match": "    function resignHost() external {\n        if (msg.sender != steward) revert NotSteward();\n        if (_hostVoteOpen()) revert HostVoteOpen();",
-    "mutant": "    function resignHost() external {\n        if (msg.sender != steward) revert NotSteward();",
+    "match": "    function resignHost() external {\n        if (closed) revert CommunityIsClosed();\n        if (msg.sender != steward) revert NotSteward();\n        if (_hostVoteOpen()) revert HostVoteOpen();",
+    "mutant": "    function resignHost() external {\n        if (closed) revert CommunityIsClosed();\n        if (msg.sender != steward) revert NotSteward();",
     "status": "catalogued",
     "test": "test_proof5_noNominationOrResignationWhileARemovalVoteIsOpen"
   },
@@ -3165,8 +3055,8 @@
     "file": "src/Community.sol",
     "function": "_thresholdFor",
     "bound": "an election passes at the community vote threshold, more than half, no longer the host-vote threshold",
-    "match": "        if (kind == VoteKind.StewardRemoval) return config.hostVote();",
-    "mutant": "        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Election) return config.hostVote();",
+    "match": "        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Closure) return config.hostVote();",
+    "mutant": "        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Closure || kind == VoteKind.Election) return config.hostVote();",
     "status": "catalogued",
     "test": "test_proof8_sixVotersElectWithFourYesVotesAndNotThree"
   },
@@ -3175,8 +3065,8 @@
     "file": "src/Community.sol",
     "function": "_thresholdFor",
     "bound": "a vote to remove the host keeps the host-vote threshold",
-    "match": "        if (kind == VoteKind.StewardRemoval) return config.hostVote();",
-    "mutant": "",
+    "match": "        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Closure) return config.hostVote();",
+    "mutant": "        if (kind == VoteKind.Closure) return config.hostVote();",
     "status": "catalogued",
     "test": "test_proof8_removingTheHostOfSixStillNeedsFive"
   },
@@ -3419,5 +3309,345 @@
     "mutant": "        if (key == K.MANUAL_RATE_CEILING_BPS) return (0, type(uint256).max);",
     "status": "catalogued",
     "test": "test_rateCeilings_launchValuesAndBounds"
+  },
+  {
+    "id": "UL-29",
+    "file": "src/Ledger.sol",
+    "function": "_preview",
+    "bound": "the credit share of the split: 15% of the gain above the peak",
+    "match": "            creditFee = gain * poolBps / 10_000;",
+    "mutant": "            creditFee = gain * poolBps / 5_000;",
+    "status": "catalogued",
+    "test": "test_proof2_aGainIsSplit15To15To70"
+  },
+  {
+    "id": "UL-30",
+    "file": "src/Ledger.sol",
+    "function": "_preview",
+    "bound": "the treasury share of the split: 15% of the gain above the peak",
+    "match": "            uint256 treasuryShares = Math.mulDiv(gain * protocolBps / 10_000, PRICE_UNIT, price);",
+    "mutant": "            uint256 treasuryShares = 0;",
+    "status": "catalogued",
+    "test": "test_proof2_aGainIsSplit15To15To70"
+  },
+  {
+    "id": "UL-31",
+    "file": "src/Ledger.sol",
+    "function": "_preview",
+    "bound": "the high-water mark: a loss never lowers the peak, so the recovery back to it is not charged",
+    "match": "        if (price <= b.hwm) return (b, 0);",
+    "mutant": "        if (price <= b.hwm) {\n            b.hwm = price;\n            return (b, 0);\n        }",
+    "status": "catalogued",
+    "test": "test_proof3_aRecoveryToThePeakIsNotCharged"
+  },
+  {
+    "id": "UL-32",
+    "file": "src/Ledger.sol",
+    "function": "_preview",
+    "bound": "the accumulator: the credit fee becomes impact per unit when it is taken",
+    "match": "            b.impactPerUnit += Math.mulDiv(creditFee, ACC, b.units);\n",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof5_equalUnitsEarnEqualImpact, test_proof4_aFeeWaitsForTheVenueAndImpactDoesNot"
+  },
+  {
+    "id": "UL-33",
+    "file": "src/Ledger.sol",
+    "function": "_shrinkWeights",
+    "bound": "a payout shrinks every depositor's weight in proportion",
+    "match": "        sb.scale = s == 0 ? 1 : s;",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof6_sharedImpactFollowsWhatEachPutIn, test_sharedWeight_aDepositAfterAPayoutWeighsItsAmount"
+  },
+  {
+    "id": "UL-34",
+    "file": "src/Ledger.sol",
+    "function": "createVault",
+    "bound": "an Open-kind venue takes no unlock date",
+    "match": "            revert LockNotAllowed();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof1_anOpenKindVenueWithALockReverts"
+  },
+  {
+    "id": "UL-35",
+    "file": "src/Ledger.sol",
+    "function": "_countHeadcount",
+    "bound": "headcount exclusion: the recipient",
+    "match": "            if (m == recipient || k.deposited < minDeposit || block.timestamp < k.firstAt + seasoning) continue;",
+    "mutant": "            if (k.deposited < minDeposit || block.timestamp < k.firstAt + seasoning) continue;",
+    "status": "catalogued",
+    "test": "test_proof11_theHeadcountCountsOnlyQualifyingMembers"
+  },
+  {
+    "id": "UL-36",
+    "file": "src/Ledger.sol",
+    "function": "_countHeadcount",
+    "bound": "headcount exclusion: a frozen member",
+    "match": "            if (!community.isSeasoned(m) || community.isFrozen(m)) continue;",
+    "mutant": "            if (!community.isSeasoned(m)) continue;",
+    "status": "catalogued",
+    "test": "test_proof11_theHeadcountCountsOnlyQualifyingMembers"
+  },
+  {
+    "id": "UL-37",
+    "file": "src/Ledger.sol",
+    "function": "_countHeadcount",
+    "bound": "headcount exclusion: a seat that is not Active and seasoned",
+    "match": "            if (!community.isSeasoned(m) || community.isFrozen(m)) continue;",
+    "mutant": "            if (community.isFrozen(m)) continue;",
+    "status": "catalogued",
+    "test": "test_proof11_anUnseasonedOrDepartedDepositorIsNotCounted"
+  },
+  {
+    "id": "UL-38",
+    "file": "src/Ledger.sol",
+    "function": "_barMet",
+    "bound": "the majority bar: yes votes over half the headcount",
+    "match": "        return yes * 2 > headcount && yes >= MIN_YES;",
+    "mutant": "        return yes * 2 >= headcount && yes >= MIN_YES;",
+    "status": "catalogued",
+    "test": "test_proof12_itPassesEarlyTheMomentTheBarIsMet"
+  },
+  {
+    "id": "UL-39",
+    "file": "src/Ledger.sol",
+    "function": "_barMet",
+    "bound": "the floor of three yes votes",
+    "match": "        return yes * 2 > headcount && yes >= MIN_YES;",
+    "mutant": "        return yes * 2 > headcount;",
+    "status": "catalogued",
+    "test": "test_proof12_headcountThree_twoYesIsNotEnough"
+  },
+  {
+    "id": "UL-40",
+    "file": "src/Ledger.sol",
+    "function": "_barMet",
+    "bound": "under three counted, every counted member must vote yes",
+    "match": "        if (headcount < MIN_YES) return headcount != 0 && yes == headcount;\n",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof12_headcountTwo_twoYesPasses"
+  },
+  {
+    "id": "UL-41",
+    "file": "src/Ledger.sol",
+    "function": "proposeWithdrawal",
+    "bound": "the cooldown after a failed payout request on the same vault",
+    "match": "                s == ProposalStatus.FAILED\n                    && block.timestamp < _payouts[last].deadline + config.removalReproposeCooldown()",
+    "mutant": "                false",
+    "status": "catalogued",
+    "test": "test_proof13_aFailedRequestCoolsTheVaultDown"
+  },
+  {
+    "id": "UL-42",
+    "file": "src/Ledger.sol",
+    "function": "proposeWithdrawal",
+    "bound": "one open payout request per vault",
+    "match": "            if (s == ProposalStatus.LIVE || s == ProposalStatus.PASSED) revert PayoutOpen();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_oneOpenRequestPerVault"
+  },
+  {
+    "id": "UL-43",
+    "file": "src/Ledger.sol",
+    "function": "_addToList",
+    "bound": "the vault-per-member cap",
+    "match": "        if (ids.length >= config.maxVaultsPerMember()) revert TooManyVaults();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof15_theMemberCapRevertsAt33"
+  },
+  {
+    "id": "UL-44",
+    "file": "src/Ledger.sol",
+    "function": "deposit",
+    "bound": "a shared vault's units count toward the closure guard",
+    "match": "            _sharedUnits += units;\n",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_communityCannotCloseWhileASharedVaultHoldsABalance, test_proof13a_refusedWhileASharedVaultHoldsMoney"
+  },
+  {
+    "id": "UL-45",
+    "file": "src/Ledger.sol",
+    "function": "closeCommunity",
+    "bound": "only this ledger's own `Community` closes it",
+    "match": "        if (msg.sender != address(community)) revert NotCommunity();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_closeCommunity_isTheCommunitysAndHappensOnce, test_proof13a_theHostAloneCannotClose"
+  },
+  {
+    "id": "UL-46",
+    "file": "src/Ledger.sol",
+    "function": "createVault",
+    "bound": "a retired venue takes no new vaults",
+    "match": "        if (!ICommunityFactory(factory).isActiveVenue(p.venueId)) revert VenueRetired();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof1_aRetiredVenueRefusesNewVaults"
+  },
+  {
+    "id": "CFG-03",
+    "file": "src/Config.sol",
+    "function": "bounds",
+    "bound": "MAX_VAULTS_PER_MEMBER stays from 1 to 64",
+    "match": "        if (key == K.MAX_VAULTS_PER_MEMBER) return (1, 64);",
+    "mutant": "        if (key == K.MAX_VAULTS_PER_MEMBER) return (0, type(uint256).max);",
+    "status": "catalogued",
+    "test": "test_maxVaultsPerMember_launchValueAndBounds"
+  },
+  {
+    "id": "SM-92",
+    "file": "src/Community.sol",
+    "function": "_minYes",
+    "bound": "a closure vote's yes-vote floor is min(3, headcount), so two seasoned members can close",
+    "match": "        if (v.kind != VoteKind.Election && v.kind != VoteKind.Closure) return MIN_YES_VOTES;",
+    "mutant": "        if (v.kind != VoteKind.Election) return MIN_YES_VOTES;",
+    "status": "catalogued",
+    "test": "test_proof13a_twoSeasoned_twoYesPass"
+  },
+  {
+    "id": "SM-93",
+    "file": "src/Community.sol",
+    "function": "_thresholdFor",
+    "bound": "a closure vote takes the host-vote bar, more than two thirds",
+    "match": "        if (kind == VoteKind.StewardRemoval || kind == VoteKind.Closure) return config.hostVote();",
+    "mutant": "        if (kind == VoteKind.StewardRemoval) return config.hostVote();",
+    "status": "catalogued",
+    "test": "test_proof13a_sixSeasoned_fourYesFail"
+  },
+  {
+    "id": "SM-94",
+    "file": "src/Community.sol",
+    "function": "proposeClosure",
+    "bound": "the cooldown after a failed closure vote",
+    "match": "            if (block.timestamp < votes[last].deadline + config.removalReproposeCooldown()) revert ClosureCooldown();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof13a_aFailedVoteCoolsDownFor30Days"
+  },
+  {
+    "id": "SM-95",
+    "file": "src/Community.sol",
+    "function": "_requireClosable",
+    "bound": "no closure while a shared vault holds money",
+    "match": "        if (ILedger(ledger).sharedVaultsHoldMoney()) revert SharedVaultHoldsMoney();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof13a_refusedWhileASharedVaultHoldsMoney, test_proof13a_executionRechecksTheSharedVaults"
+  },
+  {
+    "id": "SM-96",
+    "file": "src/Community.sol",
+    "function": "_requireClosable",
+    "bound": "no closure while a removal vote's window is open",
+    "match": "        if (block.timestamp <= _removalWindowEnd || (hostVote != 0 && !_resolvedAsFailed(hostVote))) {",
+    "mutant": "        if (hostVote != 0 && !_resolvedAsFailed(hostVote)) {",
+    "status": "catalogued",
+    "test": "test_proof13a_refusedWhileARemovalVoteIsOpen, test_proof13a_executionRechecksTheOtherVotes"
+  },
+  {
+    "id": "SM-97",
+    "file": "src/Community.sol",
+    "function": "_requireClosable",
+    "bound": "no closure while a host vote or election is open",
+    "match": "        if (block.timestamp <= _removalWindowEnd || (hostVote != 0 && !_resolvedAsFailed(hostVote))) {",
+    "mutant": "        if (block.timestamp <= _removalWindowEnd) {",
+    "status": "catalogued",
+    "test": "test_proof13a_refusedWhileAHostVoteOrHandoverIsOpen"
+  },
+  {
+    "id": "SM-98",
+    "file": "src/Community.sol",
+    "function": "_requireOpen",
+    "bound": "joining and new invites wait while a closure vote is open",
+    "match": "        if (id != 0 && !_resolvedAsFailed(id)) revert ClosureVoteOpen();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_openClosureVote_pausesJoiningAndInvites"
+  },
+  {
+    "id": "SM-99",
+    "file": "src/Community.sol",
+    "function": "executeClosure",
+    "bound": "closing ends the host term, so every live invite stops working",
+    "match": "        closed = true;\n        hostTerm++;",
+    "mutant": "        closed = true;",
+    "status": "catalogued",
+    "test": "test_closed_everyLiveInviteStopsWorking"
+  },
+  {
+    "id": "SM-100",
+    "file": "src/Community.sol",
+    "function": "electSteward",
+    "bound": "a candidate must be a seasoned Active member who is not frozen",
+    "match": "        if (!_canHost(candidate)) revert CandidateIneligible();",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_election_anUnseasonedCandidateIsRefused, test_election_aFrozenCandidateIsRefused, test_proof11_anUnseasonedMemberCannotStand"
+  },
+  {
+    "id": "SM-101",
+    "file": "src/Community.sol",
+    "function": "_requireOpen",
+    "bound": "a closed community takes nobody",
+    "match": "    function _requireOpen() internal view {\n        if (closed) revert CommunityIsClosed();",
+    "mutant": "    function _requireOpen() internal view {",
+    "status": "catalogued",
+    "test": "test_closed_createInviteRefuses"
+  },
+  {
+    "id": "UL-47",
+    "file": "src/Ledger.sol",
+    "function": "settleFees",
+    "bound": "a closed credit account's share of the fee goes to the treasury, not to an account that refuses it",
+    "match": "            uint256 toCredit = creditClosed ? 0 : Math.mulDiv(assets, cr, r);",
+    "mutant": "            uint256 toCredit = Math.mulDiv(assets, cr, r);",
+    "status": "catalogued",
+    "test": "test_settlement_aClosedCreditAccountsShareGoesToTheTreasury, test_settlement_aShareWaitingWhenTheAccountClosesGoesToTheTreasury"
+  },
+  {
+    "id": "UL-48",
+    "file": "src/Ledger.sol",
+    "function": "proposeWithdrawal",
+    "bound": "a payout request that would count nobody is refused, earmarking nothing and starting no cooldown",
+    "match": "        if (headcount == 0) revert NoHeadcount();\n",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof12_headcountZeroIsRefused"
+  },
+  {
+    "id": "SM-102",
+    "file": "src/Community.sol",
+    "function": "proposeRemoveSteward",
+    "bound": "no host removal vote in a closed community",
+    "match": "        // A closed community needs no host changes.\n        if (closed) revert CommunityIsClosed();\n",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_closed_hostRemovalNominationResignationAndElectionRefuse"
+  },
+  {
+    "id": "SM-103",
+    "file": "src/Community.sol",
+    "function": "castVote",
+    "bound": "every ballot emits `VoteCast` for the indexer",
+    "match": "        emit VoteCast(voteId, msg.sender, support);\n",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_castVote_emitsVoteCast"
+  },
+  {
+    "id": "SM-104",
+    "file": "src/Community.sol",
+    "function": "objectToHandover",
+    "bound": "every objection emits `HandoverObjected` for the indexer",
+    "match": "        emit HandoverObjected(voteId, msg.sender);\n",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_objectToHandover_emitsHandoverObjected"
   }
 ]

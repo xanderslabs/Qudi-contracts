@@ -23,13 +23,14 @@ interface ICommunity {
     /// Handover is the objection period of an accepted nomination, driven by objectToHandover and
     /// completeHandover. Removal keeps the ordinal the retired Suspension kind had: `VoteStarted`
     /// emits the kind as a `uint8`, so moving it would silently change what the indexer reads.
-    /// New kinds go at the end for the same reason.
+    /// New kinds go at the end for the same reason. Closure drives proposeClosure/executeClosure.
     enum VoteKind {
         StewardRemoval,
         Election,
         Price,
         Removal,
-        Handover
+        Handover,
+        Closure
     }
 
     /// What a seat is. None is a wallet that never minted here. Active to
@@ -113,6 +114,12 @@ interface ICommunity {
     function resignHost() external; // host only; the seat empties and the host stays a member
     function pendingHandover() external view returns (PendingHandover memory);
 
+    // closure
+    function proposeClosure() external; // host only; members vote at the host-vote bar
+    function executeClosure() external; // permissionless once passed; closes the ledger
+    function closureVoteId() external view returns (uint256);
+    function closed() external view returns (bool);
+
     // card-price vote
     function proposeSeatPrice(uint256 newPrice) external; // steward only; floor applies; starts the vote
     function executeSeatPriceVote() external; // permissionless after the window; re-checks the floor live
@@ -155,6 +162,12 @@ interface ICommunity {
     /// Objections went over half, or the nominee no longer qualified at completion. The host
     /// waits `REMOVAL_REPROPOSE_COOLDOWN` before nominating again.
     event HandoverFailed(address indexed nominee);
+    event CommunityClosed();
+    /// Every ballot cast with `castVote`. A vote that fails at its deadline has no transaction and
+    /// so no event; the indexer reads the outcome from `voteTally`.
+    event VoteCast(uint256 indexed voteId, address indexed voter, bool support);
+    /// Every objection to a handover, in the objection period's vote.
+    event HandoverObjected(uint256 indexed voteId, address indexed member);
 
     error NotSteward();
     error NotMember();
@@ -220,4 +233,11 @@ interface ICommunity {
     error NominationLapsed(); // accepted after HANDOVER_ACCEPT_WINDOW
     error NomineeIneligible(); // not a seasoned Active unfrozen member other than the host
     error HandoverCooldown(); // inside REMOVAL_REPROPOSE_COOLDOWN of a failed handover
+
+    // closure errors
+    error CommunityIsClosed();
+    error ClosureVoteOpen(); // join or createInvite while a closure vote is open
+    error ClosureCooldown(); // inside REMOVAL_REPROPOSE_COOLDOWN of a failed closure vote
+    error SharedVaultHoldsMoney();
+    error CandidateIneligible(); // not a seasoned Active unfrozen member
 }

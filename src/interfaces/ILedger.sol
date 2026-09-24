@@ -1,42 +1,47 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
-/// One community's book. Every vault, every tier, one contract,
-/// one clone per community.
+/// One community's book. Every vault, every venue, one contract, one clone per community.
 ///
-/// A vault is a record, not a contract: `VaultParams` opens one, and many records may sit in the
-/// same tier. The ledger holds one position per tier in that tier's shared `Venue` and
-/// divides it between the records, so `tierUnits[t]` is both the sum of the tier's active
-/// `vaultUnits` and the ledger's own unit balance in `tierVault(t)`.
+/// A vault is a record: an owner (none for a shared vault), a venue and, in a Locked-kind venue,
+/// an unlock date. For each venue it uses, the ledger holds `Venue` shares and divides them between
+/// its vaults as internal units. `venueShares(id) / venueUnits(id)` is the shares behind one unit.
 ///
-/// There is no per-member unit accounting, and no per-member unit balance to read (the
-/// getter that used to answer one is gone, not renamed). A shared vault
-/// belongs to the community and a member who leaves forfeits what they left in one; a personal
-/// vault belongs to exactly one owner. Per-member contribution history is served from events by
-/// the indexer, which is where display data belongs.
+/// The ledger is also where a community's yield is split and turned into impact. On every
+/// interaction, or a public `accrue`, the gain on each venue position above its previous peak
+/// price is charged: the treasury's share and this community's credit share are taken as `Venue`
+/// shares, so the shares behind every unit fall by exactly that much, and the credit share becomes
+/// impact for the vaults' owners and depositors at once.
 interface ILedger {
-    /// What a member states when they open a record. `poolType` is the venue id in the
-    /// factory's registry; `shared` picks host-created community-wide over personal;
-    /// `lockedUntil` is 0 for an open vault and otherwise the timestamp before which withdrawals
-    /// revert; `contribution`, `name`, `target` and `targetDate` are the member's stated intent
-    /// and the ledger stores them without reading them.
+    /// What a member states when they open a vault. `lockedUntil` is 0 in an Open-kind venue and a
+    /// future date in a Locked-kind one. `name` is emitted and not stored.
     struct VaultParams {
-        uint8 poolType;
+        uint8 venueId;
         bool shared;
         uint64 lockedUntil;
-        uint8 contribution;
         string name;
-        uint256 target;
-        uint64 targetDate;
     }
 
-    // ---- tiers ----
+    /// A shared vault payout request. `units` is the earmark, fixed at the request. `headcount` is
+    /// the number of members counted when it was made. `status` is a `ProposalStatus` value as
+    /// stored; `payoutStatus` also reports FAILED, which is never stored.
+    struct Payout {
+        uint256 vaultId;
+        address recipient;
+        uint256 units;
+        uint256 amount;
+        uint64 deadline;
+        uint32 headcount;
+        uint32 yes;
+        uint32 no;
+        uint8 status;
+    }
 
-    /// Qudi's `Venue` for this tier. Every tier Qudi has deployed is available to every
-    /// community and there is nothing to open: the host picks the tier when creating
-    /// a shared vault and the member picks it for their own. Reverts `UnknownPoolType` for an id
-    /// the registry never handed out.
-    function tierVault(uint8 poolType) external view returns (address);
+    // ---- venues ----
+
+    /// The `Venue` behind a venue id, whether or not this community has used it yet. Reverts
+    /// `UnknownPoolType` for an id the registry never handed out.
+    function tierVault(uint8 venueId) external view returns (address);
 
     // ---- the record ----
 
@@ -44,190 +49,168 @@ interface ILedger {
     function vaults(uint256 vaultId)
         external
         view
-        returns (
-            uint8 poolType,
-            bool shared,
-            address owner,
-            uint64 lockedUntil,
-            uint8 contribution,
-            uint8 status,
-            string memory name,
-            uint256 target,
-            uint64 targetDate
-        );
+        returns (address owner, bool shared, uint8 venueId, uint64 lockedUntil, uint8 status);
     function vaultCount() external view returns (uint256);
-    /// The record's units in its tier. `tierUnits(t)` is the sum of these over the tier's active
-    /// records, and also the ledger's own unit balance in `tierVault(t)`.
+    /// The vault ids a member owns or has deposited into, closed personal vaults excepted. At most
+    /// `MAX_VAULTS_PER_MEMBER` long.
+    function vaultsOf(address member) external view returns (uint256[] memory);
     function vaultUnits(uint256 vaultId) external view returns (uint256);
-    function tierUnits(uint8 poolType) external view returns (uint256);
-    /// The record's USDC value now, frozen units included: they are still the vault's money
-    /// until the request executes.
-    function vaultBalance(uint256 vaultId) external view returns (uint256);
-    /// Units no live proposal has reserved, and the ceiling a new proposal is measured against.
-    /// Equal to `vaultUnits` on a personal vault, which has no proposals.
-    function availableUnits(uint256 vaultId) external view returns (uint256);
-    /// What those free units are worth now. A display figure; `availableUnits` is the bound.
-    function availableBalance(uint256 vaultId) external view returns (uint256);
-    function vaultPrincipal(uint256 vaultId) external view returns (uint256);
+    /// Every unit in this venue across this community's vaults.
+    function venueUnits(uint8 venueId) external view returns (uint256);
+    /// The `Venue` shares behind those units, as of the last accrual. Pending fee shares are not
+    /// part of it.
+    function venueShares(uint8 venueId) external view returns (uint256);
+    /// Fee shares taken and not yet paid out.
+    function pendingFees(uint8 venueId) external view returns (uint256 treasuryShares, uint256 creditShares);
+    /// The venue share price this ledger was last charged at or above, in assets per 1e18 shares.
+    function highWaterPrice(uint8 venueId) external view returns (uint256);
+    /// Units times shares per unit times the venue's price, as if accrued now.
+    function vaultValue(uint256 vaultId) external view returns (uint256);
+    /// What went in, less the capital share of what came out, pro rata by units.
+    function vaultCapital(uint256 vaultId) external view returns (uint256);
+    /// Value above capital, floored at 0.
     function vaultEarned(uint256 vaultId) external view returns (uint256);
-    /// Units this member holds across their own personal records, frozen units included. The
-    /// number `Community.forfeit()` reads: a member cannot leave holding anything they have a
-    /// claim on.
+    /// Units an open payout request has not earmarked.
+    function availableUnits(uint256 vaultId) external view returns (uint256);
+    /// Units an open payout request holds on a shared vault: a live request inside its window, or
+    /// one that passed and has not executed.
+    function earmarkedUnits(uint256 vaultId) external view returns (uint256);
+    /// Units a member holds across their own personal vaults. `Community.forfeit` reads it.
     function personalUnitsOf(address member) external view returns (uint256);
     function closeVault(uint256 vaultId) external;
+
+    // ---- accrual and impact ----
+
+    /// Charges the gain above each venue's peak and records the credit share as impact. Anyone.
+    function accrue() external;
+    /// Pays pending fee shares out as far as each venue can pay now: the treasury's share to the
+    /// treasury, the credit share to `CreditCore` for this community. Anyone.
+    function settleFees() external;
+    /// The member's yield impact in this community: from every personal vault they own and every
+    /// shared vault they deposited into, settled and pending.
+    function impactOf(address member) external view returns (uint256);
+    /// The community's yield impact: the credit fee this ledger has taken, including what an
+    /// accrual now would take.
+    function totalImpact() external view returns (uint256);
+    /// A depositor's stake in a shared vault: what they put in, when they first did, and the weight
+    /// their share of the vault's impact follows.
+    function stakeOf(uint256 vaultId, address member)
+        external
+        view
+        returns (uint256 deposited, uint64 firstDepositAt, uint256 weight);
+    function depositorCount(uint256 vaultId) external view returns (uint256);
 
     // ---- money ----
 
     function deposit(uint256 vaultId, uint256 amount) external;
-    /// Flex only, personal only, and only past the record's own `lockedUntil`.
-    function withdrawInstant(uint256 vaultId, uint256 amount) external;
+    /// Owner only, past the lock. Debits the units now and asks the venue to pay the owner; a
+    /// liquid venue pays in the same transaction.
     function requestWithdraw(uint256 vaultId, uint256 amount) external returns (uint256 requestId);
-    function executeWithdraw(uint256 requestId) external;
+    /// Requester only, while the venue has not paid. The units and capital come back.
     function cancelWithdraw(uint256 requestId) external;
-    function requests(uint256 requestId)
+    function withdrawRequests(uint256 requestId)
         external
         view
-        returns (uint256 vaultId, address receiver, uint256 units, uint64 requestedAt);
-    function lastWithdrawalAt(address member) external view returns (uint64);
+        returns (uint256 vaultId, address owner, uint256 units, uint256 shares, uint256 capital, uint256 venueRequestId);
 
-    // ---- the shared withdrawal ----
+    // ---- the shared payout ----
 
-    /// A qualifying contributor as of now: enough deposited
-    /// into this shared vault, long enough ago, by the two bars `Config` holds. The vote
-    /// path asks the same question as of the proposal's creation time instead.
-    function isDepositor(uint256 vaultId, address member) external view returns (bool);
-    /// Everyone who has crossed the amount bar in this shared vault, seasoned or not.
-    function depositorCount(uint256 vaultId) external view returns (uint256);
-    /// Units live proposals have reserved on this vault. **Units, not dollars**:
-    /// the claim is fixed when the proposal is made, so no price move can outrun it and execution
-    /// has nothing to clamp.
-    function earmarkedUnits(uint256 vaultId) external view returns (uint256);
-    /// Host only. Names a fixed recipient and a fixed amount in USDC, converts it to units once
-    /// at the price the voters are shown, and reserves those units so they cannot be spent twice
-    /// or withdrawn out from under a live proposal.
-    function proposeWithdrawal(uint256 vaultId, address recipient, uint256 amount) external returns (uint256 proposalId);
-    /// Depositors of that vault at proposal time. One depositor one vote; never weighted by
-    /// balance, because there are no per-member balances to weight by.
-    function voteOnWithdrawal(uint256 proposalId, bool support) external;
-    /// Anyone in the community, once the window has closed and the vote passed. Mechanical: no
-    /// parameter can be changed, and there is no timelock between passing and executing.
-    function executeWithdrawal(uint256 proposalId) external;
-    /// Anyone in the community. A proposal that did not pass is revertible as soon as its window
-    /// closes; one that passed becomes revertible after `sharedProposalRevertDelay`. Nothing
-    /// expires: the earmark is always freed by someone acting.
-    function revertWithdrawal(uint256 proposalId) external;
-    function proposals(uint256 proposalId)
-        external
-        view
-        returns (
-            uint256 vaultId,
-            address recipient,
-            uint256 units,
-            uint256 amountAtProposal,
-            uint64 deadline,
-            uint32 forVotes,
-            uint32 againstVotes,
-            uint256 depositorsAtProposal,
-            uint8 status
-        );
-    function hasVoted(uint256 proposalId, address member) external view returns (bool);
+    /// Host only. Earmarks the units for `amount` and counts the members who may vote. Reverts
+    /// `NoHeadcount` when nobody would be counted.
+    function proposeWithdrawal(uint256 vaultId, address recipient, uint256 amount) external returns (uint256 payoutId);
+    /// Once per member counted in the headcount, inside the vote window.
+    function voteOnWithdrawal(uint256 payoutId, bool support) external;
+    /// Anyone, once passed. The venue pays the recipient directly.
+    function executeWithdrawal(uint256 payoutId) external;
+    function payouts(uint256 payoutId) external view returns (Payout memory);
+    function payoutStatus(uint256 payoutId) external view returns (uint8);
+    function isCounted(uint256 payoutId, address member) external view returns (bool);
+    function hasVoted(uint256 payoutId, address member) external view returns (bool);
 
     // ---- closure ----
 
     function communityClosed() external view returns (bool);
-    /// Host only, terminal. Refuses while any shared vault holds a balance; personal balances do
-    /// not block it, and their owners withdraw afterwards.
+    /// True while any shared vault holds units. A community cannot close then.
+    function sharedVaultsHoldMoney() external view returns (bool);
+    /// Called by this ledger's `Community` when a closure vote executes. Terminal.
     function closeCommunity() external;
 
     // ---- events ----
-    //
-    // The indexer's whole surface. Deleting the epoch block means per-member contribution
-    // history and time-weighted balance come from here: `Deposited` and `Withdrawn` carry the
-    // member, the amount, the units and the record's unit total after the move, so integrating
-    // units against block time reproduces balance-time per vault, and summing a member's own
-    // `Deposited` amounts reproduces their contribution history. Per-member balance-time inside a
-    // shared vault is not reconstructible from any event, and that is by design rather than an
-    // omission: a shared vault has no per-member units for it to be a share of.
 
-    /// The first time this community touches a tier and caches Qudi's vault for it. Not an
-    /// opening: every tier was available all along.
-    event TierWired(uint8 indexed poolType, address tierVault);
+    event TierWired(uint8 indexed venueId, address venue);
     event VaultCreated(
         uint256 indexed vaultId,
-        uint8 indexed poolType,
+        uint8 indexed venueId,
         address indexed owner,
         bool shared,
         uint64 lockedUntil,
-        uint8 contribution,
-        string name,
-        uint256 target,
-        uint64 targetDate
+        string name
     );
-    event Deposited(
-        uint256 indexed vaultId, address indexed member, uint256 amount, uint256 units, uint256 vaultUnitsAfter
-    );
-    event Withdrawn(
-        uint256 indexed vaultId, address indexed receiver, uint256 amount, uint256 units, uint256 vaultUnitsAfter
-    );
+    event Deposited(uint256 indexed vaultId, address indexed member, uint256 amount, uint256 units);
     event WithdrawRequested(
-        uint256 indexed requestId, uint256 indexed vaultId, address indexed receiver, uint256 units
+        uint256 indexed requestId,
+        uint256 indexed vaultId,
+        address indexed owner,
+        uint256 units,
+        uint256 shares,
+        uint256 venueRequestId
     );
-    event WithdrawExecuted(uint256 indexed requestId, uint256 indexed vaultId, uint256 amount);
-    /// An execution the tier vault could not pay instantly: the units went to its FIFO redeem
-    /// queue and the receiver is paid from there. A separate event, because nobody has been paid
-    /// yet.
-    event WithdrawQueued(uint256 indexed requestId, uint256 indexed vaultId, uint256 units, uint256 vaultRequestId);
     event WithdrawCancelled(uint256 indexed requestId, uint256 indexed vaultId);
     event VaultClosed(uint256 indexed vaultId);
     event CommunityWoundUp();
-    /// `units` is the reservation and the only figure execution acts on; `amountAtProposal` is
-    /// what they were worth when the vote was asked for, for the app to show what was approved.
+    /// A gain above the peak was charged. Both fees are in assets at the accrual price.
+    event Accrued(uint8 indexed venueId, uint256 price, uint256 treasuryFee, uint256 creditFee);
+    event FeesSettled(uint8 indexed venueId, uint256 toTreasury, uint256 toCredit);
     event WithdrawalProposed(
-        uint256 indexed proposalId,
+        uint256 indexed payoutId,
         uint256 indexed vaultId,
         address indexed recipient,
         uint256 units,
-        uint256 amountAtProposal,
+        uint256 amount,
+        uint32 headcount,
         uint64 deadline
     );
-    event WithdrawalVoteCast(uint256 indexed proposalId, address indexed voter, bool support);
-    /// `units` is what was burned, exactly as reserved; `assets` is what that was worth on the
-    /// day, which is the number the recipient actually received.
+    event WithdrawalVoteCast(uint256 indexed payoutId, address indexed voter, bool support);
+    event WithdrawalPassed(uint256 indexed payoutId);
     event WithdrawalExecuted(
-        uint256 indexed proposalId, uint256 indexed vaultId, address recipient, uint256 units, uint256 assets
+        uint256 indexed payoutId, uint256 indexed vaultId, address recipient, uint256 units, uint256 venueRequestId
     );
-    event WithdrawalReverted(uint256 indexed proposalId, uint256 indexed vaultId, uint256 units);
 
     // ---- errors ----
 
     error AlreadyInitialized();
     error NotMember();
     error NotHost();
+    error NotCommunity();
     error NotVaultOwner();
-    error NotDepositor();
+    error NotCounted();
     error AccountBlocked(); // a money-in path taken by a screener-blocked account
     error ZeroAmount();
     error ZeroAddress();
     error UnknownVault();
     error VaultNotActive();
     error VaultLocked();
-    /// `createVault`: a TERM record carries no `lockedUntil`. Term is the venue profile for money
-    /// that is committed, which is the only reason its venues may be illiquid.
-    error TermRecordMustBeLocked();
+    /// A vault in a Locked-kind venue needs an unlock date in the future.
+    error LockRequired();
+    /// A vault in an Open-kind venue takes no unlock date.
+    error LockNotAllowed();
+    /// A retired venue takes no new vaults.
+    error VenueRetired();
+    error TooManyVaults();
     error VaultHoldsBalance();
     error SharedVaultHoldsBalance();
     error SharedVaultNeedsAProposal();
     error PersonalVaultHasNoProposals();
     error CommunityIsClosed();
     error ExceedsWithdrawable();
-    error ExceedsAvailable();
+    error PayoutOpen();
+    /// A payout request that would count nobody: no depositor clears every headcount bar.
+    error NoHeadcount();
     error CooldownActive();
-    error InstantPathBlocked();
     error NotRequester();
     error AlreadyVoted();
-    error VoteWindowOpen();
     error VoteWindowClosed();
     error NotPassed();
     error ProposalNotLive();
-    error RevertDelayNotElapsed();
+    error CreditCoreUnset();
 }

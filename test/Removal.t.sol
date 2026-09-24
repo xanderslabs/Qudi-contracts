@@ -228,30 +228,14 @@ contract RemovalTest is InviteSigner {
     function _personal(address who) internal returns (uint256 id) {
         vm.prank(who);
         id = ledger.createVault(
-            ILedger.VaultParams({
-                poolType: VenueIds.FLEX,
-                shared: false,
-                lockedUntil: 0,
-                contribution: 0,
-                name: "personal",
-                target: 0,
-                targetDate: 0
-            })
+            ILedger.VaultParams({venueId: VenueIds.FLEX, shared: false, lockedUntil: 0, name: "personal"})
         );
     }
 
     function _shared() internal returns (uint256 id) {
         vm.prank(host);
         id = ledger.createVault(
-            ILedger.VaultParams({
-                poolType: VenueIds.FLEX,
-                shared: true,
-                lockedUntil: 0,
-                contribution: 0,
-                name: "shared",
-                target: 0,
-                targetDate: 0
-            })
+            ILedger.VaultParams({venueId: VenueIds.FLEX, shared: true, lockedUntil: 0, name: "shared"})
         );
     }
 
@@ -356,7 +340,7 @@ contract RemovalTest is InviteSigner {
 
         uint256 walletBefore = usdc.balanceOf(ada);
         vm.prank(ada);
-        ledger.withdrawInstant(mine, 100e6);
+        ledger.requestWithdraw(mine, 100e6);
         assertEq(usdc.balanceOf(ada), walletBefore + 100e6, "the personal vault paid out");
 
         _settle(ada, 50e6);
@@ -397,7 +381,7 @@ contract RemovalTest is InviteSigner {
         _draw(ada, 50e6);
         _settle(ada, 50e6);
         vm.prank(ada);
-        ledger.withdrawInstant(mine, 10e6);
+        ledger.requestWithdraw(mine, 10e6);
 
         vm.prank(ada);
         community.forfeit();
@@ -661,7 +645,7 @@ contract RemovalTest is InviteSigner {
 
         uint256 walletBefore = usdc.balanceOf(ada);
         vm.prank(ada);
-        ledger.withdrawInstant(mine, 100e6);
+        ledger.requestWithdraw(mine, 100e6);
         assertEq(usdc.balanceOf(ada), walletBefore + 100e6, "the personal vault paid out");
         assertEq(ledger.personalUnitsOf(ada), 0);
 

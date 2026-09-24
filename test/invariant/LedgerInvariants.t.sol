@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 pragma solidity 0.8.30;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm, console} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {Clones} from "openzeppelin-contracts/contracts/proxy/Clones.sol";
 import {Ledger} from "../../src/Ledger.sol";
@@ -13,204 +13,215 @@ import {IConfig} from "../../src/interfaces/IConfig.sol";
 import {ConfigKeys as K} from "../../src/ConfigKeys.sol";
 import {ComplianceRegistry} from "../../src/ComplianceRegistry.sol";
 import {VenueIds} from "../helpers/VenueIds.sol";
-import {VaultStatus} from "../../src/VaultStatus.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {MockStrategy} from "../mocks/MockStrategy.sol";
 import {LedgerFactoryStub, LedgerCommunityStub, LedgerCreditCoreStub} from "../helpers/LedgerFixture.sol";
 
-/// Drives one real ledger over two real `Venue` tiers, with several vault records in each so
-/// the tier position is genuinely divided rather than held by one record. Every verb no-ops
-/// rather than reverting on a failed precondition, and every ghost moves only on a success path,
-/// matching the other harnesses under `test/invariant/`.
+/// Drives one real ledger over two real `Venue`s with deposits, withdrawals and cancels, shared
+/// payouts and their votes, gains, losses, queue processing and time. Every verb no-ops rather than
+/// reverting on a failed precondition, and every ghost moves only on a success path.
+///
+/// Each verb ends with an `accrue`, and the handler adds up the credit fee from every `Accrued`
+/// event the ledger emits. That sum is the credit fee taken, counted from the events and not from
+/// the ledger's own total, so the impact invariant checks one against the other.
 contract LedgerHandler is Test {
     Ledger public ledger;
     Venue public flexVault;
     Venue public coreVault;
-    IConfig public config;
+    MockStrategy public flexStrategy;
+    MockStrategy public coreStrategy;
     MockUSDC public usdc;
     LedgerCommunityStub public community;
 
-    uint256 internal constant ACTORS = 4;
+    uint256 internal constant ACTORS = 5; // index 0 is the host
     address[ACTORS] public actors;
 
-    /// Two records per tier, so `tierUnits` is a sum of several terms and not a restatement of
-    /// one. Index 0 and 1 are FLEX, 2 and 3 are CORE; index 0 is the shared one.
-    uint256 internal constant VAULTS = 4;
+    /// Index 0 and 1 are shared (Flex, Core); 2 to 5 personal, two per venue, owned by actors 1 to 4.
+    uint256 internal constant VAULTS = 6;
     uint256[VAULTS] public vaultIds;
 
-    uint256 internal constant MIN_DEPOSIT = 1e6;
     uint256 internal constant MAX_DEPOSIT = 10_000e6;
-    /// Bounded so the share price stays in a sane band over a deep campaign rather than running
-    /// away from unity, where every `convertToAssets` floor would cost more than the tolerances
-    /// below allow.
-    uint256 internal constant MAX_GAIN = 5_000e6;
+    uint256 internal constant MAX_GAIN = 2_000e6;
 
-    /// Any deposit that sent something to the credit core, measured across that single call.
-    /// Must stay zero: money in buys units, whatever the member owes.
-    uint256 public depositsRoutedToCredit;
+    bytes32 internal constant ACCRUED = keccak256("Accrued(uint8,uint256,uint256,uint256)");
+
+    /// The credit fee taken, from the ledger's events.
+    uint256 public creditFeeFromEvents;
+    /// The largest amount by which the members' impact has fallen short of the total, in wei.
+    uint256 public maxShortfall;
+    /// Landed calls per verb, and accruals that charged a fee, so a campaign can show it reached
+    /// every path the invariants are about.
+    mapping(bytes32 => uint256) public lands;
+    uint256 public charges;
 
     uint256[] internal _requestIds;
     mapping(uint256 => address) internal _requester;
-    uint256[] internal _proposalIds;
+    uint256[] internal _payoutIds;
 
-    constructor(Ledger ledger_, LedgerCommunityStub community_, uint256[VAULTS] memory ids) {
+    constructor(
+        Ledger ledger_,
+        LedgerCommunityStub community_,
+        MockStrategy flexStrategy_,
+        MockStrategy coreStrategy_,
+        address[ACTORS] memory actors_,
+        uint256[VAULTS] memory ids
+    ) {
         ledger = ledger_;
         flexVault = Venue(ledger_.tierVault(VenueIds.FLEX));
         coreVault = Venue(ledger_.tierVault(VenueIds.CORE));
-        config = ledger_.config();
-        usdc = MockUSDC(config.usdc());
+        flexStrategy = flexStrategy_;
+        coreStrategy = coreStrategy_;
+        usdc = MockUSDC(ledger_.config().usdc());
         community = community_;
+        actors = actors_;
         vaultIds = ids;
-        for (uint256 i = 0; i < ACTORS; i++) {
-            actors[i] = address(uint160(uint256(keccak256(abi.encode("ledger-actor", i)))));
+    }
+
+    modifier recorded() {
+        vm.recordLogs();
+        _;
+        ledger.accrue();
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].emitter == address(ledger) && logs[i].topics[0] == ACCRUED) {
+                (,, uint256 creditFee) = abi.decode(logs[i].data, (uint256, uint256, uint256));
+                creditFeeFromEvents += creditFee;
+                charges++;
+            }
+        }
+        uint256 total = ledger.totalImpact();
+        uint256 sum = sumImpact();
+        if (sum <= total && total - sum > maxShortfall) maxShortfall = total - sum;
+    }
+
+    function sumImpact() public view returns (uint256 sum) {
+        for (uint256 i; i < ACTORS; i++) {
+            sum += ledger.impactOf(actors[i]);
         }
     }
 
-    function _pickActor(uint256 seed) internal view returns (address) {
-        return actors[seed % ACTORS];
+    function _venue(uint256 seed) internal view returns (Venue) {
+        return seed % 2 == 0 ? flexVault : coreVault;
     }
 
-    function _pickVault(uint256 seed) internal view returns (uint256) {
-        return vaultIds[seed % VAULTS];
+    function _strategy(uint256 seed) internal view returns (MockStrategy) {
+        return seed % 2 == 0 ? flexStrategy : coreStrategy;
     }
 
-    // ---- views the invariants read ----
+    // ---- money in and out ----
 
-    function vaultCount() external pure returns (uint256) {
-        return VAULTS;
-    }
-
-    /// The sum of `vaultUnits` over the ACTIVE records in one tier, which is the left-hand side
-    /// of the first reconciliation equality.
-    function sumActiveVaultUnits(uint8 poolType) external view returns (uint256 total) {
-        for (uint256 i = 0; i < VAULTS; i++) {
-            (uint8 t,,,,, uint8 status,,,) = ledger.vaults(vaultIds[i]);
-            if (t == poolType && status == VaultStatus.ACTIVE) total += ledger.vaultUnits(vaultIds[i]);
-        }
-    }
-
-    function sumEarmarks() external view returns (uint256 total) {
-        for (uint256 i = 0; i < VAULTS; i++) {
-            total += ledger.earmarkedUnits(vaultIds[i]);
-        }
-    }
-
-    // ---- money in ----
-
-    function deposit(uint256 actorSeed, uint256 vaultSeed, uint256 amountSeed) external {
-        address m = _pickActor(actorSeed);
-        uint256 id = _pickVault(vaultSeed);
-        uint256 amount = bound(amountSeed, MIN_DEPOSIT, MAX_DEPOSIT);
-        uint256 creditBefore = usdc.balanceOf(address(0xC0DE));
-
+    /// Into a shared vault by any member, or into a personal vault by its owner.
+    function deposit(uint256 actorSeed, uint256 vaultSeed, uint256 amountSeed) external recorded {
+        uint256 i = vaultSeed % VAULTS;
+        uint256 id = vaultIds[i];
+        address m = i < 2 ? actors[actorSeed % ACTORS] : actors[i - 1];
+        uint256 amount = bound(amountSeed, 1e6, MAX_DEPOSIT);
         usdc.mint(m, amount);
-        vm.prank(m);
+        vm.startPrank(m);
         usdc.approve(address(ledger), amount);
-        vm.prank(m);
         try ledger.deposit(id, amount) {
-            if (usdc.balanceOf(address(0xC0DE)) != creditBefore) depositsRoutedToCredit++;
+            lands[keccak256("deposit")]++;
         } catch {}
+        vm.stopPrank();
     }
 
-    // ---- money out ----
-
-    function requestWithdraw(uint256 actorSeed, uint256 vaultSeed, uint256 amountSeed) external {
-        address m = _pickActor(actorSeed);
-        uint256 id = _pickVault(vaultSeed);
-        uint256 worth = ledger.vaultBalance(id);
+    function requestWithdraw(uint256 vaultSeed, uint256 amountSeed) external recorded {
+        uint256 i = 2 + vaultSeed % 4;
+        uint256 id = vaultIds[i];
+        address owner = actors[i - 1];
+        uint256 worth = ledger.vaultValue(id);
         if (worth == 0) return;
-        vm.prank(m);
+        vm.prank(owner);
         try ledger.requestWithdraw(id, bound(amountSeed, 1, worth)) returns (uint256 rid) {
             _requestIds.push(rid);
-            _requester[rid] = m;
+            _requester[rid] = owner;
+            lands[keccak256("requestWithdraw")]++;
         } catch {}
     }
 
-    /// `jumpSeed` decides, per call, whether to first advance the clock to this request's own
-    /// release time. Half the calls do, so executions actually happen; half attempt it wherever
-    /// the clock is, which keeps the cooldown a live rejection rather than a formality.
-    function executeWithdraw(uint256 idSeed, uint256 jumpSeed) external {
-        if (_requestIds.length == 0) return;
-        uint256 id = _requestIds[idSeed % _requestIds.length];
-        if (jumpSeed % 2 == 0) {
-            uint256 due = ledger.releaseAfter(id);
-            if (block.timestamp < due) vm.warp(due);
-        }
+    /// One of the three latest requests, which are the ones most likely still unpaid.
+    function cancelWithdraw(uint256 idSeed) external recorded {
+        uint256 n = _requestIds.length;
+        if (n == 0) return;
+        uint256 id = _requestIds[n - 1 - idSeed % (n < 3 ? n : 3)];
         vm.prank(_requester[id]);
-        try ledger.executeWithdraw(id) {} catch {}
+        try ledger.cancelWithdraw(id) {
+            lands[keccak256("cancelWithdraw")]++;
+        } catch {}
     }
 
-    function cancelWithdraw(uint256 idSeed) external {
-        if (_requestIds.length == 0) return;
-        uint256 id = _requestIds[idSeed % _requestIds.length];
-        vm.prank(_requester[id]);
-        try ledger.cancelWithdraw(id) {} catch {}
-    }
+    // ---- the shared payout ----
 
-    function withdrawInstant(uint256 actorSeed, uint256 vaultSeed, uint256 amountSeed) external {
-        address m = _pickActor(actorSeed);
-        uint256 id = _pickVault(vaultSeed);
-        uint256 worth = ledger.vaultBalance(id);
+    function proposeWithdrawal(uint256 vaultSeed, uint256 amountSeed) external recorded {
+        uint256 id = vaultIds[vaultSeed % 2];
+        uint256 worth = ledger.vaultValue(id);
         if (worth == 0) return;
-        vm.prank(m);
-        try ledger.withdrawInstant(id, bound(amountSeed, 1, worth)) {} catch {}
-    }
-
-    // ---- the shared withdrawal ----
-
-    function proposeWithdrawal(uint256 amountSeed) external {
-        uint256 id = vaultIds[0]; // the shared one
-        // Asked in USDC, as a host asks; the ledger converts to units once, at proposal time.
-        uint256 free = ledger.availableBalance(id);
-        if (free == 0) return;
-        vm.prank(community.steward());
-        try ledger.proposeWithdrawal(id, address(0xBEEF), bound(amountSeed, 1, free)) returns (uint256 pid) {
-            _proposalIds.push(pid);
+        vm.prank(actors[0]);
+        try ledger.proposeWithdrawal(id, address(0xBEEF), bound(amountSeed, 1, worth)) returns (uint256 pid) {
+            _payoutIds.push(pid);
+            lands[keccak256("proposeWithdrawal")]++;
         } catch {}
     }
 
-    function voteOnWithdrawal(uint256 idSeed, uint256 actorSeed, uint256 supportSeed) external {
-        if (_proposalIds.length == 0) return;
-        vm.prank(_pickActor(actorSeed));
-        try ledger.voteOnWithdrawal(_proposalIds[idSeed % _proposalIds.length], supportSeed % 2 == 0) {} catch {}
+    /// On one of the two latest requests, which are the ones still open. Mostly yes.
+    function voteOnWithdrawal(uint256 idSeed, uint256 actorSeed, uint256 supportSeed) external recorded {
+        uint256 n = _payoutIds.length;
+        if (n == 0) return;
+        vm.prank(actors[actorSeed % ACTORS]);
+        try ledger.voteOnWithdrawal(_payoutIds[n - 1 - idSeed % (n < 2 ? n : 2)], supportSeed % 4 != 0) {
+            lands[keccak256("voteOnWithdrawal")]++;
+        } catch {}
     }
 
-    function executeWithdrawal(uint256 idSeed, uint256 actorSeed) external {
-        if (_proposalIds.length == 0) return;
-        vm.prank(_pickActor(actorSeed));
-        try ledger.executeWithdrawal(_proposalIds[idSeed % _proposalIds.length]) {} catch {}
+    function executeWithdrawal(uint256 idSeed) external recorded {
+        uint256 n = _payoutIds.length;
+        if (n == 0) return;
+        try ledger.executeWithdrawal(_payoutIds[n - 1 - idSeed % (n < 2 ? n : 2)]) {
+            lands[keccak256("executeWithdrawal")]++;
+        } catch {}
     }
 
-    function revertWithdrawal(uint256 idSeed, uint256 actorSeed) external {
-        if (_proposalIds.length == 0) return;
-        vm.prank(_pickActor(actorSeed));
-        try ledger.revertWithdrawal(_proposalIds[idSeed % _proposalIds.length]) {} catch {}
+    // ---- the venues underneath ----
+
+    function gain(uint256 gainSeed, uint256 whichSeed) external recorded {
+        uint256 amount = bound(gainSeed, 1, MAX_GAIN);
+        usdc.mint(address(_venue(whichSeed)), amount);
     }
 
-    // ---- the tier vaults underneath ----
-
-    function gain(uint256 gainSeed, uint256 whichSeed) external {
-        Venue v = whichSeed % 2 == 0 ? flexVault : coreVault;
-        uint256 amount = bound(gainSeed, 0, MAX_GAIN);
-        if (amount > 0) usdc.mint(address(v), amount);
-        try v.accrue() {} catch {}
+    function loss(uint256 lossSeed, uint256 whichSeed) external recorded {
+        MockStrategy s = _strategy(whichSeed);
+        uint256 held = s.totalAssets();
+        if (held == 0) return;
+        s.skim(bound(lossSeed, 1, held / 50 + 1));
+        lands[keccak256("loss")]++;
     }
 
-    function rebalance(uint256 whichSeed) external {
-        try (whichSeed % 2 == 0 ? flexVault : coreVault).rebalance() {} catch {}
+    /// Lets a strategy give its money back, or not, so requests sometimes wait in the queue and
+    /// can be cancelled, and fees sometimes wait in the pending bucket.
+    function setLiquid(uint256 whichSeed, bool liquid) external recorded {
+        if (!liquid) {
+            try _venue(whichSeed).rebalance() {} catch {}
+        }
+        _strategy(whichSeed).setWithdrawCap(liquid ? type(uint256).max : 0);
     }
 
-    function processQueue(uint256 stepsSeed, uint256 whichSeed) external {
-        try (whichSeed % 2 == 0 ? flexVault : coreVault).processQueue(bound(stepsSeed, 1, 5)) {} catch {}
+    function rebalance(uint256 whichSeed) external recorded {
+        try _venue(whichSeed).rebalance() {} catch {}
     }
 
-    function warp(uint256 secondsSeed) external {
+    function processQueue(uint256 whichSeed) external recorded {
+        try _venue(whichSeed).processQueue(5) {} catch {}
+    }
+
+    function settleFees() external recorded {
+        try ledger.settleFees() {} catch {}
+    }
+
+    function warp(uint256 secondsSeed) external recorded {
         vm.warp(block.timestamp + bound(secondsSeed, 1 hours, 20 days));
     }
 }
 
-/// The ledger invariant suite. The two `tierUnits` equalities that are the reconciliation
-/// are `invariant_tierUnitsEqualsSumOfItsVaults` and `invariant_tierUnitsEqualsTheLedgersPosition`.
 contract LedgerInvariantTest is StdInvariant, Test {
     MockUSDC usdc;
     Config config;
@@ -220,29 +231,21 @@ contract LedgerInvariantTest is StdInvariant, Test {
     Ledger ledger;
     Venue flexVault;
     Venue coreVault;
-    MockStrategy flexSlow;
-    MockStrategy coreSlow;
+    MockStrategy flexStrategy;
+    MockStrategy coreStrategy;
     LedgerHandler handler;
+    address[5] actors;
 
     address owner = makeAddr("vaultOwner");
     address treasury = makeAddr("treasury");
-    address host = makeAddr("host");
-    /// A registered depositor that deposits once and is never touched again, so a tier vault is
-    /// never drained to zero shares.
-    address seedHolder = makeAddr("seedHolder");
-
-    uint256 constant SEED = 1_000e6;
 
     function setUp() public {
         usdc = new MockUSDC();
-        // The registry is deployed before the prank: a nested `new` in the argument list would
-        // consume it and leave the config owned by this contract instead.
         ComplianceRegistry registry = new ComplianceRegistry(address(this));
         vm.prank(owner);
         config = new Config(address(usdc), treasury, address(registry));
-        // Headroom so a long campaign is not spent bouncing off the deposit cap, and a slow tier
-        // wide enough that a single withdrawal really can overflow into the FIFO queue. Both are
-        // ordinary in-bounds values, read live by the vaults like any other.
+        // Headroom so a long campaign is not spent bouncing off the deposit cap, and a slow group
+        // wide enough that a withdrawal really can outrun what the venue pays at once.
         vm.startPrank(owner);
         config.set(K.GLOBAL_DEPOSIT_CAP, 100_000_000_000e6);
         config.set(K.SLOW_TIER_CEILING_BPS, 7_500);
@@ -255,8 +258,8 @@ contract LedgerInvariantTest is StdInvariant, Test {
         flexVault.setLabels(VenueIds.labels(VenueIds.FLEX));
         coreVault.setLabels(VenueIds.labels(VenueIds.CORE));
         vm.stopPrank();
-        flexSlow = _slowVenue(flexVault);
-        coreSlow = _slowVenue(coreVault);
+        flexStrategy = _strategy(flexVault);
+        coreStrategy = _strategy(coreVault);
         factory.addVenue(address(flexVault));
         factory.addVenue(address(coreVault));
 
@@ -270,62 +273,42 @@ contract LedgerInvariantTest is StdInvariant, Test {
             ICommunityInit.CommunityWiring({
                 config: address(config),
                 factory: address(factory),
-                seats: address(0), // the ledger reads no seat
+                seats: address(0),
                 community: address(community),
                 vault: address(0),
-                creator: host,
-                seatPrice: 50e6,
+                creator: address(0),
+                seatPrice: 0,
                 name: "Invariant Community",
                 poolType: 0
             })
         );
         factory.register(address(ledger));
-        factory.register(seedHolder);
 
-        community.setSteward(host);
-        community.setMember(host, true);
-
-        uint256[4] memory ids;
-        vm.startPrank(host);
-        ids[0] = ledger.createVault(_p(VenueIds.FLEX, true, "shared flex"));
-        ids[1] = ledger.createVault(_p(VenueIds.FLEX, false, "host flex"));
-        ids[2] = ledger.createVault(_p(VenueIds.CORE, false, "host core"));
-        vm.stopPrank();
-
-        handler = new LedgerHandler(ledger, community, ids);
-        for (uint256 i = 0; i < 4; i++) {
-            community.setMember(handler.actors(i), true);
+        for (uint256 i; i < 5; i++) {
+            actors[i] = address(uint160(uint256(keccak256(abi.encode("ledger-actor", i)))));
+            community.setMember(actors[i], true);
+            community.setSeasoned(actors[i], true);
         }
-        // The fourth record belongs to an actor rather than the host, so a personal vault with an
-        // owner who is not the proposer is under test too.
-        vm.prank(handler.actors(0));
-        ids[3] = ledger.createVault(_p(VenueIds.CORE, false, "actor core"));
-        handler = new LedgerHandler(ledger, community, ids);
-        for (uint256 i = 0; i < 4; i++) {
-            community.setMember(handler.actors(i), true);
+        community.setSteward(actors[0]);
+
+        uint256[6] memory ids;
+        vm.startPrank(actors[0]);
+        ids[0] = ledger.createVault(ILedger.VaultParams(VenueIds.FLEX, true, 0, "shared flex"));
+        ids[1] = ledger.createVault(ILedger.VaultParams(VenueIds.CORE, true, 0, "shared core"));
+        vm.stopPrank();
+        for (uint256 i = 2; i < 6; i++) {
+            vm.prank(actors[i - 1]);
+            ids[i] =
+                ledger.createVault(ILedger.VaultParams(i % 2 == 0 ? VenueIds.FLEX : VenueIds.CORE, false, 0, "mine"));
         }
 
-        usdc.mint(seedHolder, SEED * 2);
-        vm.startPrank(seedHolder);
-        usdc.approve(address(flexVault), SEED);
-        flexVault.deposit(SEED, seedHolder);
-        usdc.approve(address(coreVault), SEED);
-        coreVault.deposit(SEED, seedHolder);
-        vm.stopPrank();
-
+        handler = new LedgerHandler(ledger, community, flexStrategy, coreStrategy, actors, ids);
         targetContract(address(handler));
     }
 
-    function _p(uint8 poolType, bool shared, string memory n) internal pure returns (ILedger.VaultParams memory) {
-        return ILedger.VaultParams({
-            poolType: poolType, shared: shared, lockedUntil: 0, contribution: 0, name: n, target: 0, targetDate: 0
-        });
-    }
-
-    /// One slow venue per tier, weighted so the instant tier is genuinely scarce. Without it
-    /// every share is instantly liquid and `executeWithdraw` could never take its queued branch,
-    /// which is the branch the reconciliation has to survive.
-    function _slowVenue(Venue v) internal returns (MockStrategy m) {
+    /// A strategy listed with an exit delay, taking three quarters of the venue, so a withdrawal
+    /// can outrun what the venue pays at once and go to the queue.
+    function _strategy(Venue v) internal returns (MockStrategy m) {
         m = new MockStrategy(usdc, address(v));
         address[] memory vs = new address[](1);
         vs[0] = address(m);
@@ -336,75 +319,127 @@ contract LedgerInvariantTest is StdInvariant, Test {
         v.setCap(address(m), type(uint256).max);
         v.setWeights(vs, bps);
         vm.stopPrank();
+        m.setWithdrawCap(type(uint256).max);
     }
 
-    /// The first reconciliation equality: `tierUnits[t]` is the sum of `vaultUnits` over the tier's
-    /// active records. Exact, with no tolerance: every unit is moved on both sides in the same
-    /// statement, so any drift is a bug and not rounding.
-    function invariant_tierUnitsEqualsSumOfItsVaults() public view {
-        assertEq(
-            ledger.tierUnits(VenueIds.FLEX),
-            handler.sumActiveVaultUnits(VenueIds.FLEX),
-            "FLEX tierUnits is not the sum of its active vaults"
-        );
-        assertEq(
-            ledger.tierUnits(VenueIds.CORE),
-            handler.sumActiveVaultUnits(VenueIds.CORE),
-            "CORE tierUnits is not the sum of its active vaults"
-        );
+    /// A fixed 1,000-step replay over every verb, so the paths the invariants are about are shown
+    /// to be reached, with stable counts, and every invariant is checked again at the end.
+    function test_replay1000Steps_reachesEveryPath() public {
+        bytes32 seed = keccak256("qudi.ledger-replay.v1");
+        for (uint256 step; step < 1000; step++) {
+            uint256 a0 = uint256(keccak256(abi.encode(seed, step, 0)));
+            uint256 a1 = uint256(keccak256(abi.encode(seed, step, 1)));
+            uint256 a2 = uint256(keccak256(abi.encode(seed, step, 2)));
+            uint256 pick = a0 % 12;
+            if (pick < 3) handler.deposit(a1, a2, a0 >> 8);
+            else if (pick == 3) handler.requestWithdraw(a1, a2);
+            else if (pick == 4) handler.cancelWithdraw(a1);
+            else if (pick == 5) handler.proposeWithdrawal(a1, a2);
+            else if (pick == 6) handler.voteOnWithdrawal(a1, a2, a0 >> 8);
+            else if (pick == 7) handler.executeWithdrawal(a1);
+            else if (pick == 8) handler.gain(a1, a2);
+            else if (pick == 9) handler.loss(a1, a2);
+            else if (pick == 10) handler.rebalance(a1);
+            else if (pick == 11 && a2 % 2 == 0) handler.setLiquid(a1, a0 % 2 == 0);
+            else handler.warp(a1);
+            if (step % 7 == 0) handler.processQueue(a2);
+            if (step % 11 == 0) handler.settleFees();
+        }
+        string[7] memory verbs = [
+            "deposit",
+            "requestWithdraw",
+            "cancelWithdraw",
+            "proposeWithdrawal",
+            "voteOnWithdrawal",
+            "executeWithdrawal",
+            "loss"
+        ];
+        for (uint256 i; i < verbs.length; i++) {
+            uint256 n = handler.lands(keccak256(bytes(verbs[i])));
+            emit log_named_uint(verbs[i], n);
+            assertGt(n, 0, string.concat(verbs[i], " never landed"));
+        }
+        emit log_named_uint("accruals that charged a fee", handler.charges());
+        emit log_named_uint("largest impact shortfall, wei", handler.maxShortfall());
+        assertGt(handler.charges(), 10, "the split was rarely charged");
+        invariant_proof7_impactAddsUpToTheCreditFeeTaken();
+        invariant_venueUnitsIsTheSumOfItsVaults();
+        invariant_sharesReconcileWithTheLedgersPosition();
+        invariant_earmarksAreCoveredByTheUnits();
     }
 
-    /// The second reconciliation equality: `tierUnits[t]` is the ledger's own unit balance in that tier's
-    /// `Venue`.
-    ///
-    /// The queued term is not in the plain statement and has to be. Once an execution hands
-    /// units to the tier vault's FIFO queue the ledger's `balanceOf` no longer counts them, while
-    /// the ledger has already debited `tierUnits`, so the two sides are out of step by exactly
-    /// the queued amount until a keeper drains it. Subtracting it on the right is the same
-    /// statement, made true in the window the queue is open.
-    /// **`queuedShares` is deliberately not subtracted here, and adding it back breaks this.**
-    /// `executeWithdraw` decrements `tierUnits` unconditionally, before `_payOut` chooses a
-    /// branch, and `_payOut` reduces the ledger's share balance by the same units either way:
-    /// `redeem` burns them, `requestRedeem` moves them to the vault. `queuedShares` rises only on
-    /// the queued branch, so both sides of this comparison have already excluded those units and
-    /// subtracting them again double-counts. The original expression did exactly that and
-    /// underflowed whenever the fuzzer reached the queued branch, which earlier runs never did and
-    /// later ledger changes reached every time.
-    function invariant_tierUnitsEqualsTheLedgersPosition() public view {
-        assertEq(
-            ledger.tierUnits(VenueIds.FLEX),
-            flexVault.balanceOf(address(ledger)),
-            "FLEX tierUnits is not the ledger's position in the tier vault"
-        );
-        assertEq(
-            ledger.tierUnits(VenueIds.CORE),
-            coreVault.balanceOf(address(ledger)),
-            "CORE tierUnits is not the ledger's position in the tier vault"
-        );
+    // ---- proof 7: the impact invariant ----
+
+    /// The members' impact adds up to the community's, and the community's is exactly the credit
+    /// fee taken. Integer division floors each member's share, so the members may fall short of
+    /// the total by rounding, never exceed it; the shortfall is bounded at a hundredth of a cent.
+    function invariant_proof7_impactAddsUpToTheCreditFeeTaken() public view {
+        uint256 total = ledger.totalImpact();
+        uint256 sum = handler.sumImpact();
+        assertEq(total, handler.creditFeeFromEvents(), "total impact is the credit fee taken");
+        assertLe(sum, total, "members never hold more impact than was taken");
+        assertLe(total - sum, 1e4, "the members' impact adds up to the total");
     }
 
-    /// Money in buys units in full; none of it is a repayment.
-    function invariant_moneyInIsNeverARepayment() public view {
-        assertEq(handler.depositsRoutedToCredit(), 0, "a deposit was routed to the credit core");
+    /// Landed counts per verb. Prints in `-vv`.
+    function invariant_reportCoverage() public view {
+        string[7] memory verbs = [
+            "deposit",
+            "requestWithdraw",
+            "cancelWithdraw",
+            "proposeWithdrawal",
+            "voteOnWithdrawal",
+            "executeWithdrawal",
+            "loss"
+        ];
+        for (uint256 i; i < verbs.length; i++) {
+            console.log(verbs[i], handler.lands(keccak256(bytes(verbs[i]))));
+        }
+        console.log("accruals that charged a fee", handler.charges());
+        console.log("largest impact shortfall, wei", handler.maxShortfall());
     }
 
-    /// An earmark is a reservation against units the vault really holds, never a promise of units
-    /// it does not. Counted in units, which is what removes the clamp: execution
-    /// burns exactly what was reserved because exactly that much is still there.
-    function invariant_earmarksAreCoveredByTheUnits() public view {
-        for (uint256 i = 0; i < 4; i++) {
+    // ---- reconciliation ----
+
+    /// A venue's units are exactly the sum of its vaults' units.
+    function invariant_venueUnitsIsTheSumOfItsVaults() public view {
+        uint256 flex;
+        uint256 core;
+        for (uint256 i; i < 6; i++) {
             uint256 id = handler.vaultIds(i);
-            assertLe(ledger.earmarkedUnits(id), ledger.vaultUnits(id), "an earmark exceeds its vault's units");
+            (,, uint8 venueId,,) = ledger.vaults(id);
+            if (venueId == VenueIds.FLEX) flex += ledger.vaultUnits(id);
+            else core += ledger.vaultUnits(id);
+        }
+        assertEq(ledger.venueUnits(VenueIds.FLEX), flex);
+        assertEq(ledger.venueUnits(VenueIds.CORE), core);
+    }
+
+    /// The shares behind the units and the pending fee shares are exactly what the ledger holds in
+    /// each venue. Shares handed to the queue have left both sides.
+    function invariant_sharesReconcileWithTheLedgersPosition() public view {
+        _reconcile(VenueIds.FLEX, flexVault);
+        _reconcile(VenueIds.CORE, coreVault);
+    }
+
+    function _reconcile(uint8 id, Venue v) internal view {
+        (uint256 t, uint256 c) = ledger.pendingFees(id);
+        assertEq(ledger.venueShares(id) + t + c, v.balanceOf(address(ledger)), "shares do not reconcile");
+    }
+
+    /// An earmark never exceeds the units its vault holds.
+    function invariant_earmarksAreCoveredByTheUnits() public view {
+        for (uint256 i; i < 2; i++) {
+            uint256 id = handler.vaultIds(i);
+            assertLe(ledger.earmarkedUnits(id), ledger.vaultUnits(id));
         }
     }
 
-    /// Vault shares are never held by a member. They live at the ledger, at the tier vault and at
-    /// the seed holder; members hold no position of their own at all.
+    /// No member ever holds venue shares.
     function invariant_sharesNeverHeldByMembers() public view {
-        for (uint256 i = 0; i < 4; i++) {
-            assertEq(flexVault.balanceOf(handler.actors(i)), 0, "a member holds flex shares");
-            assertEq(coreVault.balanceOf(handler.actors(i)), 0, "a member holds core shares");
+        for (uint256 i; i < 5; i++) {
+            assertEq(flexVault.balanceOf(actors[i]), 0);
+            assertEq(coreVault.balanceOf(actors[i]), 0);
         }
-        assertEq(flexVault.balanceOf(address(handler)), 0, "the handler holds flex shares");
     }
 }

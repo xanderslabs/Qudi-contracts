@@ -101,8 +101,28 @@ contract ElectionFloorTest is MembershipFixture {
         assertEq(c.steward(), ada);
     }
 
-    /// With no seasoned voter the floor is still 1, so no election can pass on no votes at all.
-    function test_proof11_noSeasonedVoterCanNeverElect() public {
+    /// With no seasoned voter the floor is still 1, so no vote with the small-community floor can
+    /// pass on no votes at all. A candidate must now be seasoned, so an election always has at least
+    /// its candidate in the denominator; a closure vote proposed before anyone has seasoned is the
+    /// case with none.
+    function test_proof11_noSeasonedVoterCanNeverPass() public {
+        Community c = _create(host, PRICE);
+        vm.prank(host);
+        c.proposeClosure();
+        uint256 voteId = c.closureVoteId();
+        ICommunity.VoteTally memory t = c.voteTally(voteId);
+        assertEq(t.denominator, 0, "nobody is seasoned when the vote starts");
+        assertEq(t.minYes, 1, "the floor never drops below 1");
+        vm.prank(host);
+        vm.expectRevert(ICommunity.VoteIneligible.selector);
+        c.castVote(voteId, true);
+        _pastWindow();
+        vm.expectRevert(ICommunity.NotPassed.selector);
+        c.executeClosure();
+    }
+
+    /// An unseasoned member cannot stand, so nobody joins and stands for host on day one.
+    function test_proof11_anUnseasonedMemberCannotStand() public {
         Community c = _create(host, PRICE);
         _join(c, ada);
         _join(c, bem);
@@ -117,20 +137,10 @@ contract ElectionFloorTest is MembershipFixture {
         _vote(c, voteId, cy, true);
         _pastWindow();
         c.executeRemoveSteward();
-        _leave(c, host);
-        _leave(c, ada);
-        _leave(c, bem);
-        _leave(c, cy);
 
-        voteId = _elect(c, dee);
-        ICommunity.VoteTally memory t = c.voteTally(voteId);
-        assertEq(t.denominator, 0, "dee is not seasoned when the vote starts");
-        assertEq(t.minYes, 1, "the floor never drops below 1");
-        vm.prank(dee);
-        vm.expectRevert(ICommunity.VoteIneligible.selector);
-        c.castVote(voteId, true);
-        assertFalse(_execute(c, voteId), "no votes elect nobody");
-        assertTrue(c.stewardVacant());
+        vm.prank(ada);
+        vm.expectRevert(ICommunity.CandidateIneligible.selector);
+        c.electSteward(dee);
     }
 
     /// Four voters: the floor is 3, not 4 and not 2.

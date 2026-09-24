@@ -109,13 +109,10 @@ contract LedgerNoTierGateTest is InviteSigner {
     /// unchanged by TERM also needing a maturity.
     function _params(uint8 poolType, bool shared) internal view returns (ILedger.VaultParams memory) {
         return ILedger.VaultParams({
-            poolType: poolType,
+            venueId: poolType,
             shared: shared,
             lockedUntil: poolType == VenueIds.TERM ? uint64(block.timestamp + 180 days) : 0,
-            contribution: 0,
-            name: "vault",
-            target: 0,
-            targetDate: 0
+            name: "vault"
         });
     }
 
@@ -131,7 +128,7 @@ contract LedgerNoTierGateTest is InviteSigner {
             ledger.deposit(id, 100e6);
 
             assertEq(ledger.vaultUnits(id), 100e6, "the deposit reached the tier");
-            assertEq(ledger.tierUnits(t), 100e6);
+            assertEq(ledger.venueUnits(t), 100e6);
             assertEq(ledger.tierVault(t), address(pools[t]), "wired to Qudi's own vault for that tier");
             assertEq(pools[t].balanceOf(address(ledger)), 100e6);
         }
@@ -144,17 +141,12 @@ contract LedgerNoTierGateTest is InviteSigner {
         vm.prank(ada);
         ledger.deposit(id, 100e6);
 
-        // A TERM record carries a lock, so the maturity comes first. Then the
-        // whole Term flow in one place: request at maturity, and because Term's
-        // withdrawal term is zero, execute in the same block. The venue had the lock to prepare.
-        (,,, uint64 maturity,,,,,) = ledger.vaults(id);
+        // A TERM record carries a lock, so the maturity comes first. Then one request pays.
+        (,,, uint64 maturity,) = ledger.vaults(id);
         vm.warp(uint256(maturity));
-        vm.prank(ada);
-        uint256 req = ledger.requestWithdraw(id, 100e6);
-        vm.warp(block.timestamp + pools[VenueIds.TERM].labels().exitSeconds);
         uint256 before = usdc.balanceOf(ada);
         vm.prank(ada);
-        ledger.executeWithdraw(req);
+        ledger.requestWithdraw(id, 100e6);
         assertEq(usdc.balanceOf(ada) - before, 100e6);
         assertEq(ledger.vaultUnits(id), 0);
     }
@@ -169,9 +161,8 @@ contract LedgerNoTierGateTest is InviteSigner {
             ledger.deposit(id, 50e6);
 
             assertEq(ledger.vaultUnits(id), 50e6);
-            // A qualifying contributor is seasoned.
-            vm.warp(block.timestamp + 15 days);
-            assertTrue(ledger.isDepositor(id, ada));
+            (uint256 deposited,,) = ledger.stakeOf(id, ada);
+            assertEq(deposited, 50e6);
             assertEq(ledger.tierVault(t), address(pools[t]));
         }
     }
@@ -200,8 +191,8 @@ contract LedgerNoTierGateTest is InviteSigner {
         vm.prank(other);
         ledger2.deposit(b, 200e6);
 
-        assertEq(ledger.tierUnits(VenueIds.CORE), 300e6);
-        assertEq(ledger2.tierUnits(VenueIds.CORE), 200e6);
+        assertEq(ledger.venueUnits(VenueIds.CORE), 300e6);
+        assertEq(ledger2.venueUnits(VenueIds.CORE), 200e6);
         assertEq(pools[VenueIds.CORE].totalSupply(), 500e6, "one tier vault, two communities in it");
     }
 

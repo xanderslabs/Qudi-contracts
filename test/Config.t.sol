@@ -120,7 +120,7 @@ contract ConfigTest is Test {
     function test_noChargeParameterIsReachable() public {
         bytes32[] memory all = _allConfigKeys();
         // Count pinned to ConfigKeys.sol by check-config-key-enumeration.sh (CI).
-        assertEq(all.length, 76, "ConfigKeys count changed: update _allConfigKeys and re-audit");
+        assertEq(all.length, 74, "ConfigKeys count changed: update _allConfigKeys and re-audit");
 
         bytes32[] memory chargeShaped = _chargeShapedKeys();
         for (uint256 c; c < chargeShaped.length; c++) {
@@ -167,7 +167,7 @@ contract ConfigTest is Test {
     /// The complete ConfigKeys set, maintained in lockstep with ConfigKeys.sol. The count
     /// assertion in test_noChargeParameterIsReachable forces this to stay complete.
     function _allConfigKeys() internal pure returns (bytes32[] memory k) {
-        k = new bytes32[](76);
+        k = new bytes32[](74);
         uint256 i;
         k[i++] = K.SEAT_PRICE_FLOOR;
         k[i++] = K.SEAT_PRICE_CEILING;
@@ -246,15 +246,6 @@ contract ConfigTest is Test {
         // owes.
         k[i++] = K.MAX_RATE_CEILING_BPS;
         k[i++] = K.MANUAL_RATE_CEILING_BPS;
-        // The shared-vault withdrawal. No-charge audit: none of the three is charge-shaped.
-        // The two bps keys are vote bars, counts of people that decide whether a community's own
-        // pot may pay a recipient it voted for. SHARED_PROPOSAL_REVERT_DELAY times when an
-        // unexecuted earmark may be returned to that pot. None is read on any repayment path,
-        // and none can add anything to what a member owes: they move a community's own savings
-        // between the community and a recipient it chose, never between a member and a debt.
-        k[i++] = K.SHARED_WITHDRAWAL_QUORUM_BPS;
-        k[i++] = K.SHARED_WITHDRAWAL_APPROVAL_BPS;
-        k[i++] = K.SHARED_PROPOSAL_REVERT_DELAY;
         // No-charge audit: neither bar can add anything to what a member owes. They decide who is
         // in the electorate for a vote over a community's own savings, which is a count of
         // people, and no repayment path reads either.
@@ -266,6 +257,9 @@ contract ConfigTest is Test {
         // cannot add anything to what a member owes.
         k[i++] = K.REMOVAL_REPROPOSE_COOLDOWN;
         k[i++] = K.HANDOVER_ACCEPT_WINDOW;
+        // No-charge audit: not charge-shaped. It bounds how many vaults a member's list holds, so
+        // the ledger's impact views stay within gas. No repayment path reads it.
+        k[i++] = K.MAX_VAULTS_PER_MEMBER;
         require(i == k.length, "key list length mismatch");
     }
 
@@ -600,6 +594,13 @@ contract ConfigTest is Test {
     function test_handoverAcceptWindowBounds() public {
         assertEq(cfg.handoverAcceptWindow(), 7 days, "launch value");
         _assertRange(K.HANDOVER_ACCEPT_WINDOW, 1 days, 30 days);
+    }
+
+    /// A member's vault list holds 32 at launch. At least 1, or nobody could open a vault; at most
+    /// 64, so the ledger's impact views walk a bounded list.
+    function test_maxVaultsPerMember_launchValueAndBounds() public {
+        assertEq(cfg.maxVaultsPerMember(), 32, "launch value");
+        _assertRange(K.MAX_VAULTS_PER_MEMBER, 1, 64);
     }
 
     /// A free seat is allowed, so the floor may be 0. Each key's range holds at both ends.

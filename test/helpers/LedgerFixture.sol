@@ -16,6 +16,7 @@ import {VenueIds} from "./VenueIds.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {IVenue} from "../../src/interfaces/IVenue.sol";
 import {MockStrategy} from "../mocks/MockStrategy.sol";
+import {ICreditCore} from "../../src/interfaces/ICreditCore.sol";
 
 /// A stand-in factory: answers isCommunityContract for addresses we register, hands the ledger the
 /// community id, and holds Qudi's venues in a registry, which is what the ledger resolves a venue
@@ -23,6 +24,7 @@ import {MockStrategy} from "../mocks/MockStrategy.sol";
 contract LedgerFactoryStub {
     mapping(address => bool) public isCommunityContract;
     mapping(address => uint256) public communityIdOf;
+    mapping(uint256 => bool) public retired;
     address[] internal _venues;
 
     function register(address a) external {
@@ -42,17 +44,36 @@ contract LedgerFactoryStub {
     function venueCount() external view returns (uint256) {
         return _venues.length;
     }
+
+    function retireVenue(uint256 id) external {
+        retired[id] = true;
+    }
+
+    function isActiveVenue(uint256 id) external view returns (bool) {
+        return id < _venues.length && !retired[id];
+    }
 }
 
-/// Membership and the host, set directly by the test. The real `Community` answers the same two
-/// questions and nothing else the ledger asks. A suspended or frozen member is simply
-/// not a member (`isMember` false), so there is no separate suspension answer to stub.
+/// Membership, seasoning, freezing and the host, set directly by the test. The real `Community`
+/// answers the same four questions and nothing else the ledger asks. A frozen member is not a
+/// member (`isMember` false) and is also frozen; `freeze` sets both, as the real one does.
 contract LedgerCommunityStub {
     mapping(address => bool) public isMember;
+    mapping(address => bool) public isSeasoned;
+    mapping(address => bool) public isFrozen;
     address public steward;
 
     function setMember(address a, bool v) external {
         isMember[a] = v;
+    }
+
+    function setSeasoned(address a, bool v) external {
+        isSeasoned[a] = v;
+    }
+
+    function freeze(address a) external {
+        isFrozen[a] = true;
+        isMember[a] = false;
     }
 
     function setSteward(address a) external {
@@ -61,19 +82,31 @@ contract LedgerCommunityStub {
 }
 
 /// The singleton CreditCore's community leg door. Checks the USDC arrived, exactly as the
-/// real one does with `LegNotFunded`, so a leg nobody paid cannot pass here either.
+/// real one does with `LegNotFunded`, so a leg nobody paid cannot pass here either, and refuses a
+/// closed credit account, as the real one does with `CommunityIsClosed`.
 contract LedgerCreditCoreStub {
     IERC20 public immutable usdc;
     mapping(uint256 => uint256) public legOf;
+    mapping(uint256 => bool) public closed;
     uint256 internal _booked;
 
     error LegNotFunded();
+    error CommunityIsClosed();
 
     constructor(IERC20 usdc_) {
         usdc = usdc_;
     }
 
+    function close(uint256 communityId) external {
+        closed[communityId] = true;
+    }
+
+    function communityCreditOf(uint256 communityId) external view returns (ICreditCore.CommunityCredit memory v) {
+        v.closed = closed[communityId];
+    }
+
     function receiveCommunityLeg(uint256 communityId, uint256 amount) external {
+        if (closed[communityId]) revert CommunityIsClosed();
         if (usdc.balanceOf(address(this)) < _booked + amount) revert LegNotFunded();
         _booked += amount;
         legOf[communityId] += amount;
@@ -81,10 +114,9 @@ contract LedgerCreditCoreStub {
 }
 
 /// One community's ledger over real `Venue` instances, wired the way `CommunityFactory` wires it.
-/// Two venues carry strategies, FLEX and CORE, because the proofs need both an instant path and a
-/// queued one. Each venue carries the labels a deployment gives it: Flex Open with no exit time,
-/// Core Open with a one-day exit, Term Locked. The ledger's `lockedUntil` is the only lock there
-/// is.
+/// Every venue carries one `MockStrategy` at full weight, and the labels a deployment gives it:
+/// Flex Open with no exit time, Core Open with a one-day exit, Term Locked. A test makes a venue
+/// illiquid by rebalancing its money into the strategy and capping what the strategy gives back.
 abstract contract LedgerFixture is Test {
     MockUSDC usdc;
     Config config;
@@ -96,10 +128,9 @@ abstract contract LedgerFixture is Test {
 
     Venue flexVault;
     Venue coreVault;
-    /// Every tier Qudi deploys, so the stub factory's `pools` matches the real one's promise that
-    /// no slot is ever zero. Only FLEX and CORE carry venues; TERM exists so a test
-    /// can reach a tier this fixture never otherwise touches.
+    Venue termVault;
     Venue[3] tierVaults;
+    MockStrategy[3] strategies;
     MockStrategy flexVenue;
     MockStrategy coreVenue;
 
@@ -110,6 +141,8 @@ abstract contract LedgerFixture is Test {
     address bea = makeAddr("bea");
     address cid = makeAddr("cid");
     address dan = makeAddr("dan");
+    address eve = makeAddr("eve");
+    address fay = makeAddr("fay");
     address stranger = makeAddr("stranger");
     address payee = makeAddr("payee");
 
@@ -127,8 +160,12 @@ abstract contract LedgerFixture is Test {
         }
         flexVault = tierVaults[VenueIds.FLEX];
         coreVault = tierVaults[VenueIds.CORE];
-        flexVenue = _venue(flexVault, "Flex venue", "FV");
-        coreVenue = _venue(coreVault, "Core venue", "CV");
+        termVault = tierVaults[VenueIds.TERM];
+        for (uint8 t = 0; t < VenueIds.COUNT; t++) {
+            strategies[t] = _venue(tierVaults[t], "", "");
+        }
+        flexVenue = strategies[VenueIds.FLEX];
+        coreVenue = strategies[VenueIds.CORE];
 
         community = new LedgerCommunityStub();
         creditCore = new LedgerCreditCoreStub(IERC20(address(usdc)));
@@ -152,11 +189,12 @@ abstract contract LedgerFixture is Test {
         factory.register(address(ledger));
 
         community.setSteward(host);
-        address[6] memory people = [host, ada, bea, cid, dan, payee];
-        for (uint256 i = 0; i < 5; i++) {
+        address[8] memory people = [host, ada, bea, cid, dan, eve, fay, payee];
+        for (uint256 i = 0; i < 7; i++) {
             community.setMember(people[i], true);
+            community.setSeasoned(people[i], true);
         }
-        for (uint256 i = 0; i < 6; i++) {
+        for (uint256 i = 0; i < 8; i++) {
             usdc.mint(people[i], 1_000_000e6);
             vm.prank(people[i]);
             usdc.approve(address(ledger), type(uint256).max);
@@ -169,9 +207,33 @@ abstract contract LedgerFixture is Test {
         v.setLabels(VenueIds.labels(poolType));
     }
 
-    /// A venue's exit time: how long a queued ledger withdrawal waits before it can execute.
-    function exitOf(uint8 poolType) internal view returns (uint64) {
-        return tierVaults[poolType].labels().exitSeconds;
+    // ---- moving a venue's value ----
+
+    /// A strategy gain of `amount` in `venueId`, then a year, which is long enough for the Venue's
+    /// growth cap to let the whole of a gain up to a fifth of the Venue through.
+    function _gain(uint8 venueId, uint256 amount) internal {
+        usdc.mint(address(this), amount);
+        usdc.approve(address(strategies[venueId]), amount);
+        strategies[venueId].fund(amount);
+        vm.warp(block.timestamp + 365 days);
+    }
+
+    /// A strategy loss of `amount`. A loss reaches the Venue's price at once. The venue's money is
+    /// moved into the strategy first so there is something there to lose.
+    function _loss(uint8 venueId, uint256 amount) internal {
+        tierVaults[venueId].rebalance();
+        strategies[venueId].skim(amount);
+    }
+
+    /// Moves every idle dollar into the strategy and lets it give nothing back, so the venue can pay
+    /// nobody until `_liquid` is called.
+    function _illiquid(uint8 venueId) internal {
+        tierVaults[venueId].rebalance();
+        strategies[venueId].setWithdrawCap(0);
+    }
+
+    function _liquid(uint8 venueId) internal {
+        strategies[venueId].setWithdrawCap(type(uint256).max);
     }
 
     function _venue(Venue v, string memory, string memory) internal returns (MockStrategy m) {
@@ -189,30 +251,44 @@ abstract contract LedgerFixture is Test {
 
     // ---- shorthands the proofs read better with ----
 
-    function _personal(address who, uint8 poolType, uint64 lockedUntil) internal returns (uint256 id) {
+    function _personal(address who, uint8 venueId, uint64 lockedUntil) internal returns (uint256 id) {
         vm.prank(who);
-        id = ledger.createVault(_params(poolType, false, lockedUntil, "personal"));
+        id = ledger.createVault(_params(venueId, false, lockedUntil, "personal"));
     }
 
-    function _shared(uint8 poolType) internal returns (uint256 id) {
+    function _shared(uint8 venueId) internal returns (uint256 id) {
         vm.prank(host);
-        id = ledger.createVault(_params(poolType, true, 0, "shared"));
+        id = ledger.createVault(_params(venueId, true, 0, "shared"));
     }
 
-    function _params(uint8 poolType, bool shared, uint64 lockedUntil, string memory n)
+    function _params(uint8 venueId, bool shared, uint64 lockedUntil, string memory n)
         internal
         pure
         returns (ILedger.VaultParams memory)
     {
-        return ILedger.VaultParams({
-            poolType: poolType,
-            shared: shared,
-            lockedUntil: lockedUntil,
-            contribution: 0, // Anytime
-            name: n,
-            target: 0,
-            targetDate: 0
-        });
+        return ILedger.VaultParams({venueId: venueId, shared: shared, lockedUntil: lockedUntil, name: n});
+    }
+
+    function _withdraw(address who, uint256 vaultId, uint256 amount) internal returns (uint256 id) {
+        vm.prank(who);
+        id = ledger.requestWithdraw(vaultId, amount);
+    }
+
+    /// The host asks for `amount` from `vaultId` to `to`.
+    function _propose(uint256 vaultId, address to, uint256 amount) internal returns (uint256 id) {
+        vm.prank(host);
+        id = ledger.proposeWithdrawal(vaultId, to, amount);
+    }
+
+    function _vote(address who, uint256 payoutId, bool support) internal {
+        vm.prank(who);
+        ledger.voteOnWithdrawal(payoutId, support);
+    }
+
+    /// The vault's community closes it, as `Community.executeClosure` does.
+    function _closeCommunity() internal {
+        vm.prank(address(community));
+        ledger.closeCommunity();
     }
 
     function _deposit(address who, uint256 vaultId, uint256 amount) internal {

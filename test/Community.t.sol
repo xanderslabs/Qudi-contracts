@@ -10,7 +10,7 @@ import {Seats} from "../src/Seats.sol";
 import {ICommunity} from "../src/interfaces/ICommunity.sol";
 import {ICommunityInit} from "../src/interfaces/ICommunityInit.sol";
 import {ICreditCore} from "../src/interfaces/ICreditCore.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockVault, MockCreditPool, MockCreditCoreLeg} from "./mocks/MockSeatSiblings.sol";
 import {ConfigKeys} from "../src/ConfigKeys.sol";
@@ -84,7 +84,7 @@ contract CommunityTest is InviteSigner {
             creator: steward,
             seatPrice: 50e6,
             name: "Test Community",
-            poolType: PoolTypes.CORE
+            poolType: VenueIds.CORE
         });
         community.initialize(w);
         vault.initialize(w);
@@ -127,7 +127,7 @@ contract CommunityTest is InviteSigner {
             creator: steward,
             seatPrice: price,
             name: "Test Community",
-            poolType: PoolTypes.CORE
+            poolType: VenueIds.CORE
         });
         freshCommunity.initialize(w);
         usdc.mint(ada, price);
@@ -173,7 +173,7 @@ contract CommunityTest is InviteSigner {
                 creator: steward,
                 seatPrice: price,
                 name: "Test Community",
-                poolType: PoolTypes.CORE
+                poolType: VenueIds.CORE
             })
         );
         address carl = makeAddr("carl");

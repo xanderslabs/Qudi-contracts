@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {LedgerFixture} from "./helpers/LedgerFixture.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 
 /// Every shared-vault vote threshold is "20% of qualifying contributors", and a qualifying
 /// contributor is someone who deposited at least $10 at least 14 days
@@ -19,7 +19,7 @@ contract LedgerQualifyingContributorsTest is LedgerFixture {
 
     function setUp() public {
         setUpLedger();
-        pot = _shared(PoolTypes.FLEX);
+        pot = _shared(VenueIds.FLEX);
     }
 
     function _window() internal view returns (uint64 w) {

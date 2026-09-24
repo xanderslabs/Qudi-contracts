@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {LedgerFixture} from "./helpers/LedgerFixture.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 
 /// The two vote bars on a shared withdrawal. Quorum is a share of the vault's qualifying contributors at
 /// proposal time; approval is a share of the votes actually cast; both are counts of people.
@@ -28,7 +28,7 @@ contract LedgerVoteBarsTest is LedgerFixture {
 
     function setUp() public {
         setUpLedger();
-        pot = _shared(PoolTypes.FLEX);
+        pot = _shared(VenueIds.FLEX);
 
         for (uint256 i; i < ELECTORATE; i++) {
             address who = makeAddr(string.concat("voter", vm.toString(i)));

@@ -63,7 +63,11 @@ contract CreditCoreDebtTest is InviteSigner {
         address communityImpl = address(new Community());
         address ledgerImpl = address(new MockCommunityModule());
         Seats seats = new Seats(vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1));
-        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, _dummyPools());
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
+        address[3] memory listed = _dummyPools();
+        for (uint8 t = 0; t < 3; t++) {
+            factory.addVenue(listed[t]);
+        }
         standing = new CreditStandingHarness(IConfig(address(config)), address(factory), governance);
         cc = new CreditCoreHarness(
             IERC20(address(usdc)),

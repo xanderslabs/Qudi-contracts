@@ -8,7 +8,7 @@ import {IConfig} from "../src/interfaces/IConfig.sol";
 import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
 import {ManualStrategy} from "../src/ManualStrategy.sol";
 import {Venue} from "../src/Venue.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {IVenue} from "../src/interfaces/IVenue.sol";
 import {Community} from "../src/Community.sol";
 import {Seats} from "../src/Seats.sol";
 import {Ledger} from "../src/Ledger.sol";
@@ -30,43 +30,34 @@ interface IMintableTestUsdc {
 
 /// Deployment entry point. Order, dictated by what the constructors actually require:
 ///
-///   compliance registry -> config -> vaults + venues -> implementations -> factory -> venue wiring -> config wiring assertions -> smoke community
-///   -> ownership handover
+///   compliance registry -> config -> implementations -> factory -> venues + strategies -> venue wiring
+///   -> config wiring assertions -> smoke community -> ownership handover
 ///
 /// Two orderings worth naming, both forced rather than chosen:
 ///   - the compliance registry is deployed BEFORE config, because
 ///     `Config(usdc, treasury, complianceRegistry)` takes its address and rejects zero;
-///   - every owner call (`setRedeemDelay`, `addVenue`, `setWeights`) happens AFTER the factory is
-///     created, never between the nonce read and the factory, because each broadcast call
-///     advances the deployer's nonce and would move the factory's predicted address.
+///   - every other call happens AFTER the factory is created, never between the nonce read and the
+///     factory, because each broadcast call advances the deployer's nonce and would move the
+///     factory's predicted address.
 /// `CreditStanding` and `CreditCore` are deployed here, and
 /// `Config.CREDIT_CORE` is set to the latter. Both come AFTER the factory, because each takes
 /// it as an immutable constructor argument, and BEFORE the smoke community, because a paid seat mint
 /// routes its pool leg to `CreditCore` and reverts `CreditCoreUnset` while the key is zero.
 /// Neither is created before the factory, so `_FACTORY_NONCE_OFFSET` is unaffected.
 ///
-/// **`ManualStrategy` reaches Arc mainnet from 2026-09-22, deliberately.** Its share price is moved
-/// by its owner, so this is a deployment whose yield is whatever the operator says it is. That
-/// is deliberate: there are no third-party users, the owner and the operator are the same
-/// person, and the alternative was no mainnet deployment at all. It is not a real-venue
-/// deployment and must not be described as one. A real venue replaces it later.
+/// **`ManualStrategy` reaches Arc mainnet for the beta, deliberately.** Its yield is paid in by
+/// Qudi's operator ahead of time and released at a set rate, so this is a deployment whose yield
+/// is what Qudi funds. It is not a third-party venue and must not be described as one. A partner
+/// strategy plugs in beside it later through the same interface.
 ///
-/// Three `Venue` instances, one per pool type (PoolTypes.sol), each with its own pair
-/// of `ManualStrategy`s: a vault's `poolType` is immutable, so "one shared vault per pool type" is a
-/// constructor-time decision, not a runtime one, and `CommunityFactory.pools` (an `address[3]` indexed
-/// by the `PoolTypes` constant) is what lets a community's `Ledger` resolve a tier to the
-/// right one. The TERM slot is an ordinary Venue too:
-/// Term is a venue profile, not a fixed-term instrument.
-///
-/// The circular constructor dependency between Venue and CommunityFactory
-/// (`Venue(usdc, config, factory, poolType, owner, name, symbol)` / `CommunityFactory(config,
-/// seats, community, ledger, pools)`, both immutable), and the same one between `Seats` and the
-/// factory, is resolved by precomputing
-/// the factory's CREATE address from the deployer's nonce. `_FACTORY_NONCE_OFFSET` below is the
-/// number of contract creations this script performs between reading the nonce and creating the
-/// factory; the factory's landing address is asserted against the precomputed one, so a miscount
-/// fails the deployment loudly instead of shipping four vaults permanently pointed at the wrong
-/// registry.
+/// Three `Venue` instances, each over one `ManualStrategy`, listed in the factory's venue registry
+/// in order: Flex (id 0), Core (id 1), Term (id 2). A `Venue` takes the factory's address as an
+/// immutable, but the factory no longer takes the venues, so the venues are created after it. The
+/// one circular constructor dependency left is between `Seats` and the factory, resolved by
+/// precomputing the factory's CREATE address from the deployer's nonce. `_FACTORY_NONCE_OFFSET`
+/// below is the number of contract creations this script performs between reading the nonce and
+/// creating the factory; the factory's landing address is asserted against the precomputed one, so
+/// a miscount fails the deployment loudly.
 ///
 /// Environment contract:
 ///   USDC_ADDRESS   the ERC-20 USDC for the target chain. Required on every chain, local
@@ -75,14 +66,14 @@ interface IMintableTestUsdc {
 ///                  `test/mocks/MockUSDC.sol:MockUSDC` first with `forge create` and pass its
 ///                  address here (keeping test-only code out of the production deploy path).
 ///   TREASURY       optional; the protocol treasury. Defaults to the deployer.
-///   CONFIG_OWNER   optional; the address config and all four vaults' ownership is handed to at
-///                  the end. Defaults to the deployer (the testnet
-///                  posture: the config owner is a single EOA). On mainnet this is the
-///                  TimelockController for the economic instance.
-///   VENUE_OWNER    optional; the address all eight venues (two per FLEX/CORE pool type) and the
-///                  fixed-term adapter are handed to. Defaults to CONFIG_OWNER. Set it separately
-///                  on mainnet: the venues' owner functions are the every-epoch manual procedure,
-///                  not economic parameters, and must not sit behind the timelock.
+///   CONFIG_OWNER   optional; the address config, the registry, the factory, the three venues and
+///                  the three strategies are handed to at the end. Defaults to the deployer (the
+///                  testnet posture: the config owner is a single EOA). On mainnet this is the
+///                  TimelockController.
+///   STRATEGY_OPERATOR  optional; each `ManualStrategy`'s operator, who funds yield, sets the rate,
+///                  deploys to listed destinations, returns money and reports losses. Defaults to
+///                  the deployer. Not behind the timelock: those are routine steps, and the
+///                  timelock already decides where money may go.
 ///   SKIP_SMOKE_COMMUNITY  optional, "true" to skip the end-of-script smoke community. The smoke community is
 ///                  a permanent artifact with the deployer as its founding steward and no removal
 ///                  path, so a deployment whose community directory is not throwaway should skip it
@@ -99,12 +90,11 @@ interface IMintableTestUsdc {
 ///
 /// Run: forge script script/Deploy.s.sol --rpc-url <url> --broadcast
 contract Deploy is Script {
-    /// registry, config; three pool types x (vault, instant venue, slow venue); the community
-    /// impl, the ledger impl, `Seats`. 2 + 3*3 + 3 = 14 creations before the factory. Changing
-    /// what this script deploys before the factory means changing this number in the same
-    /// commit; the assertion after the factory is created is what stops a miscount from shipping
-    /// silently.
-    uint256 internal constant _FACTORY_NONCE_OFFSET = 14;
+    /// registry, config, the community impl, the ledger impl, `Seats`: 5 creations before the
+    /// factory. Changing what this script deploys before the factory means changing this number in
+    /// the same commit; the assertion after the factory is created is what stops a miscount from
+    /// shipping silently.
+    uint256 internal constant _FACTORY_NONCE_OFFSET = 5;
 
     /// What each smoke round moves. It was the seat price floor, which is now 0.
     uint256 internal constant _SMOKE_AMOUNT = 50e6;
@@ -116,14 +106,16 @@ contract Deploy is Script {
     uint256 internal constant _ARC_TESTNET_CHAIN_ID = 5042002;
     uint256 internal constant _ARC_MAINNET_CHAIN_ID = 5042;
 
-    /// The initial manual whitelist: one instant-tier venue and one notice-tier venue per pool
-    /// type, so the tier machinery (instant floor, slow ceiling, notice periods, the FIFO redeem
-    /// queue) is exercised from the first transaction rather than only in tests. Weights satisfy
-    /// the launch defaults: instant >= INSTANT_TIER_FLOOR_BPS, slow <= SLOW_TIER_CEILING_BPS,
-    /// and the total at most 10,000.
-    uint64 internal constant _SLOW_VENUE_DELAY = 2 days;
-    uint16 internal constant _INSTANT_WEIGHT_BPS = 7500;
-    uint16 internal constant _SLOW_WEIGHT_BPS = 2500;
+    /// Venue ids in the factory's registry, in the order this script lists them.
+    uint8 internal constant _FLEX = 0;
+    uint8 internal constant _CORE = 1;
+    uint8 internal constant _TERM = 2;
+    uint8 internal constant _VENUES = 3;
+
+    /// Each venue's one `ManualStrategy` is listed with no exit delay, because its principal cash
+    /// can be withdrawn at once, and holds this share of the venue; the rest stays idle as the
+    /// venue's cash buffer. Inside the launch group limits.
+    uint16 internal constant _STRATEGY_WEIGHT_BPS = 7500;
 
     // Deployment results live in script storage rather than in `run()`'s frame: the full order is
     // one linear sequence and reads best as one, but the many live locals four-times-over
@@ -132,12 +124,9 @@ contract Deploy is Script {
     /// ownership hands to the Risk Committee timelock alongside config.
     ComplianceRegistry internal registry;
     Config internal config;
-    /// Indexed by the `PoolTypes` constant, FLEX through TERM.
-    // 3 is PoolTypes.COUNT, spelled out because a library constant is not a valid array length.
-    // TERM is an ordinary tier.
+    /// Indexed by venue id, Flex through Term.
     Venue[3] internal vaults;
-    ManualStrategy[3] internal instantVenues;
-    ManualStrategy[3] internal slowVenues;
+    ManualStrategy[3] internal strategies;
     Community internal communityImpl;
     Seats internal seats;
     Ledger internal ledgerImpl;
@@ -165,31 +154,20 @@ contract Deploy is Script {
         config = new Config(usdc, treasury, address(registry));
 
         // Creations only until the factory exists: see `_FACTORY_NONCE_OFFSET`.
-        _deployPoolStack(usdc, predictedFactory, deployer);
-
         communityImpl = new Community();
         ledgerImpl = new Ledger();
         // `Seats` trusts one factory, fixed here, and the factory refuses a `Seats` that names
         // any other.
         seats = new Seats(predictedFactory);
 
-        address[3] memory pools_;
-        // Every slot is a Venue since 2026-09-21: TERM is an ordinary
-        // tier, served by the same vault machinery as Flex and Core.
-        for (uint8 i; i < PoolTypes.COUNT; i++) {
-            pools_[i] = address(vaults[i]);
-        }
-        factory =
-            new CommunityFactory(address(config), address(seats), address(communityImpl), address(ledgerImpl), pools_);
-        // Loud, not silent: each vault's `factory` is immutable, so a nonce miscount here would
-        // ship vaults that reject every real community ledger forever. The loop restates what each
-        // vault was already constructed with (`predictedFactory`), so it follows once the first
-        // require passes; kept only as defensive redundancy against a future edit that changes
-        // what the vault constructor is handed, not an independent check.
+        factory = new CommunityFactory(
+            address(config), address(seats), address(communityImpl), address(ledgerImpl), deployer
+        );
+        // Loud, not silent: `Seats` trusts one factory, fixed at its construction, so a nonce
+        // miscount here would ship a `Seats` that refuses every community.
         require(address(factory) == predictedFactory, "factory address mismatch");
-        for (uint8 i; i < PoolTypes.COUNT; i++) {
-            require(vaults[i].factory() == address(factory), "vault not wired to factory");
-        }
+
+        _deployVenues(usdc, deployer, vm.envOr("STRATEGY_OPERATOR", deployer));
 
         // ---- the credit singletons ----
         // After the factory, because both take it as an immutable constructor argument, and
@@ -212,13 +190,13 @@ contract Deploy is Script {
         config.setAddress(K.CREDIT_CORE, address(creditCore));
         require(config.creditCore() == address(creditCore), "credit core not wired");
 
-        // ---- venue whitelist and weights (owner-only, deployer is every vault's owner) ----
+        // ---- labels, strategies, weights and the registry (the deployer owns all of them) ----
         _wireVenues();
 
         // ---- wire addresses into config ----
         // `Config` holds exactly two address parameters, PROTOCOL_TREASURY and
         // COMPLIANCE_REGISTRY, both already set by the constructor above. There is no config slot for the vaults or the
-        // factory: ledgers reach their vault through `CommunityFactory`'s immutable `pools` array, and
+        // factory: ledgers reach their venue through `CommunityFactory`'s venue registry, and
         // each vault reaches the registry through its own immutable `factory`. Nothing further to
         // wire; re-asserted here so a future reader does not go looking for a missing step.
         require(config.complianceRegistry() == address(registry), "compliance registry not wired");
@@ -247,41 +225,28 @@ contract Deploy is Script {
         // deployment). Skipped entirely when the deployer keeps ownership, which is the local and
         // testnet default, since nominating yourself is a no-op that still costs transactions.
         //
-        // Two owners, not one: a timelock for economic control and a multisig for
-        // operations. Config and every vault are
-        // economic: parameter changes and venue whitelisting are exactly what the timelock exists
-        // to slow down. The venues are operational: `fund`, `skim`, and `setRedeemDelay` are the
-        // manual epoch procedure, run every epoch, and putting them behind a timelock would make
-        // the ops runbook unrunnable. `VENUE_OWNER` defaults to `CONFIG_OWNER` so a single-owner
-        // deployment stays a single variable.
-        address venueOwner = vm.envOr("VENUE_OWNER", configOwner);
+        // One owner for all of it. The strategies' routine steps belong to their operator, not
+        // their owner, so nothing an operator runs every day sits behind the timelock.
         if (configOwner != deployer) {
             config.transferOwnership(configOwner);
             // The registry owner is the Risk Committee: it rotates the screener key.
             // The screener role itself stays on the dev key for now.
             registry.transferOwnership(configOwner);
-            for (uint8 i; i < PoolTypes.COUNT; i++) {
+            factory.transferOwnership(configOwner);
+            for (uint8 i; i < _VENUES; i++) {
                 vaults[i].transferOwnership(configOwner);
+                strategies[i].transferOwnership(configOwner);
             }
-            console.log("config + registry + vaults ownership NOMINATED to (must acceptOwnership):", configOwner);
-        }
-        if (venueOwner != deployer) {
-            for (uint8 i; i < PoolTypes.COUNT; i++) {
-                instantVenues[i].transferOwnership(venueOwner);
-                slowVenues[i].transferOwnership(venueOwner);
-            }
-            // `setOfferedRate`/`returnFrom` are the same kind of operational, run-every-epoch
-            console.log("venue ownership NOMINATED to (must acceptOwnership):", venueOwner);
+            console.log("ownership NOMINATED to (must acceptOwnership):", configOwner);
         }
 
         vm.stopBroadcast();
 
         console.log("registry:      ", address(registry));
         console.log("config:        ", address(config));
-        for (uint8 i; i < PoolTypes.COUNT; i++) {
-            console.log(string.concat("vault[", _poolLabel(i), "]:"), address(vaults[i]));
-            console.log(string.concat("instantVenue[", _poolLabel(i), "]:"), address(instantVenues[i]));
-            console.log(string.concat("slowVenue[", _poolLabel(i), "]:"), address(slowVenues[i]));
+        for (uint8 i; i < _VENUES; i++) {
+            console.log(string.concat("venue[", _poolLabel(i), "]:"), address(vaults[i]));
+            console.log(string.concat("strategy[", _poolLabel(i), "]:"), address(strategies[i]));
         }
         console.log("communityImpl: ", address(communityImpl));
         console.log("seats:         ", address(seats));
@@ -291,70 +256,74 @@ contract Deploy is Script {
         console.log("creditCore:    ", address(creditCore));
     }
 
-    /// The three shared vaults and their six venues, in one creation-only block. The array index
-    /// IS the `PoolTypes` constant (FLEX 0 .. TERM 2), which is what makes the `pools_` array
-    /// handed to the factory line up slot for slot. Nothing here may make a non-creation broadcast
-    /// call: `setRedeemDelay`, `addVenue` and `setWeights` all wait for `_wireVenues`, after the
-    /// factory has landed at its predicted address.
-    function _deployPoolStack(address usdc, address predictedFactory, address deployer) internal {
+    /// The three venues and their strategies. The array index is the venue id the registry hands
+    /// out in `_wireVenues`, which asserts it.
+    function _deployVenues(address usdc, address deployer, address operator) internal {
         string[3] memory names = ["Qudi Flex", "Qudi Core", "Qudi Term"];
         string[3] memory symbols = ["qFLEX", "qCORE", "qTERM"];
-        for (uint8 i; i < PoolTypes.COUNT; i++) {
+        for (uint8 i; i < _VENUES; i++) {
             vaults[i] =
-                new Venue(IERC20(usdc), IConfig(address(config)), predictedFactory, i, deployer, names[i], symbols[i]);
-            instantVenues[i] = _deployManualStrategy(
-                usdc, deployer, string.concat(names[i], " Instant Venue"), string.concat(symbols[i], "-VI")
-            );
-            slowVenues[i] = _deployManualStrategy(
-                usdc, deployer, string.concat(names[i], " Notice Venue"), string.concat(symbols[i], "-VN")
-            );
+                new Venue(IERC20(usdc), IConfig(address(config)), address(factory), deployer, names[i], symbols[i]);
+            strategies[i] = _deployManualStrategy(usdc, address(vaults[i]), deployer, operator);
         }
     }
 
-    /// Whitelists both venues on each vault and sets the tier weights. The notice delay is set
-    /// BEFORE `addVenue`, because `addVenue` reads `redeemDelay()` once and files the venue in the
-    /// instant or slow tier on the spot; setting the delay afterwards would leave a two-day venue
-    /// counted as instant liquidity forever. The two `isInstant` assertions are what make that
-    /// ordering mistake fail the deployment instead of shipping.
+    /// The labels each venue is shown with. `maxRateBps` sits a little above the gross the
+    /// strategy earns, so the cap binds only on a jump.
+    function _labels(uint8 id) internal pure returns (IVenue.Labels memory) {
+        if (id == _FLEX) {
+            return IVenue.Labels({
+                name: "Flex", kind: IVenue.Kind.Open, riskKey: 1, estReturnBps: 200, exitSeconds: 0, maxRateBps: 300
+            });
+        }
+        if (id == _CORE) {
+            return IVenue.Labels({
+                name: "Core",
+                kind: IVenue.Kind.Open,
+                riskKey: 3,
+                estReturnBps: 350,
+                exitSeconds: 1 days,
+                maxRateBps: 520
+            });
+        }
+        return IVenue.Labels({
+            name: "Term", kind: IVenue.Kind.Locked, riskKey: 3, estReturnBps: 450, exitSeconds: 0, maxRateBps: 660
+        });
+    }
+
+    /// Labels each venue, lists its strategy with a cap of the global deposit cap (one strategy may
+    /// hold everything the venue can take), sets its weight, and lists the venue in the registry,
+    /// asserting the id it gets is its index.
     function _wireVenues() internal {
-        for (uint8 i; i < PoolTypes.COUNT; i++) {
-            slowVenues[i].setRedeemDelay(_SLOW_VENUE_DELAY);
-            vaults[i].addVenue(address(instantVenues[i]));
-            vaults[i].addVenue(address(slowVenues[i]));
-            require(vaults[i].isInstant(address(instantVenues[i])), "instant venue filed as slow");
-            require(!vaults[i].isInstant(address(slowVenues[i])), "slow venue filed as instant");
-
-            address[] memory venues_ = new address[](2);
-            uint16[] memory bps = new uint16[](2);
-            venues_[0] = address(instantVenues[i]);
-            venues_[1] = address(slowVenues[i]);
-            bps[0] = _INSTANT_WEIGHT_BPS;
-            bps[1] = _SLOW_WEIGHT_BPS;
-            vaults[i].setWeights(venues_, bps);
+        for (uint8 i; i < _VENUES; i++) {
+            vaults[i].setLabels(_labels(i));
+            vaults[i].addStrategy(address(strategies[i]), 0);
+            vaults[i].setCap(address(strategies[i]), config.globalDepositCap());
+            address[] memory list = new address[](1);
+            uint16[] memory bps = new uint16[](1);
+            list[0] = address(strategies[i]);
+            bps[0] = _STRATEGY_WEIGHT_BPS;
+            vaults[i].setWeights(list, bps);
+            require(factory.addVenue(address(vaults[i])) == i, "venue listed under the wrong id");
         }
     }
 
-    /// Pool-type name for the printed address block, so an operator reading the log sees
-    /// `vault[CORE]` rather than an index they have to decode.
-    function _poolLabel(uint8 poolType) internal pure returns (string memory) {
-        if (poolType == PoolTypes.FLEX) return "FLEX";
-        if (poolType == PoolTypes.CORE) return "CORE";
-        if (poolType == PoolTypes.TERM) return "TERM";
-        revert("unknown pool type");
+    /// Venue name for the printed address block, so an operator reading the log sees
+    /// `venue[CORE]` rather than an index they have to decode.
+    function _poolLabel(uint8 id) internal pure returns (string memory) {
+        if (id == _FLEX) return "FLEX";
+        if (id == _CORE) return "CORE";
+        if (id == _TERM) return "TERM";
+        revert("unknown venue");
     }
 
-    /// `ManualStrategy` is a fake: its share price moves by hand, with `fund` adding USDC without
-    /// minting and `skim` removing it without burning. Its own header says "Never deployed to
-    /// mainnet" and, until 2026-09-21, said it in a comment and nothing else. The only thing
-    /// stopping ten of them reaching Arc mainnet was that the credit-pool stub's own guard
-    /// happened to revert first, which was protection by accident; that guard was deleted,
-    /// and this guard is
-    /// now the only one refusing the stand-ins on a real chain.
+    /// `ManualStrategy` pays a yield Qudi funds by hand, so it belongs only on the chains listed
+    /// here: anvil, Arc testnet, and Arc mainnet for the beta.
     ///
     /// The guard is a hard allowlist with no environment override on purpose: an override is a
     /// flag someone can set under pressure, and this is the one deployment mistake that cannot be
     /// undone. Adding a chain is a reviewable code change.
-    function _deployManualStrategy(address usdc_, address deployer_, string memory name_, string memory symbol_)
+    function _deployManualStrategy(address usdc_, address venue_, address owner_, address operator_)
         internal
         returns (ManualStrategy)
     {
@@ -363,7 +332,7 @@ contract Deploy is Script {
                 || block.chainid == _ARC_MAINNET_CHAIN_ID,
             "ManualStrategy: unsupported chain"
         );
-        return new ManualStrategy(IERC20(usdc_), deployer_, name_, symbol_);
+        return new ManualStrategy(IERC20(usdc_), IConfig(address(config)), venue_, owner_, operator_);
     }
 
     /// The smoke community created at the end, purely to prove clone-init, factory registration and
@@ -379,20 +348,20 @@ contract Deploy is Script {
 
         // Every tier is available from the moment the community exists:
         // nothing opens one, and the ledger resolves each tier's vault from the factory's own
-        // `pools` the first time a record names it.
+        // venue registry the first time a record names it.
         address ledger = factory.ledgerOf(communityAddr);
         require(ledger != address(0), "smoke ledger not deployed");
         require(factory.isCommunityContract(ledger), "smoke ledger not registered");
         console.log("smoke ledger:  ", ledger);
 
-        for (uint8 t; t < PoolTypes.COUNT; t++) {
+        for (uint8 t; t < _VENUES; t++) {
             require(
                 Ledger(ledger).tierVault(t) == address(vaults[t]), "smoke ledger resolves a tier to the wrong vault"
             );
             require(factory.vaultOf(communityAddr, t) == ledger, "smoke tier does not answer with the ledger");
         }
 
-        _smokeContributeWithdrawRound(deployer, usdc, ledger, PoolTypes.CORE, _SMOKE_AMOUNT);
+        _smokeContributeWithdrawRound(deployer, usdc, ledger, _CORE, _SMOKE_AMOUNT);
 
         // ---- FLEX: one instant withdrawal, proving Ledger.withdrawInstant end to end ----
         _smokeInstantWithdrawal(deployer, usdc, ledger, _SMOKE_AMOUNT);
@@ -404,9 +373,8 @@ contract Deploy is Script {
     }
 
     /// One contribute/withdraw round against the CORE ledger: contribute `amount`, queue its
-    /// full withdrawal, then cancel the request rather than waiting out CORE's real withdrawal
-    /// term (`config.withdrawTerm`, a real multi-day term this script cannot fast-forward on a
-    /// live chain). `cancelWithdraw` has no cooldown of its own, so this proves `contribute` ->
+    /// full withdrawal, then cancel the request rather than waiting out CORE's exit time (the
+    /// venue label `exitSeconds`, a real wait this script cannot fast-forward on a live chain). `cancelWithdraw` has no cooldown of its own, so this proves `contribute` ->
     /// `Venue.deposit` -> `requestWithdraw` -> `cancelWithdraw` end to end without waiting on
     /// wall-clock time.
     function _smokeContributeWithdrawRound(
@@ -448,7 +416,7 @@ contract Deploy is Script {
 
         IERC20(usdc).approve(ledger, amount);
         Ledger smokeLedger = Ledger(ledger);
-        uint256 vaultId = smokeLedger.createVault(_smokeVaultParams(PoolTypes.FLEX, "Smoke flex"));
+        uint256 vaultId = smokeLedger.createVault(_smokeVaultParams(_FLEX, "Smoke flex"));
         smokeLedger.deposit(vaultId, amount);
         require(smokeLedger.vaultBalance(vaultId) == amount, "smoke FLEX deposit did not credit the vault");
 

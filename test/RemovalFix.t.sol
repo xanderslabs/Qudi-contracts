@@ -9,7 +9,7 @@ import {Community} from "../src/Community.sol";
 import {Seats} from "../src/Seats.sol";
 import {ICommunity} from "../src/interfaces/ICommunity.sol";
 import {ICommunityInit} from "../src/interfaces/ICommunityInit.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockVault, MockCreditCoreLeg} from "./mocks/MockSeatSiblings.sol";
@@ -71,7 +71,7 @@ contract RemovalFixTest is InviteSigner {
             creator: host,
             seatPrice: 50e6,
             name: "Fix Community",
-            poolType: PoolTypes.CORE
+            poolType: VenueIds.CORE
         });
         community.initialize(w);
         vault.initialize(w);

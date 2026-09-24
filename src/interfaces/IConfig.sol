@@ -13,7 +13,6 @@ interface IConfig {
     function inviteLimits() external view returns (uint32 maxUses, uint64 maxTtl);
     function mintSplit() external view returns (uint16 host, uint16 pool, uint16 protocol);
     function epochLength() external view returns (uint64);
-    function withdrawTerm(uint8 poolType) external view returns (uint64);
     function hostVote() external view returns (uint16 thresholdBps, uint64 window);
     function communityVote() external view returns (uint16 thresholdBps, uint64 window);
     /// The shared-vault withdrawal's two bars, both counts of people.
@@ -41,20 +40,18 @@ interface IConfig {
         view
         returns (uint8 minMembers, uint8 cleanEpochs, uint8 memberMonths, uint8 maxGapMonths);
     function yieldSplit() external view returns (uint16 memberBps, uint16 poolBps, uint16 protocolBps);
-    function navPauseThresholdBps() external view returns (uint16);
     function instantTierFloorBps() external view returns (uint16);
     function slowTierCeilingBps() external view returns (uint16);
     function maxNoticePeriod() external view returns (uint64);
     function globalDepositCap() external view returns (uint256);
+    /// The ceiling on any Venue's `maxRate`, in annual bps.
+    function maxRateCeilingBps() external view returns (uint16);
+    /// The ceiling on `ManualStrategy.setRate`, in annual bps.
+    function manualRateCeilingBps() external view returns (uint16);
     function protocolTreasury() external view returns (address);
     function complianceRegistry() external view returns (address);
     function memberSeasoningWindow() external view returns (uint64);
-    // The Yield Engine, vault half. The unlock window, the harvest
-    // idempotency period and the deviation-breaker multiple, read together because
-    // `Venue.harvest` needs all three.
-    function yieldEngine() external view returns (uint64 unlockPeriod, uint64 harvestPeriod, uint16 deviationX100);
     function usdc() external view returns (address);
-    function flexBufferTargetBps() external view returns (uint16);
     function minLendable() external view returns (uint256);
     function globalMemberCap() external view returns (uint256);
     function exposureImpactMultX100() external view returns (uint256);

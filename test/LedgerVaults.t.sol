@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {LedgerFixture} from "./helpers/LedgerFixture.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {VaultStatus} from "../src/VaultStatus.sol";
 
 /// The vault record divides a tier position without fragmenting it,
@@ -20,19 +20,19 @@ contract LedgerVaultsTest is LedgerFixture {
     /// CORE, funded and withdrawn independently, while the ledger holds exactly one position
     /// in the one CORE tier vault throughout.
     function test_twoVaultsOneTier_positionStaysWhole() public {
-        uint256 rent = _personal(ada, PoolTypes.CORE, 0);
-        uint256 school = _personal(ada, PoolTypes.CORE, 0);
+        uint256 rent = _personal(ada, VenueIds.CORE, 0);
+        uint256 school = _personal(ada, VenueIds.CORE, 0);
         assertTrue(rent != school, "two records, two ids");
 
         _deposit(ada, rent, 300e6);
         assertEq(ledger.vaultUnits(rent), 300e6);
         assertEq(ledger.vaultUnits(school), 0);
-        assertEq(ledger.tierUnits(PoolTypes.CORE), 300e6);
+        assertEq(ledger.tierUnits(VenueIds.CORE), 300e6);
 
         _deposit(ada, school, 200e6);
         assertEq(ledger.vaultUnits(rent), 300e6, "the second vault did not disturb the first");
         assertEq(ledger.vaultUnits(school), 200e6);
-        assertEq(ledger.tierUnits(PoolTypes.CORE), 500e6);
+        assertEq(ledger.tierUnits(VenueIds.CORE), 500e6);
 
         // One depositor of the tier vault, holding the whole position: not two.
         assertEq(coreVault.balanceOf(address(ledger)), 500e6, "the tier position is one position");
@@ -40,13 +40,13 @@ contract LedgerVaultsTest is LedgerFixture {
         // Withdraw from one and the other is untouched.
         vm.prank(ada);
         uint256 id = ledger.requestWithdraw(rent, 100e6);
-        vm.warp(block.timestamp + config.withdrawTerm(PoolTypes.CORE));
+        vm.warp(block.timestamp + exitOf(VenueIds.CORE));
         vm.prank(ada);
         ledger.executeWithdraw(id);
 
         assertEq(ledger.vaultUnits(rent), 200e6);
         assertEq(ledger.vaultUnits(school), 200e6, "a withdrawal from one record did not touch the other");
-        assertEq(ledger.tierUnits(PoolTypes.CORE), 400e6);
+        assertEq(ledger.tierUnits(VenueIds.CORE), 400e6);
         assertEq(coreVault.balanceOf(address(ledger)), 400e6);
     }
 
@@ -68,37 +68,37 @@ contract LedgerVaultsTest is LedgerFixture {
 
     function test_bothTierUnitsEqualitiesHoldThroughout() public {
         uint256[] memory ids = new uint256[](2);
-        ids[0] = _personal(ada, PoolTypes.CORE, 0);
-        ids[1] = _personal(ada, PoolTypes.CORE, 0);
-        _assertTierReconciles(PoolTypes.CORE, ids);
+        ids[0] = _personal(ada, VenueIds.CORE, 0);
+        ids[1] = _personal(ada, VenueIds.CORE, 0);
+        _assertTierReconciles(VenueIds.CORE, ids);
 
         _deposit(ada, ids[0], 300e6);
-        _assertTierReconciles(PoolTypes.CORE, ids);
+        _assertTierReconciles(VenueIds.CORE, ids);
 
         _deposit(ada, ids[1], 200e6);
-        _assertTierReconciles(PoolTypes.CORE, ids);
+        _assertTierReconciles(VenueIds.CORE, ids);
 
         vm.prank(ada);
         uint256 id = ledger.requestWithdraw(ids[0], 100e6);
-        _assertTierReconciles(PoolTypes.CORE, ids);
+        _assertTierReconciles(VenueIds.CORE, ids);
 
-        vm.warp(block.timestamp + config.withdrawTerm(PoolTypes.CORE));
+        vm.warp(block.timestamp + exitOf(VenueIds.CORE));
         vm.prank(ada);
         ledger.executeWithdraw(id);
-        _assertTierReconciles(PoolTypes.CORE, ids);
+        _assertTierReconciles(VenueIds.CORE, ids);
     }
 
     // ---- proof 3: a personal vault refuses everyone but its owner ----
 
     function test_personalVault_refusesADepositFromAnyoneButItsOwner() public {
-        uint256 id = _personal(ada, PoolTypes.FLEX, 0);
+        uint256 id = _personal(ada, VenueIds.FLEX, 0);
         vm.expectRevert(ILedger.NotVaultOwner.selector);
         vm.prank(bea);
         ledger.deposit(id, 10e6);
     }
 
     function test_personalVault_refusesAWithdrawalFromAnyoneButItsOwner() public {
-        uint256 id = _personal(ada, PoolTypes.FLEX, 0);
+        uint256 id = _personal(ada, VenueIds.FLEX, 0);
         _deposit(ada, id, 100e6);
         vm.expectRevert(ILedger.NotVaultOwner.selector);
         vm.prank(bea);
@@ -112,7 +112,7 @@ contract LedgerVaultsTest is LedgerFixture {
     // ---- proof 4: a shared vault accepts a deposit from any member ----
 
     function test_sharedVault_acceptsADepositFromAnyMember() public {
-        uint256 id = _shared(PoolTypes.FLEX);
+        uint256 id = _shared(VenueIds.FLEX);
         _deposit(ada, id, 100e6);
         _deposit(bea, id, 50e6);
         _deposit(cid, id, 25e6);
@@ -138,7 +138,7 @@ contract LedgerVaultsTest is LedgerFixture {
     /// one, because the vault-level lock the Term collapse stranded was deleted outright.
     function test_lockedUntil_isTheLedgersLockAndTheTierVaultsIsZero() public {
         uint64 maturity = uint64(block.timestamp + 90 days);
-        uint256 id = _personal(ada, PoolTypes.FLEX, maturity);
+        uint256 id = _personal(ada, VenueIds.FLEX, maturity);
         _deposit(ada, id, 100e6);
 
         vm.expectRevert(ILedger.VaultLocked.selector);
@@ -159,8 +159,8 @@ contract LedgerVaultsTest is LedgerFixture {
     /// record, which is the whole reason it could not stay on the tier vault.
     function test_lockedAndOpenVaultsShareOneTierVault() public {
         uint64 maturity = uint64(block.timestamp + 90 days);
-        uint256 locked = _personal(ada, PoolTypes.FLEX, maturity);
-        uint256 open = _personal(bea, PoolTypes.FLEX, 0);
+        uint256 locked = _personal(ada, VenueIds.FLEX, maturity);
+        uint256 open = _personal(bea, VenueIds.FLEX, 0);
         _deposit(ada, locked, 100e6);
         _deposit(bea, open, 100e6);
 
@@ -175,7 +175,7 @@ contract LedgerVaultsTest is LedgerFixture {
     // ---- proof 7: a vault holding a balance cannot be closed ----
 
     function test_closeVault_refusesWhileItHoldsABalance() public {
-        uint256 id = _personal(ada, PoolTypes.FLEX, 0);
+        uint256 id = _personal(ada, VenueIds.FLEX, 0);
         _deposit(ada, id, 100e6);
 
         vm.expectRevert(ILedger.VaultHoldsBalance.selector);
@@ -206,7 +206,7 @@ contract LedgerVaultsTest is LedgerFixture {
     /// test starts failing at its first line, which is where the work would restart.
     function test_lockedVault_refusesTheRequestAndPaysOutOnlyAfterMaturity() public {
         uint64 maturity = uint64(block.timestamp + 90 days);
-        uint256 id = _personal(ada, PoolTypes.CORE, maturity);
+        uint256 id = _personal(ada, VenueIds.CORE, maturity);
         _deposit(ada, id, 100e6);
 
         // The lock binds the paperwork as well as the money, because it binds it first.
@@ -224,7 +224,7 @@ contract LedgerVaultsTest is LedgerFixture {
         vm.prank(ada);
         ledger.executeWithdraw(req);
 
-        vm.warp(block.timestamp + config.withdrawTerm(PoolTypes.CORE));
+        vm.warp(block.timestamp + exitOf(VenueIds.CORE));
         vm.prank(ada);
         ledger.executeWithdraw(req);
         assertEq(ledger.vaultUnits(id), 90e6, "the money left once the lock had matured");
@@ -238,11 +238,11 @@ contract LedgerVaultsTest is LedgerFixture {
     function test_termRecordMustCarryALock() public {
         vm.prank(ada);
         vm.expectRevert(ILedger.TermRecordMustBeLocked.selector);
-        ledger.createVault(_params(PoolTypes.TERM, false, 0, "unlocked term"));
+        ledger.createVault(_params(VenueIds.TERM, false, 0, "unlocked term"));
 
         vm.prank(host);
         vm.expectRevert(ILedger.TermRecordMustBeLocked.selector);
-        ledger.createVault(_params(PoolTypes.TERM, true, 0, "unlocked shared term"));
+        ledger.createVault(_params(VenueIds.TERM, true, 0, "unlocked shared term"));
     }
 
     /// The other side of 1.25: a locked TERM record is still ordinary, and every other tier may
@@ -250,11 +250,11 @@ contract LedgerVaultsTest is LedgerFixture {
     function test_termWithALockIsFine_andOtherTiersNeedNone() public {
         uint64 maturity = uint64(block.timestamp + 180 days);
         vm.prank(ada);
-        uint256 term = ledger.createVault(_params(PoolTypes.TERM, false, maturity, "locked term"));
+        uint256 term = ledger.createVault(_params(VenueIds.TERM, false, maturity, "locked term"));
         assertGt(term, 0, "a locked TERM record is created normally");
 
         vm.prank(ada);
-        uint256 flex = ledger.createVault(_params(PoolTypes.FLEX, false, 0, "open flex"));
+        uint256 flex = ledger.createVault(_params(VenueIds.FLEX, false, 0, "open flex"));
         assertGt(flex, 0, "FLEX still needs no lock");
     }
 }

@@ -12,10 +12,10 @@ import {Ledger} from "../src/Ledger.sol";
 import {Venue} from "../src/Venue.sol";
 import {IConfig} from "../src/interfaces/IConfig.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
-import {MockVenue} from "./mocks/MockVenue.sol";
+import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {MockCreditCoreLeg} from "./mocks/MockSeatSiblings.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
@@ -34,7 +34,7 @@ contract LedgerNoTierGateTest is InviteSigner {
     Ledger ledger;
     MockCreditCoreLeg core;
     Venue[3] pools;
-    MockVenue[3] venues;
+    MockStrategy[3] venues;
 
     address owner = makeAddr("owner");
     address treasury = makeAddr("treasury");
@@ -57,21 +57,27 @@ contract LedgerNoTierGateTest is InviteSigner {
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
         address[3] memory poolAddrs;
         for (uint8 t = 0; t < 3; t++) {
-            pools[t] = new Venue(usdc, IConfig(address(config)), predicted, t, owner, "Qudi", "q");
+            pools[t] = new Venue(usdc, IConfig(address(config)), predicted, owner, "Qudi", "q");
             poolAddrs[t] = address(pools[t]);
         }
         Seats seats = new Seats(predicted);
-        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, poolAddrs);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
+        for (uint8 t = 0; t < 3; t++) {
+            vm.prank(owner);
+            Venue(poolAddrs[t]).setLabels(VenueIds.labels(t));
+            factory.addVenue(poolAddrs[t]);
+        }
         assertEq(address(factory), predicted);
 
         for (uint8 t = 0; t < 3; t++) {
-            venues[t] = new MockVenue(usdc, "V", "V");
+            venues[t] = new MockStrategy(usdc, address(pools[t]));
             address[] memory vs = new address[](1);
             vs[0] = address(venues[t]);
             uint16[] memory bps = new uint16[](1);
             bps[0] = 10_000;
             vm.startPrank(owner);
-            pools[t].addVenue(address(venues[t]));
+            pools[t].addStrategy(address(venues[t]), 0);
+            pools[t].setCap(address(venues[t]), type(uint256).max);
             pools[t].setWeights(vs, bps);
             vm.stopPrank();
         }
@@ -105,7 +111,7 @@ contract LedgerNoTierGateTest is InviteSigner {
         return ILedger.VaultParams({
             poolType: poolType,
             shared: shared,
-            lockedUntil: poolType == PoolTypes.TERM ? uint64(block.timestamp + 180 days) : 0,
+            lockedUntil: poolType == VenueIds.TERM ? uint64(block.timestamp + 180 days) : 0,
             contribution: 0,
             name: "vault",
             target: 0,
@@ -118,7 +124,7 @@ contract LedgerNoTierGateTest is InviteSigner {
     /// Nothing in this fixture ever opened a tier, because there is nothing to open. A member
     /// picks the risk tier for their own savings and it works.
     function test_member_opensAPersonalVaultInAnyTier() public {
-        for (uint8 t = 0; t < PoolTypes.COUNT; t++) {
+        for (uint8 t = 0; t < VenueIds.COUNT; t++) {
             vm.prank(ada);
             uint256 id = ledger.createVault(_params(t, false));
             vm.prank(ada);
@@ -134,7 +140,7 @@ contract LedgerNoTierGateTest is InviteSigner {
     /// The whole round trip in a tier nobody opened: deposit, then the money back out.
     function test_member_withdrawsFromAnUnopenedTier() public {
         vm.prank(ada);
-        uint256 id = ledger.createVault(_params(PoolTypes.TERM, false));
+        uint256 id = ledger.createVault(_params(VenueIds.TERM, false));
         vm.prank(ada);
         ledger.deposit(id, 100e6);
 
@@ -145,7 +151,7 @@ contract LedgerNoTierGateTest is InviteSigner {
         vm.warp(uint256(maturity));
         vm.prank(ada);
         uint256 req = ledger.requestWithdraw(id, 100e6);
-        vm.warp(block.timestamp + config.withdrawTerm(PoolTypes.TERM));
+        vm.warp(block.timestamp + pools[VenueIds.TERM].labels().exitSeconds);
         uint256 before = usdc.balanceOf(ada);
         vm.prank(ada);
         ledger.executeWithdraw(req);
@@ -156,7 +162,7 @@ contract LedgerNoTierGateTest is InviteSigner {
     // ---- proof 5: a host's shared vault, in a tier nobody opened ----
 
     function test_host_opensASharedVaultInAnyTier() public {
-        for (uint8 t = 0; t < PoolTypes.COUNT; t++) {
+        for (uint8 t = 0; t < VenueIds.COUNT; t++) {
             vm.prank(host);
             uint256 id = ledger.createVault(_params(t, true));
             vm.prank(ada);
@@ -185,29 +191,29 @@ contract LedgerNoTierGateTest is InviteSigner {
         usdc.approve(address(ledger2), type(uint256).max);
 
         vm.prank(ada);
-        uint256 a = ledger.createVault(_params(PoolTypes.CORE, false));
+        uint256 a = ledger.createVault(_params(VenueIds.CORE, false));
         vm.prank(ada);
         ledger.deposit(a, 300e6);
 
         vm.prank(other);
-        uint256 b = ledger2.createVault(_params(PoolTypes.CORE, false));
+        uint256 b = ledger2.createVault(_params(VenueIds.CORE, false));
         vm.prank(other);
         ledger2.deposit(b, 200e6);
 
-        assertEq(ledger.tierUnits(PoolTypes.CORE), 300e6);
-        assertEq(ledger2.tierUnits(PoolTypes.CORE), 200e6);
-        assertEq(pools[PoolTypes.CORE].totalSupply(), 500e6, "one tier vault, two communities in it");
+        assertEq(ledger.tierUnits(VenueIds.CORE), 300e6);
+        assertEq(ledger2.tierUnits(VenueIds.CORE), 200e6);
+        assertEq(pools[VenueIds.CORE].totalSupply(), 500e6, "one tier vault, two communities in it");
     }
 
     // ---- proof 6: the range guard survives the gate's removal ----
 
-    /// `poolType >= PoolTypes.COUNT` must still fail with the config's own typed error and not a
+    /// `poolType >= VenueIds.COUNT` must still fail with the config's own typed error and not a
     /// raw array-bounds panic. The guard used to live in `openPool`; removing the opt-in must not
     /// remove the guard with it.
     function test_outOfRangeTierRevertsUnknownPoolType() public {
         vm.expectRevert(IConfig.UnknownPoolType.selector);
         vm.prank(ada);
-        ledger.createVault(_params(PoolTypes.COUNT, false));
+        ledger.createVault(_params(VenueIds.COUNT, false));
 
         vm.expectRevert(IConfig.UnknownPoolType.selector);
         vm.prank(ada);
@@ -218,15 +224,9 @@ contract LedgerNoTierGateTest is InviteSigner {
         ledger.createVault(_params(7, true));
     }
 
-    /// The same guard on the other entry point that names a tier directly.
-    function test_outOfRangeTierRevertsOnTheCreditLegToo() public {
-        vm.expectRevert(IConfig.UnknownPoolType.selector);
-        ledger.claimPoolLeg(PoolTypes.COUNT);
-    }
-
     /// The view answers Qudi's deployed vault for every real tier and never panics.
     function test_tierVaultAnswersForEveryTier() public view {
-        for (uint8 t = 0; t < PoolTypes.COUNT; t++) {
+        for (uint8 t = 0; t < VenueIds.COUNT; t++) {
             assertEq(ledger.tierVault(t), address(pools[t]));
         }
     }

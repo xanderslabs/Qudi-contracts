@@ -12,7 +12,7 @@ import {Community} from "../../src/Community.sol";
 import {Seats} from "../../src/Seats.sol";
 import {ICommunity} from "../../src/interfaces/ICommunity.sol";
 import {ICommunityInit} from "../../src/interfaces/ICommunityInit.sol";
-import {PoolTypes} from "../../src/PoolTypes.sol";
+import {VenueIds} from "../helpers/VenueIds.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
 import {IERC20} from "openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {MockVault, MockCreditCoreLeg} from "../mocks/MockSeatSiblings.sol";
@@ -508,7 +508,7 @@ contract SeatsInvariantTest is StdInvariant, Test {
             creator: steward,
             seatPrice: 50e6,
             name: "Test Community",
-            poolType: PoolTypes.CORE
+            poolType: VenueIds.CORE
         });
         community.initialize(w);
         vault.initialize(w);

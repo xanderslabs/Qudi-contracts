@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {LedgerFixture} from "./helpers/LedgerFixture.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {ProposalStatus} from "../src/VaultStatus.sol";
 
 /// The shared withdrawal: a queued transfer rather than a governed decision, and a
@@ -13,7 +13,7 @@ contract LedgerSharedWithdrawalTest is LedgerFixture {
 
     function setUp() public {
         setUpLedger();
-        pot = _shared(PoolTypes.FLEX);
+        pot = _shared(VenueIds.FLEX);
         // Four depositors, so a 20% quorum and a three-vote floor are both real bars rather than
         // arithmetic that passes by being trivial.
         _deposit(ada, pot, 400e6);
@@ -140,7 +140,7 @@ contract LedgerSharedWithdrawalTest is LedgerFixture {
     function test_lockedSharedVault_refusesAProposalUntilMaturity() public {
         uint64 maturity = uint64(block.timestamp + 30 days);
         vm.prank(host);
-        uint256 locked = ledger.createVault(_params(PoolTypes.FLEX, true, maturity, "locked pot"));
+        uint256 locked = ledger.createVault(_params(VenueIds.FLEX, true, maturity, "locked pot"));
         _deposit(ada, locked, 100e6);
         _deposit(bea, locked, 100e6);
         _deposit(cid, locked, 100e6);

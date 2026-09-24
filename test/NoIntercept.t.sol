@@ -16,8 +16,8 @@ import {Community} from "../src/Community.sol";
 import {Ledger} from "../src/Ledger.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
 import {Venue} from "../src/Venue.sol";
-import {ManualStrategy} from "../src/ManualStrategy.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {MockStrategy} from "./mocks/MockStrategy.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {CreditStandingHarness} from "./helpers/CreditStandingHarness.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockCreditPoolForVault} from "./mocks/MockVaultSiblings.sol";
@@ -89,18 +89,19 @@ contract NoInterceptTest is InviteSigner {
         // Three creations sit between this nonce read and the factory: the two vaults and `Seats`,
         // each of which takes the factory address as a constructor argument.
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 3);
-        flexVault = new Venue(
-            IERC20(address(usdc)), IConfig(address(config)), predicted, PoolTypes.FLEX, address(this), "F", "F"
-        );
-        coreVault = new Venue(
-            IERC20(address(usdc)), IConfig(address(config)), predicted, PoolTypes.CORE, address(this), "C", "C"
-        );
+        flexVault = new Venue(IERC20(address(usdc)), IConfig(address(config)), predicted, address(this), "F", "F");
+        coreVault = new Venue(IERC20(address(usdc)), IConfig(address(config)), predicted, address(this), "C", "C");
         address[3] memory pools;
-        pools[PoolTypes.FLEX] = address(flexVault);
-        pools[PoolTypes.CORE] = address(coreVault);
-        pools[PoolTypes.TERM] = makeAddr("poolTerm");
+        pools[VenueIds.FLEX] = address(flexVault);
+        pools[VenueIds.CORE] = address(coreVault);
+        pools[VenueIds.TERM] = makeAddr("poolTerm");
         Seats seats = new Seats(predicted);
-        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, pools);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
+        flexVault.setLabels(VenueIds.labels(VenueIds.FLEX));
+        coreVault.setLabels(VenueIds.labels(VenueIds.CORE));
+        for (uint8 t = 0; t < 3; t++) {
+            factory.addVenue(pools[t]);
+        }
         require(address(factory) == predicted, "factory precompute mismatch");
 
         standing = new CreditStandingHarness(IConfig(address(config)), address(factory), address(this));
@@ -148,8 +149,8 @@ contract NoInterceptTest is InviteSigner {
         vm.startPrank(who);
         usdc.approve(community, SEAT);
         _invitedJoin(community, who);
-        flexVaultOf[who] = flexLedger.createVault(_vaultParams(PoolTypes.FLEX));
-        coreVaultOf[who] = flexLedger.createVault(_vaultParams(PoolTypes.CORE));
+        flexVaultOf[who] = flexLedger.createVault(_vaultParams(VenueIds.FLEX));
+        coreVaultOf[who] = flexLedger.createVault(_vaultParams(VenueIds.CORE));
         vm.stopPrank();
     }
 
@@ -204,11 +205,12 @@ contract NoInterceptTest is InviteSigner {
     /// A slow venue holding the slow tier's ceiling, so a large enough request cannot be paid
     /// instantly and the ledger hands it to the vault's FIFO queue.
     function _addSlowVenue() internal {
-        ManualStrategy instantV = new ManualStrategy(IERC20(address(usdc)), address(this), "i", "i");
-        ManualStrategy slowV = new ManualStrategy(IERC20(address(usdc)), address(this), "s", "s");
-        slowV.setRedeemDelay(2 days);
-        flexVault.addVenue(address(instantV));
-        flexVault.addVenue(address(slowV));
+        MockStrategy instantV = new MockStrategy(IERC20(address(usdc)), address(flexVault));
+        MockStrategy slowV = new MockStrategy(IERC20(address(usdc)), address(flexVault));
+        flexVault.addStrategy(address(instantV), 0);
+        flexVault.addStrategy(address(slowV), 2 days);
+        flexVault.setCap(address(instantV), type(uint256).max);
+        flexVault.setCap(address(slowV), type(uint256).max);
         address[] memory vs = new address[](2);
         uint16[] memory bps = new uint16[](2);
         vs[0] = address(instantV);
@@ -426,11 +428,11 @@ contract NoInterceptTest is InviteSigner {
         uint256 coreId = coreLedger.requestWithdraw(coreVaultOf[member], 60e6);
         vm.stopPrank();
         uint256 requestedAt = block.timestamp;
-        assertEq(flexLedger.releaseAfter(flexId), requestedAt + config.withdrawTerm(PoolTypes.FLEX), "Flex delayed");
-        assertEq(coreLedger.releaseAfter(coreId), requestedAt + config.withdrawTerm(PoolTypes.CORE), "Core delayed");
+        assertEq(flexLedger.releaseAfter(flexId), requestedAt + flexVault.labels().exitSeconds, "Flex delayed");
+        assertEq(coreLedger.releaseAfter(coreId), requestedAt + coreVault.labels().exitSeconds, "Core delayed");
 
         // And it actually executes at that moment, not only reports it.
-        vm.warp(requestedAt + config.withdrawTerm(PoolTypes.FLEX));
+        vm.warp(requestedAt + flexVault.labels().exitSeconds);
         uint256 before = usdc.balanceOf(member);
         vm.prank(member);
         flexLedger.executeWithdraw(flexId);

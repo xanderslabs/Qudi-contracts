@@ -10,7 +10,7 @@ import {Seats} from "../src/Seats.sol";
 import {Ledger} from "../src/Ledger.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
 import {Venue} from "../src/Venue.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {ICommunityInit} from "../src/interfaces/ICommunityInit.sol";
 import {ICommunityFactory} from "../src/interfaces/ICommunityFactory.sol";
 import {IConfig} from "../src/interfaces/IConfig.sol";
@@ -22,7 +22,8 @@ import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockVault, MockCreditPool} from "./mocks/MockSeatSiblings.sol";
 
 /// Deploys `Seats` naming the factory's address, then the factory, as a deployment must: `Seats`
-/// trusts one factory, fixed at its construction.
+/// trusts one factory, fixed at its construction. The deployer owns the factory and lists `pools`
+/// in the venue registry in order, so venue id `t` is `pools[t]`.
 function deployFactory(
     Vm vm_,
     address deployer,
@@ -32,7 +33,10 @@ function deployFactory(
     address[3] memory pools
 ) returns (CommunityFactory factory) {
     Seats seats = new Seats(vm_.computeCreateAddress(deployer, vm_.getNonce(deployer) + 1));
-    factory = new CommunityFactory(cfg, address(seats), communityImpl, ledgerImpl, pools);
+    factory = new CommunityFactory(cfg, address(seats), communityImpl, ledgerImpl, deployer);
+    for (uint256 t; t < 3; t++) {
+        factory.addVenue(pools[t]);
+    }
 }
 
 contract FactoryTest is Test {
@@ -40,7 +44,7 @@ contract FactoryTest is Test {
     CommunityFactory factory;
     MockUSDC usdc; // real ERC20 so createCommunity's founding-mint transferFrom has code to call
 
-    // Distinct dummy addresses, one per PoolTypes index. MockCommunityModule.setVault only records
+    // Distinct dummy addresses, one per venue id. MockCommunityModule.setVault only records
     // what it was handed, so these never need to answer real Venue calls; only their
     // identity is asserted.
     address[3] poolAddrs;
@@ -95,12 +99,11 @@ contract FactoryTest is Test {
 
         // Every tier is available from the moment the community exists, so every
         // one of them answers with the ledger and nothing has to be opened first.
-        for (uint8 t = 0; t < PoolTypes.COUNT; t++) {
+        for (uint8 t = 0; t < VenueIds.COUNT; t++) {
             assertEq(factory.vaultOf(community, t), ledger);
-            assertEq(factory.vaultsOf(community)[t], ledger);
-            assertEq(factory.pools(t), poolAddrs[t], "and Qudi's own vault sits behind it");
+            assertEq(factory.venueAt(t), poolAddrs[t], "and Qudi's own vault sits behind it");
         }
-        assertEq(factory.vaultOf(community, PoolTypes.COUNT), address(0), "no tier above the range");
+        assertEq(factory.vaultOf(community, VenueIds.COUNT), address(0), "no tier above the range");
     }
 
     /// `contractRegistry` carries the community id plus one, written at both registration
@@ -143,7 +146,7 @@ contract FactoryTest is Test {
         address communityImpl = address(new MockCommunityModule());
         address ledgerImpl = address(new MockCommunityModule());
         vm.expectRevert(CommunityFactory.SeatsNotWiredToThisFactory.selector);
-        new CommunityFactory(address(cfg), address(wrong), communityImpl, ledgerImpl, poolAddrs);
+        new CommunityFactory(address(cfg), address(wrong), communityImpl, ledgerImpl, address(this));
     }
 
     function test_strangerCannotSpoofRegistry() public {
@@ -171,9 +174,9 @@ contract FactoryTierResolutionTest is Test {
     MockUSDC usdc;
     Config cfg;
     CommunityFactory factory;
-    Venue[3] vaults; // one per tier, indexed by the PoolTypes constant. 3 is PoolTypes.COUNT,
-    // spelled out because a library constant is not a valid array length.
-    Venue coreVault; // vaults[PoolTypes.CORE]
+    Venue[3] vaults; // one per venue id. 3 is VenueIds.COUNT, spelled out because a library
+    // constant is not a valid array length.
+    Venue coreVault; // vaults[VenueIds.CORE]
 
     address owner = makeAddr("owner");
 
@@ -181,24 +184,26 @@ contract FactoryTierResolutionTest is Test {
         usdc = new MockUSDC();
         cfg = new Config(address(usdc), makeAddr("treasury"), address(new ComplianceRegistry(address(this))));
         address[3] memory poolAddrs;
-        for (uint8 i; i < PoolTypes.COUNT; i++) {
+        for (uint8 i; i < VenueIds.COUNT; i++) {
             // `factory_` is not exercised by these tests (no deposit/redeem flows), so the
             // placeholder avoids the vault/factory circular-constructor dance real deployments
             // need (see script/Deploy.s.sol).
-            vaults[i] = new Venue(usdc, IConfig(address(cfg)), address(this), i, owner, "Qudi Pool", "qP");
+            vaults[i] = new Venue(usdc, IConfig(address(cfg)), address(this), owner, "Qudi Pool", "qP");
+            vm.prank(owner);
+            vaults[i].setLabels(VenueIds.labels(i));
             poolAddrs[i] = address(vaults[i]);
         }
-        coreVault = vaults[PoolTypes.CORE];
+        coreVault = vaults[VenueIds.CORE];
         factory = deployFactory(
             vm, address(this), address(cfg), address(new MockCommunityModule()), address(new Ledger()), poolAddrs
         );
     }
 
-    /// `pools` is the whole of what decides which tiers exist, and it is Qudi's. A ledger reads it
-    /// to resolve the tier a vault record named; no community has a say in it.
+    /// The venue registry is the whole of what decides which venues exist, and it is Qudi's. A
+    /// ledger reads it to resolve the venue a vault record named; no community has a say in it.
     function test_poolsIsQudisAndAnswersEveryTier() public view {
-        for (uint8 t = 0; t < PoolTypes.COUNT; t++) {
-            assertEq(factory.pools(t), address(vaults[t]));
+        for (uint8 t = 0; t < VenueIds.COUNT; t++) {
+            assertEq(factory.venueAt(t), address(vaults[t]));
         }
     }
 
@@ -210,7 +215,7 @@ contract FactoryTierResolutionTest is Test {
         assertTrue(factory.isCommunity(ledger));
         assertTrue(factory.isCommunityContract(ledger));
 
-        for (uint8 t = 0; t < PoolTypes.COUNT; t++) {
+        for (uint8 t = 0; t < VenueIds.COUNT; t++) {
             assertEq(factory.vaultOf(community, t), ledger);
             assertEq(ILedger(ledger).tierVault(t), address(vaults[t]));
         }
@@ -224,27 +229,26 @@ contract FactoryTierResolutionTest is Test {
         address ledger = factory.ledgerOf(community);
         Ledger l = Ledger(ledger);
         assertEq(address(l.community()), community);
-        assertEq(l.tierVault(PoolTypes.TERM), address(vaults[PoolTypes.TERM]));
-        assertEq(factory.vaultOf(community, PoolTypes.TERM), ledger);
+        assertEq(l.tierVault(VenueIds.TERM), address(vaults[VenueIds.TERM]));
+        assertEq(factory.vaultOf(community, VenueIds.TERM), ledger);
     }
 
     /// A tier above the range is not a tier. `vaultOf` answers 0 rather than panicking on the
     /// array, and the ledger's own view refuses with the config's typed error.
     function test_outOfRangeTier() public {
         address community = factory.createCommunity("u", 50e6);
-        assertEq(factory.vaultOf(community, PoolTypes.COUNT), address(0));
+        assertEq(factory.vaultOf(community, VenueIds.COUNT), address(0));
         assertEq(factory.vaultOf(community, 200), address(0));
 
         // Resolved before the arm: an argument that is itself a call would consume it.
         address ledger = factory.ledgerOf(community);
         vm.expectRevert(IConfig.UnknownPoolType.selector);
-        ILedger(ledger).tierVault(PoolTypes.COUNT);
+        ILedger(ledger).tierVault(VenueIds.COUNT);
     }
 
     function test_unregisteredCommunityResolvesToNothing() public {
         assertEq(factory.ledgerOf(makeAddr("stranger")), address(0));
-        assertEq(factory.vaultOf(makeAddr("stranger"), PoolTypes.FLEX), address(0));
-        assertEq(factory.vaultsOf(makeAddr("stranger"))[PoolTypes.FLEX], address(0));
+        assertEq(factory.vaultOf(makeAddr("stranger"), VenueIds.FLEX), address(0));
     }
 }
 

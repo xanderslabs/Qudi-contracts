@@ -10,16 +10,20 @@ interface ICommunityFactory {
     function createCommunity(string calldata name, uint256 seatPrice) external returns (address community);
     /// The community's one ledger; 0 if `community` is not one this factory created.
     function ledgerOf(address community) external view returns (address);
-    /// Qudi's shared `Venue` for a tier, indexed by the PoolTypes constant. This is the whole
-    /// of what decides which tiers exist, and a ledger reads it to resolve the tier
-    /// a vault record named. Panics above `PoolTypes.COUNT`; callers range-guard first.
-    function pools(uint256 poolType) external view returns (address);
-    // vaultOf/vaultsOf/isCommunity answer with the community's LEDGER address (the Venue a tier
-    // shares across every community is `pools(poolType)`, not a per-community address). There
-    // is one ledger and every tier is available to it, so every
-    // tier below PoolTypes.COUNT answers with the same address.
+    /// Lists `venue` under the next id, from zero, and makes it active. Owner only.
+    function addVenue(address venue) external returns (uint256 id);
+    /// No new vault may choose venue `id`. Its money is untouched and nothing is removed. Owner
+    /// only.
+    function retireVenue(uint256 id) external;
+    /// The venue listed under `id`. Reverts `UnknownVenue` for an id never handed out.
+    function venueAt(uint256 id) external view returns (address);
+    function venueCount() external view returns (uint256);
+    /// Listed and not retired: the venues a new vault may choose.
+    function isActiveVenue(uint256 id) external view returns (bool);
+    // vaultOf/isCommunity answer with the community's LEDGER address (the Venue a vault record
+    // names is `venueAt(id)`, shared by every community). There is one ledger and every venue is
+    // available to it, so every listed id answers with the same address.
     function vaultOf(address community, uint8 poolType) external view returns (address);
-    function vaultsOf(address community) external view returns (address[3] memory);
     function isCommunity(address vault) external view returns (bool);
     function isCommunityContract(address any) external view returns (bool);
     /// The community a registered community contract belongs to, **plus one**; 0 means unregistered.
@@ -32,7 +36,11 @@ interface ICommunityFactory {
     function communityAt(uint256 i) external view returns (address community);
 
     event CommunityCreated(uint256 indexed communityId, address indexed creator, address community, address ledger);
+    event VenueAdded(uint256 indexed id, address venue);
+    event VenueRetired(uint256 indexed id);
 
     error SeatPriceBelowFloor();
     error SeatPriceAboveCeiling();
+    /// A venue id that was never handed out.
+    error UnknownVenue();
 }

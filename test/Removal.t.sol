@@ -15,7 +15,7 @@ import {IConfig} from "../src/interfaces/IConfig.sol";
 import {ICommunity} from "../src/interfaces/ICommunity.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
 import {ICreditCore} from "../src/interfaces/ICreditCore.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {CreditCoreHarness} from "./helpers/CreditCoreHarness.sol";
@@ -95,10 +95,15 @@ contract RemovalTest is InviteSigner {
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
         address[3] memory poolAddrs;
         for (uint8 t = 0; t < 3; t++) {
-            poolAddrs[t] = address(new Venue(usdc, IConfig(address(config)), predicted, t, governance, "Qudi", "q"));
+            poolAddrs[t] = address(new Venue(usdc, IConfig(address(config)), predicted, governance, "Qudi", "q"));
         }
         Seats seats = new Seats(predicted);
-        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, poolAddrs);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
+        for (uint8 t = 0; t < 3; t++) {
+            vm.prank(governance);
+            Venue(poolAddrs[t]).setLabels(VenueIds.labels(t));
+            factory.addVenue(poolAddrs[t]);
+        }
         assertEq(address(factory), predicted, "the tier vaults are wired to this factory");
 
         standing = new CreditStandingHarness(IConfig(address(config)), address(factory), governance);
@@ -224,7 +229,7 @@ contract RemovalTest is InviteSigner {
         vm.prank(who);
         id = ledger.createVault(
             ILedger.VaultParams({
-                poolType: PoolTypes.FLEX,
+                poolType: VenueIds.FLEX,
                 shared: false,
                 lockedUntil: 0,
                 contribution: 0,
@@ -239,7 +244,7 @@ contract RemovalTest is InviteSigner {
         vm.prank(host);
         id = ledger.createVault(
             ILedger.VaultParams({
-                poolType: PoolTypes.FLEX,
+                poolType: VenueIds.FLEX,
                 shared: true,
                 lockedUntil: 0,
                 contribution: 0,

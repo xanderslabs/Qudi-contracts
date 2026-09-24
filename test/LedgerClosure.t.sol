@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {LedgerFixture} from "./helpers/LedgerFixture.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {VaultStatus} from "../src/VaultStatus.sol";
 
 /// Every cell of the closure table, one test per cell, plus the two community-closure guards.
@@ -26,16 +26,15 @@ contract LedgerClosureTest is LedgerFixture {
         usdc.mint(address(this), amount);
         usdc.approve(address(flexVenue), amount);
         flexVenue.fund(amount);
-        flexVault.harvest(address(flexVenue));
-        (uint64 unlock,,) = config.yieldEngine();
-        vm.warp(block.timestamp + unlock);
+        // A year is long enough for the Venue's growth cap to let the whole gain through.
+        vm.warp(block.timestamp + 365 days);
     }
 
     // ---- row Active ----
 
     /// Active / Deposits: yes.
     function test_active_acceptsDeposits() public {
-        uint256 id = _personal(ada, PoolTypes.FLEX, 0);
+        uint256 id = _personal(ada, VenueIds.FLEX, 0);
         _deposit(ada, id, 100e6);
         assertEq(ledger.vaultUnits(id), 100e6);
     }
@@ -43,8 +42,8 @@ contract LedgerClosureTest is LedgerFixture {
     /// Active / Withdrawals: per the vault's rules. The open record pays, the locked one refuses,
     /// and "per the vault's rules" is exactly that difference.
     function test_active_withdrawalsFollowTheVaultsOwnRules() public {
-        uint256 open = _personal(ada, PoolTypes.FLEX, 0);
-        uint256 locked = _personal(bea, PoolTypes.FLEX, uint64(block.timestamp + 30 days));
+        uint256 open = _personal(ada, VenueIds.FLEX, 0);
+        uint256 locked = _personal(bea, VenueIds.FLEX, uint64(block.timestamp + 30 days));
         _deposit(ada, open, 100e6);
         _deposit(bea, locked, 100e6);
 
@@ -57,30 +56,20 @@ contract LedgerClosureTest is LedgerFixture {
         ledger.withdrawInstant(locked, 1e6);
     }
 
-    /// Active / Yield: yes. A harvest reaches the record's balance.
+    /// Active / Yield: yes. A strategy gain reaches the record's balance.
     function test_active_earnsYield() public {
-        uint256 id = _personal(ada, PoolTypes.FLEX, 0);
+        uint256 id = _personal(ada, VenueIds.FLEX, 0);
         _deposit(ada, id, 1_000e6);
         uint256 before = ledger.vaultBalance(id);
         _gain(100e6);
         assertGt(ledger.vaultBalance(id), before, "an active vault earns");
     }
 
-    /// Active / Credit: yes. The 15% credit leg reaches this community's balance at CreditCore.
-    function test_active_forwardsTheCreditLeg() public {
-        uint256 id = _personal(ada, PoolTypes.FLEX, 0);
-        _deposit(ada, id, 1_000e6);
-        _gain(100e6);
-        uint256 assets = ledger.claimPoolLeg(PoolTypes.FLEX);
-        assertApproxEqAbs(assets, 15e6, 2);
-        assertEq(creditCore.legOf(0), assets, "booked against this community");
-    }
-
     // ---- row Closed ----
 
     /// Closed / Deposits: no. Nothing in, which is the first half of the invariant.
     function test_closed_refusesDeposits() public {
-        uint256 id = _personal(ada, PoolTypes.FLEX, 0);
+        uint256 id = _personal(ada, VenueIds.FLEX, 0);
         _deposit(ada, id, 100e6);
         _closeCommunity();
 
@@ -95,12 +84,12 @@ contract LedgerClosureTest is LedgerFixture {
         _closeCommunity();
         vm.expectRevert(ILedger.CommunityIsClosed.selector);
         vm.prank(ada);
-        ledger.createVault(_params(PoolTypes.FLEX, false, 0, "too late"));
+        ledger.createVault(_params(VenueIds.FLEX, false, 0, "too late"));
     }
 
     /// Closed / Withdrawals: yes. What is in comes out, which is the second half.
     function test_closed_stillPaysWithdrawals() public {
-        uint256 id = _personal(ada, PoolTypes.FLEX, 0);
+        uint256 id = _personal(ada, VenueIds.FLEX, 0);
         _deposit(ada, id, 100e6);
         _closeCommunity();
 
@@ -111,55 +100,37 @@ contract LedgerClosureTest is LedgerFixture {
 
     /// Closed / Withdrawals: yes on the queued path as well.
     function test_closed_stillPaysAQueuedWithdrawal() public {
-        uint256 core = _personal(bea, PoolTypes.CORE, 0);
+        uint256 core = _personal(bea, VenueIds.CORE, 0);
         _deposit(bea, core, 100e6);
         _closeCommunity();
 
         vm.prank(bea);
         uint256 id = ledger.requestWithdraw(core, 100e6);
-        vm.warp(block.timestamp + config.withdrawTerm(PoolTypes.CORE));
+        vm.warp(block.timestamp + exitOf(VenueIds.CORE));
         vm.prank(bea);
         ledger.executeWithdraw(id);
         assertEq(ledger.vaultUnits(core), 0);
     }
 
-    /// Closed / Credit: no. The credit leg stops reaching the community's balance, which is the
-    /// seam this contract owns. The yield cell's other half is an open question.
-    function test_closed_refusesTheCreditLeg() public {
-        uint256 id = _personal(ada, PoolTypes.FLEX, 0);
-        _deposit(ada, id, 1_000e6);
-        _gain(100e6);
-        _closeCommunity();
-
-        vm.expectRevert(ILedger.CommunityIsClosed.selector);
-        ledger.claimPoolLeg(PoolTypes.FLEX);
-        assertEq(creditCore.legOf(0), 0, "nothing reached the community's credit balance");
-    }
-
-    /// Closed / Yield: no, at the seam the ledger owns. No further principal can be put to work
-    /// and the community's yield leg is refused, so nothing the ledger controls goes on earning
-    /// for it. What the ledger cannot do on its own is stop the tier vault's share price moving
-    /// under a personal balance that has not been withdrawn yet: taking that position out at
-    /// closure is a liquidation mechanism nothing specifies, and it is an open question rather
-    /// than something decided here. This test pins the enforced half and states the other.
+    /// Closed / Yield: no, at the seam the ledger owns. No further principal can be put to work.
+    /// What the ledger cannot do on its own is stop the tier vault's share price moving under a
+    /// personal balance that has not been withdrawn yet: taking that position out at closure is a
+    /// liquidation mechanism nothing specifies, and it is an open question rather than something
+    /// decided here. This test pins the enforced half and states the other.
     function test_closed_putsNoFurtherPrincipalToWork() public {
-        uint256 id = _personal(ada, PoolTypes.FLEX, 0);
+        uint256 id = _personal(ada, VenueIds.FLEX, 0);
         _deposit(ada, id, 1_000e6);
         _closeCommunity();
 
         vm.expectRevert(ILedger.CommunityIsClosed.selector);
         vm.prank(ada);
         ledger.deposit(id, 1_000e6);
-
-        _gain(100e6);
-        vm.expectRevert(ILedger.CommunityIsClosed.selector);
-        ledger.claimPoolLeg(PoolTypes.FLEX);
     }
 
     // ---- proof 8: the two community-closure guards ----
 
     function test_communityCannotCloseWhileASharedVaultHoldsABalance() public {
-        uint256 pot = _shared(PoolTypes.FLEX);
+        uint256 pot = _shared(VenueIds.FLEX);
         _deposit(ada, pot, 100e6);
 
         vm.expectRevert(ILedger.SharedVaultHoldsBalance.selector);
@@ -168,7 +139,7 @@ contract LedgerClosureTest is LedgerFixture {
     }
 
     function test_communityCanCloseWhileAPersonalVaultHoldsABalance() public {
-        uint256 mine = _personal(ada, PoolTypes.FLEX, 0);
+        uint256 mine = _personal(ada, VenueIds.FLEX, 0);
         _deposit(ada, mine, 100e6);
 
         vm.prank(host);
@@ -197,7 +168,7 @@ contract LedgerClosureTest is LedgerFixture {
     /// A closed shared vault at zero does not block the community, which is the other side of
     /// the shared-balance guard: the guard is about money, not about records.
     function test_communityClosesOnceEverySharedVaultIsEmptied() public {
-        uint256 pot = _shared(PoolTypes.FLEX);
+        uint256 pot = _shared(VenueIds.FLEX);
         _deposit(ada, pot, 100e6);
         _passAndExecuteDrain(pot, 100e6);
 
@@ -219,7 +190,7 @@ contract LedgerClosureTest is LedgerFixture {
     function test_lockedSharedVault_blocksClosureUntilItsDateAndThenReleasesIt() public {
         uint64 maturity = uint64(block.timestamp + 30 days);
         vm.prank(host);
-        uint256 pot = ledger.createVault(_params(PoolTypes.FLEX, true, maturity, "locked pot"));
+        uint256 pot = ledger.createVault(_params(VenueIds.FLEX, true, maturity, "locked pot"));
         _deposit(ada, pot, 100e6);
         _deposit(bea, pot, 10e6);
         _deposit(cid, pot, 10e6);

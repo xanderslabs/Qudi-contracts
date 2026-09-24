@@ -9,9 +9,7 @@ import {IVenue} from "./interfaces/IVenue.sol";
 import {IConfig} from "./interfaces/IConfig.sol";
 import {ICommunity} from "./interfaces/ICommunity.sol";
 import {ICommunityFactory} from "./interfaces/ICommunityFactory.sol";
-import {ICreditCore} from "./interfaces/ICreditCore.sol";
 import {IComplianceRegistry} from "./interfaces/IComplianceRegistry.sol";
-import {PoolTypes} from "./PoolTypes.sol";
 import {VaultStatus, ProposalStatus} from "./VaultStatus.sol";
 
 /// One community's book: every vault, every tier, one contract,
@@ -49,7 +47,7 @@ contract Ledger is ILedger, ICommunityInit {
     uint32 internal constant MIN_VOTES = 3;
 
     /// Qudi's `Venue` for each tier, cached the first time this community touches it.
-    /// A cache and nothing more: the address comes from the factory's own `pools`, which is Qudi's
+    /// A cache and nothing more: the address comes from the factory's venue registry, which is Qudi's
     /// deployment, and a community has no say in it. Caching it saves an external call on every
     /// later deposit and is where the one-time USDC approval hangs; `_tier` is the only writer.
     mapping(uint8 => IVenue) internal _tierVault;
@@ -127,15 +125,13 @@ contract Ledger is ILedger, ICommunityInit {
     /// `Venue` from the factory the first time the community touches that tier, approves it
     /// for USDC once, and caches it.
     ///
-    /// The range guard lives here because this is the only door. It used to sit in the factory's
-    /// host opt-in, which was deleted, and without it `factory.pools(poolType)` would
-    /// answer an out-of-range tier with a raw array-bounds panic rather than the config's own
-    /// typed error.
+    /// The range guard lives here because this is the only door: an id the registry never handed
+    /// out is refused with the config's own typed error.
     function _tier(uint8 poolType) internal returns (IVenue tv) {
         tv = _tierVault[poolType];
         if (address(tv) != address(0)) return tv;
-        if (poolType >= PoolTypes.COUNT) revert IConfig.UnknownPoolType();
-        tv = IVenue(ICommunityFactory(factory).pools(poolType));
+        if (poolType >= ICommunityFactory(factory).venueCount()) revert IConfig.UnknownPoolType();
+        tv = IVenue(ICommunityFactory(factory).venueAt(poolType));
         _tierVault[poolType] = tv;
         IERC20(config.usdc()).forceApprove(address(tv), type(uint256).max);
         emit TierWired(poolType, address(tv));
@@ -144,9 +140,9 @@ contract Ledger is ILedger, ICommunityInit {
     /// Qudi's vault for this tier, whether or not this community has touched it yet. Answers the
     /// same address `_tier` would wire, so a reader never has to know about the cache.
     function tierVault(uint8 poolType) external view override returns (address) {
-        if (poolType >= PoolTypes.COUNT) revert IConfig.UnknownPoolType();
+        if (poolType >= ICommunityFactory(factory).venueCount()) revert IConfig.UnknownPoolType();
         IVenue tv = _tierVault[poolType];
-        return address(tv) != address(0) ? address(tv) : ICommunityFactory(factory).pools(poolType);
+        return address(tv) != address(0) ? address(tv) : ICommunityFactory(factory).venueAt(poolType);
     }
 
     // ---- the record ----
@@ -163,16 +159,14 @@ contract Ledger is ILedger, ICommunityInit {
         // Wires the tier on first use and range-guards `poolType`. Every record therefore has a
         // resolved tier vault from birth, which is what lets every money path below read the
         // cache directly.
-        _tier(p.poolType);
+        IVenue tv = _tier(p.poolType);
         // A maturity already in the past is a lock that never locked, and it is far more likely
         // to be a mistyped date than an intention. Same refusal `Venue`'s constructor makes.
         if (p.lockedUntil != 0 && p.lockedUntil <= block.timestamp) revert VaultLocked();
-        // A TERM record must carry a lock. Term is the profile for a venue
-        // that does not anticipate withdrawals and may therefore be illiquid, and the only reason
-        // that is safe is that the money is committed for a known period. An unlocked TERM record
-        // is the one combination the profile cannot support: no lock, a zero withdrawal term,
-        // and the slowest venues in the system.
-        if (p.poolType == PoolTypes.TERM && p.lockedUntil == 0) revert TermRecordMustBeLocked();
+        // A record in a Locked venue must carry a lock. A Locked venue does not anticipate
+        // withdrawals and may therefore be illiquid, and the only reason that is safe is that the
+        // money is committed for a known period.
+        if (tv.labels().kind == IVenue.Kind.Locked && p.lockedUntil == 0) revert TermRecordMustBeLocked();
 
         vaultId = ++_nextVaultId;
         Vault storage v = vaults[vaultId];
@@ -341,7 +335,7 @@ contract Ledger is ILedger, ICommunityInit {
         Vault storage v = _liveVault(vaultId);
         // Every money path reads post-settle views, so the instant-vs-queue decision and the unit
         // conversions match what the vault will do once it has settled for itself.
-        _tierVault[v.poolType].settle();
+        _tierVault[v.poolType].accrue();
         _requirePersonalWithdrawer(v);
         if (amount == 0) revert ZeroAmount();
         if (_pendingOf[vaultId] != 0) revert CooldownActive();
@@ -361,11 +355,11 @@ contract Ledger is ILedger, ICommunityInit {
         emit WithdrawRequested(id, vaultId, msg.sender, units);
     }
 
-    /// The tier's ordinary withdrawal term, and nothing else: no request waits longer because the
-    /// member owes.
+    /// The venue's stated exit time, and nothing else: no request waits longer because the member
+    /// owes.
     function releaseAfter(uint256 id) public view returns (uint256) {
         WithdrawRequest storage r = _requests[id];
-        return r.requestedAt + config.withdrawTerm(vaults[r.vaultId].poolType);
+        return r.requestedAt + _tierVault[vaults[r.vaultId].poolType].labels().exitSeconds;
     }
 
     function executeWithdraw(uint256 id) external override {
@@ -374,7 +368,7 @@ contract Ledger is ILedger, ICommunityInit {
         if (r.units == 0) revert NotRequester();
         uint256 vaultId = r.vaultId;
         Vault storage v = vaults[vaultId];
-        _tierVault[v.poolType].settle();
+        _tierVault[v.poolType].accrue();
         // Checked again here, not only at request time: the money has not left until now, and a
         // lock that let the last step through would be a lock on the paperwork.
         if (v.lockedUntil != 0 && block.timestamp < v.lockedUntil) revert VaultLocked();
@@ -407,10 +401,12 @@ contract Ledger is ILedger, ICommunityInit {
 
     function withdrawInstant(uint256 vaultId, uint256 amount) external override {
         Vault storage v = _liveVault(vaultId);
-        _tierVault[v.poolType].settle();
+        _tierVault[v.poolType].accrue();
         _requirePersonalWithdrawer(v);
         if (amount == 0) revert ZeroAmount();
-        if (v.poolType != PoolTypes.FLEX) revert InstantPathBlocked();
+        // The instant path is for an Open venue with no exit time.
+        IVenue.Labels memory l = _tierVault[v.poolType].labels();
+        if (l.kind != IVenue.Kind.Open || l.exitSeconds != 0) revert InstantPathBlocked();
 
         uint256 units = _tierVault[v.poolType].convertToShares(amount);
         if (units > vaultUnits[vaultId] - _frozenUnits[vaultId]) revert ExceedsWithdrawable();
@@ -467,30 +463,6 @@ contract Ledger is ILedger, ICommunityInit {
         v = vaults[vaultId];
         if (v.status == VaultStatus.NONE) revert UnknownVault();
         if (v.status != VaultStatus.ACTIVE) revert VaultNotActive();
-    }
-
-    // ---- the credit leg ----
-
-    /// Anyone may call it: the leg reaches this community's credit balance either way.
-    ///
-    /// The destination is the singleton `CreditCore`. The tier vault moves
-    /// the USDC there and this ledger, a registered community contract, books it against its own
-    /// community id. Which community that is comes from the factory, never from this call's
-    /// arguments: `receiveCommunityLeg` resolves the caller and refuses a mismatch.
-    ///
-    /// Refused once the community is closed: a wound-up community draws no credit,
-    /// so nothing further is booked to its balance.
-    function claimPoolLeg(uint8 poolType) external override returns (uint256 assets) {
-        if (communityClosed) revert CommunityIsClosed();
-        IVenue tv = _tier(poolType);
-        address core = config.creditCore();
-        if (core == address(0)) revert CreditCoreUnset();
-        assets = tv.claimPoolLeg(core);
-        if (assets != 0) {
-            uint256 communityId = ICommunityFactory(factory).communityIdOf(address(this)) - 1;
-            ICreditCore(core).receiveCommunityLeg(communityId, assets);
-        }
-        emit PoolLegForwarded(poolType, assets);
     }
 
     // ---- the shared withdrawal ----
@@ -572,7 +544,7 @@ contract Ledger is ILedger, ICommunityInit {
         if (recipient == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         IVenue tv = _tierVault[v.poolType];
-        tv.settle();
+        tv.accrue();
 
         uint256 units = tv.convertToShares(amount);
         if (units == 0) revert ZeroAmount();
@@ -647,7 +619,7 @@ contract Ledger is ILedger, ICommunityInit {
 
         uint256 vaultId = p.vaultId;
         Vault storage v = vaults[vaultId];
-        _tierVault[v.poolType].settle();
+        _tierVault[v.poolType].accrue();
         p.status = ProposalStatus.EXECUTED;
 
         // Exactly the units the proposal reserved, with nothing to clamp: a shared vault's only

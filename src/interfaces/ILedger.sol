@@ -15,8 +15,8 @@ pragma solidity 0.8.30;
 /// vault belongs to exactly one owner. Per-member contribution history is served from events by
 /// the indexer, which is where display data belongs.
 interface ILedger {
-    /// What a member states when they open a record. `poolType` is the tier (PoolTypes.sol) and
-    /// must already be open; `shared` picks host-created community-wide over personal;
+    /// What a member states when they open a record. `poolType` is the venue id in the
+    /// factory's registry; `shared` picks host-created community-wide over personal;
     /// `lockedUntil` is 0 for an open vault and otherwise the timestamp before which withdrawals
     /// revert; `contribution`, `name`, `target` and `targetDate` are the member's stated intent
     /// and the ledger stores them without reading them.
@@ -34,8 +34,8 @@ interface ILedger {
 
     /// Qudi's `Venue` for this tier. Every tier Qudi has deployed is available to every
     /// community and there is nothing to open: the host picks the tier when creating
-    /// a shared vault and the member picks it for their own. Reverts `UnknownPoolType` above
-    /// `PoolTypes.COUNT`.
+    /// a shared vault and the member picks it for their own. Reverts `UnknownPoolType` for an id
+    /// the registry never handed out.
     function tierVault(uint8 poolType) external view returns (address);
 
     // ---- the record ----
@@ -89,8 +89,6 @@ interface ILedger {
         view
         returns (uint256 vaultId, address receiver, uint256 units, uint64 requestedAt);
     function lastWithdrawalAt(address member) external view returns (uint64);
-    /// Anyone; forwards this tier's accrued credit leg to `CreditCore` against this community.
-    function claimPoolLeg(uint8 poolType) external returns (uint256 assets);
 
     // ---- the shared withdrawal ----
 
@@ -182,7 +180,6 @@ interface ILedger {
     event WithdrawCancelled(uint256 indexed requestId, uint256 indexed vaultId);
     event VaultClosed(uint256 indexed vaultId);
     event CommunityWoundUp();
-    event PoolLegForwarded(uint8 indexed poolType, uint256 assets);
     /// `units` is the reservation and the only figure execution acts on; `amountAtProposal` is
     /// what they were worth when the vote was asked for, for the app to show what was approved.
     event WithdrawalProposed(
@@ -233,7 +230,4 @@ interface ILedger {
     error NotPassed();
     error ProposalNotLive();
     error RevertDelayNotElapsed();
-    /// `claimPoolLeg` on a deployment whose `Config.CREDIT_CORE` is unset: the yield leg has
-    /// no community balance to land on.
-    error CreditCoreUnset();
 }

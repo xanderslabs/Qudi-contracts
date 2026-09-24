@@ -3,7 +3,6 @@ pragma solidity 0.8.30;
 
 import {Ownable2Step, Ownable} from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
 import {ConfigKeys as K} from "./ConfigKeys.sol";
-import {PoolTypes} from "./PoolTypes.sol";
 
 /// Keyed parameter store. Every value is bounded, every change is evented, and consumers
 /// read live at each use so a change binds future actions only.
@@ -24,7 +23,6 @@ contract Config is Ownable2Step {
     error SplitMismatch();
     error ZeroAddress();
     error UnknownAddressKey();
-    error UnknownPoolType();
     error TimelineOutOfOrder();
 
     /// Absolute sanity ceiling for the last stage boundary, not a design value: the
@@ -50,7 +48,6 @@ contract Config is Ownable2Step {
         _init(K.MINT_SPLIT_POOL, 4000);
         _init(K.MINT_SPLIT_PROTOCOL, 3000);
         _init(K.EPOCH_LENGTH, 30 days);
-        _init(K.WITHDRAW_TERM_CORE, 3 days);
         _init(K.HOST_VOTE_THRESHOLD_BPS, 6667);
         _init(K.HOST_VOTE_WINDOW, 7 days);
         _init(K.COMMUNITY_VOTE_THRESHOLD_BPS, 5001);
@@ -91,7 +88,6 @@ contract Config is Ownable2Step {
         _init(K.YIELD_SPLIT_MEMBER, 7000);
         _init(K.YIELD_SPLIT_POOL, 1500);
         _init(K.YIELD_SPLIT_PROTOCOL, 1500);
-        _init(K.NAV_PAUSE_BPS, 9950);
         _init(K.INSTANT_TIER_FLOOR_BPS, 2500);
         _init(K.SLOW_TIER_CEILING_BPS, 2500);
         _init(K.MAX_NOTICE_PERIOD, 30 days);
@@ -99,10 +95,6 @@ contract Config is Ownable2Step {
         _init(K.PROTOCOL_TREASURY, uint160(treasury_));
         _init(K.COMPLIANCE_REGISTRY, uint160(complianceRegistry_));
         _init(K.MEMBER_SEASONING_WINDOW, 14 days);
-        // Locked-vault early break. The bounds are sanity ranges, not design values.
-        _init(K.WITHDRAW_TERM_FLEX, 1 days);
-        _init(K.FLEX_BUFFER_TARGET_BPS, 1000);
-        _init(K.WITHDRAW_TERM_TERM, 0);
         // Retained-capital launch values. USDC 6-decimal amounts; bps for percentages.
         _init(K.OPERATING_BUFFER_PER_COMMUNITY, 2000e6);
         _init(K.OPERATING_FLOOR_GLOBAL, 10_000e6);
@@ -145,12 +137,10 @@ contract Config is Ownable2Step {
         // The debt half. CREDIT_CORE stays zero until the deployment that owns the
         // CreditCore singleton sets it; te earn increment launch value pending calibration.
         _init(K.TE_EARN_INCREMENT, 100e6);
-        // The Yield Engine, vault half. The unlock period's launch value is the 1-day floor
-        // for testnet; the other two are starting points in the same posture, calibrated
-        // with the rest later.
-        _init(K.UNLOCK_PERIOD, 1 days);
-        _init(K.HARVEST_PERIOD, 1 days);
-        _init(K.HARVEST_DEVIATION_X100, 300); // breaker: 3x the venue's historical average
+        // 20% a year, well above every venue's gross return, so each venue's own `maxRate` is
+        // what binds and this only stops a fat-fingered one.
+        _init(K.MAX_RATE_CEILING_BPS, 2000);
+        _init(K.MANUAL_RATE_CEILING_BPS, 2000);
     }
 
     function _init(bytes32 key, uint256 v) internal {
@@ -233,8 +223,6 @@ contract Config is Ownable2Step {
         if (key == K.INVITE_MAX_USES) return (1, 150);
         if (key == K.INVITE_MAX_TTL) return (1 days, 90 days);
         if (key == K.EPOCH_LENGTH) return (1 days, 90 days);
-        if (key == K.WITHDRAW_TERM_CORE) return (0, 30 days);
-        if (key == K.WITHDRAW_TERM_FLEX) return (0, 30 days);
         if (key == K.HOST_VOTE_THRESHOLD_BPS) return (5001, 10_000);
         if (key == K.HOST_VOTE_WINDOW) return (1 days, 30 days);
         if (key == K.COMMUNITY_VOTE_THRESHOLD_BPS) return (5001, 10_000);
@@ -267,7 +255,6 @@ contract Config is Ownable2Step {
         if (key == K.ELIG_CLEAN_EPOCHS) return (0, 12);
         if (key == K.ELIG_MEMBER_MONTHS) return (0, 24);
         if (key == K.ELIG_MAX_GAP_MONTHS) return (0, 12);
-        if (key == K.NAV_PAUSE_BPS) return (9000, 10_000);
         if (key == K.INSTANT_TIER_FLOOR_BPS) return (0, 10_000);
         if (key == K.SLOW_TIER_CEILING_BPS) return (0, 10_000);
         if (key == K.MAX_NOTICE_PERIOD) return (0, 30 days);
@@ -279,8 +266,6 @@ contract Config is Ownable2Step {
         // is the wrong bound): 25 bps is half the set fee, 1 day a third of the set delay.
         // The upper bounds are sanity ranges, not design values.
         if (key == K.GLOBAL_DEPOSIT_CAP) return (0, type(uint256).max);
-        if (key == K.FLEX_BUFFER_TARGET_BPS) return (0, 10_000);
-        if (key == K.WITHDRAW_TERM_TERM) return (0, 30 days);
         // Retained-capital bounds. These are sanity ranges, not design values; they follow
         // the contract's existing bps and dollar-amount precedent.
         if (key == K.OPERATING_BUFFER_PER_COMMUNITY) return (0, 1_000_000e6);
@@ -334,36 +319,24 @@ contract Config is Ownable2Step {
         // The calibrated value comes later; this sanity range follows the other
         // Standing dollar-amount parameters.
         if (key == K.TE_EARN_INCREMENT) return (0, 1_000_000e6);
-        // This range is part of the design, not a sanity guess: the Risk Committee may
-        // move the unlock period only inside [1 day, 30 days]. A floor of zero would repeal
-        // the gradual release entirely by releasing every harvest in the block it lands in.
-        if (key == K.UNLOCK_PERIOD) return (1 days, 30 days);
-        // Harvests are idempotent by venue and period, with no length set by the design. The floor keeps
-        // a period from collapsing to a block, which would make "once per period" no limit at
-        // all; the ceiling matches the contract's other long windows.
-        if (key == K.HARVEST_PERIOD) return (1 hours, 30 days);
-        // The breaker multiple, in hundredths. Both ends bind. At or below 100 the breaker
-        // would fire on a harvest at the venue's own average and pause the vault permanently;
-        // at a large enough multiple it can never fire and the mechanism is dead while
-        // formally in range (the same shape as the venue limits).
-        if (key == K.HARVEST_DEVIATION_X100) return (101, 10_000);
+        // Sanity ranges, not design values. The floor keeps a governed change from setting the
+        // ceiling to zero, which would freeze every venue's price and every strategy's yield; the
+        // ceiling is 100% a year, past which no savings rate is plausible.
+        if (key == K.MAX_RATE_CEILING_BPS) return (1, 10_000);
+        if (key == K.MANUAL_RATE_CEILING_BPS) return (1, 10_000);
         return (1, 0); // composite, address, or unknown: scalar set always reverts
     }
 
     // ---- typed getters (surface mirrored in interfaces/IConfig.sol) ----
 
-    /// The three Yield Engine parameters, together, because `Venue.harvest` needs all three
-    /// in one call: the window a harvest's member leg releases linearly over, the
-    /// length of the period a harvest is idempotent within, and the multiple of a venue's
-    /// historical average gain above which one harvest pauses attribution instead of being
-    /// processed, in hundredths, so 300 is 3x.
-    function yieldEngine() external view returns (uint64 unlockPeriod, uint64 harvestPeriod, uint16 deviationX100) {
-        return
-            (
-                uint64(values[K.UNLOCK_PERIOD]),
-                uint64(values[K.HARVEST_PERIOD]),
-                uint16(values[K.HARVEST_DEVIATION_X100])
-            );
+    /// The ceiling on any Venue's `maxRate`, in annual bps.
+    function maxRateCeilingBps() external view returns (uint16) {
+        return uint16(values[K.MAX_RATE_CEILING_BPS]);
+    }
+
+    /// The ceiling on `ManualStrategy.setRate`, in annual bps.
+    function manualRateCeilingBps() external view returns (uint16) {
+        return uint16(values[K.MANUAL_RATE_CEILING_BPS]);
     }
 
     function seatPriceFloor() external view returns (uint256) {
@@ -393,13 +366,6 @@ contract Config is Ownable2Step {
 
     function epochLength() external view returns (uint64) {
         return uint64(values[K.EPOCH_LENGTH]);
-    }
-
-    function withdrawTerm(uint8 poolType) external view returns (uint64) {
-        if (poolType == PoolTypes.FLEX) return uint64(values[K.WITHDRAW_TERM_FLEX]);
-        if (poolType == PoolTypes.CORE) return uint64(values[K.WITHDRAW_TERM_CORE]);
-        if (poolType == PoolTypes.TERM) return uint64(values[K.WITHDRAW_TERM_TERM]);
-        revert UnknownPoolType();
     }
 
     function hostVote() external view returns (uint16 thresholdBps, uint64 window) {
@@ -491,10 +457,6 @@ contract Config is Ownable2Step {
         );
     }
 
-    function navPauseThresholdBps() external view returns (uint16) {
-        return uint16(values[K.NAV_PAUSE_BPS]);
-    }
-
     function instantTierFloorBps() external view returns (uint16) {
         return uint16(values[K.INSTANT_TIER_FLOOR_BPS]);
     }
@@ -521,10 +483,6 @@ contract Config is Ownable2Step {
 
     function memberSeasoningWindow() external view returns (uint64) {
         return uint64(values[K.MEMBER_SEASONING_WINDOW]);
-    }
-
-    function flexBufferTargetBps() external view returns (uint16) {
-        return uint16(values[K.FLEX_BUFFER_TARGET_BPS]);
     }
 
     // ---- retained-capital getters ----

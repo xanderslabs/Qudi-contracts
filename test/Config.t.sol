@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {Config} from "../src/Config.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {IConfig} from "../src/interfaces/IConfig.sol";
 
 contract ConfigTest is Test {
@@ -46,7 +46,6 @@ contract ConfigTest is Test {
         assertEq(ym, 7000);
         assertEq(yp, 1500);
         assertEq(ypr, 1500);
-        assertEq(cfg.navPauseThresholdBps(), 9950);
         assertEq(cfg.instantTierFloorBps(), 2500);
         assertEq(cfg.slowTierCeilingBps(), 2500);
         assertEq(cfg.maxNoticePeriod(), 30 days);
@@ -121,7 +120,7 @@ contract ConfigTest is Test {
     function test_noChargeParameterIsReachable() public {
         bytes32[] memory all = _allConfigKeys();
         // Count pinned to ConfigKeys.sol by check-config-key-enumeration.sh (CI).
-        assertEq(all.length, 82, "ConfigKeys count changed: update _allConfigKeys and re-audit");
+        assertEq(all.length, 76, "ConfigKeys count changed: update _allConfigKeys and re-audit");
 
         bytes32[] memory chargeShaped = _chargeShapedKeys();
         for (uint256 c; c < chargeShaped.length; c++) {
@@ -168,7 +167,7 @@ contract ConfigTest is Test {
     /// The complete ConfigKeys set, maintained in lockstep with ConfigKeys.sol. The count
     /// assertion in test_noChargeParameterIsReachable forces this to stay complete.
     function _allConfigKeys() internal pure returns (bytes32[] memory k) {
-        k = new bytes32[](82);
+        k = new bytes32[](76);
         uint256 i;
         k[i++] = K.SEAT_PRICE_FLOOR;
         k[i++] = K.SEAT_PRICE_CEILING;
@@ -179,7 +178,6 @@ contract ConfigTest is Test {
         k[i++] = K.MINT_SPLIT_POOL;
         k[i++] = K.MINT_SPLIT_PROTOCOL;
         k[i++] = K.EPOCH_LENGTH;
-        k[i++] = K.WITHDRAW_TERM_CORE;
         k[i++] = K.HOST_VOTE_THRESHOLD_BPS;
         k[i++] = K.HOST_VOTE_WINDOW;
         k[i++] = K.COMMUNITY_VOTE_THRESHOLD_BPS;
@@ -197,7 +195,6 @@ contract ConfigTest is Test {
         k[i++] = K.YIELD_SPLIT_MEMBER;
         k[i++] = K.YIELD_SPLIT_POOL;
         k[i++] = K.YIELD_SPLIT_PROTOCOL;
-        k[i++] = K.NAV_PAUSE_BPS;
         k[i++] = K.INSTANT_TIER_FLOOR_BPS;
         k[i++] = K.SLOW_TIER_CEILING_BPS;
         k[i++] = K.MAX_NOTICE_PERIOD;
@@ -205,13 +202,6 @@ contract ConfigTest is Test {
         k[i++] = K.PROTOCOL_TREASURY;
         k[i++] = K.COMPLIANCE_REGISTRY;
         k[i++] = K.MEMBER_SEASONING_WINDOW;
-        k[i++] = K.WITHDRAW_TERM_FLEX;
-        k[i++] = K.FLEX_BUFFER_TARGET_BPS;
-        // The Term tier's withdrawal waiting period. No-charge
-        // audit: not charge-shaped. It is a duration read only by `withdrawTerm(TERM)`, which
-        // decides how long a queued withdrawal waits, and it is never read on any repayment path.
-        // It cannot add anything to what a member owes.
-        k[i++] = K.WITHDRAW_TERM_TERM;
         k[i++] = K.MIN_LENDABLE;
         k[i++] = K.GLOBAL_MEMBER_CAP;
         k[i++] = K.EXPOSURE_IMPACT_MULT_X100;
@@ -250,13 +240,12 @@ contract ConfigTest is Test {
         // interest at any stage) - it is not a charge under any name.
         k[i++] = K.CREDIT_CORE;
         k[i++] = K.TE_EARN_INCREMENT;
-        // The Yield Engine's vault half. No-charge audit: none of the three is charge-shaped.
-        // UNLOCK_PERIOD and HARVEST_PERIOD time how the vault recognizes its own venue yield,
-        // and HARVEST_DEVIATION_X100 is a circuit-breaker multiple on that yield. None of them
-        // is read on any repayment path, and none can add anything to what a member owes.
-        k[i++] = K.UNLOCK_PERIOD;
-        k[i++] = K.HARVEST_PERIOD;
-        k[i++] = K.HARVEST_DEVIATION_X100;
+        // The two rate ceilings. No-charge audit: neither is charge-shaped. They bound how fast a
+        // Venue's savings value may rise and how fast `ManualStrategy` releases pre-funded yield.
+        // Neither is read on any repayment path, and neither can add anything to what a member
+        // owes.
+        k[i++] = K.MAX_RATE_CEILING_BPS;
+        k[i++] = K.MANUAL_RATE_CEILING_BPS;
         // The shared-vault withdrawal. No-charge audit: none of the three is charge-shaped.
         // The two bps keys are vote bars, counts of people that decide whether a community's own
         // pot may pay a recipient it voted for. SHARED_PROPOSAL_REVERT_DELAY times when an
@@ -665,38 +654,22 @@ contract ConfigTest is Test {
         assertEq(t, 6667);
     }
 
-    /// Every tier's withdrawal term, and the one place the ordering is stated. Term is 0 since
-    /// 2026-09-22: it is the tier whose venue has had the whole lock
-    /// period to arrange liquidity, so it is the one with nothing left to wait for. The 7 days it
-    /// carried before came from extending the Flex and Core pattern, which had it backwards.
-    /// The other two figures are unchanged by that change, and asserting them here is what
-    /// shows it did not leak into them.
-    function test_withdrawTermsPerPoolType() public view {
-        assertEq(cfg.withdrawTerm(PoolTypes.CORE), 3 days);
-        assertEq(cfg.withdrawTerm(PoolTypes.FLEX), 1 days);
-        assertEq(cfg.withdrawTerm(PoolTypes.TERM), 0);
-    }
-
-    /// TERM resolves a withdrawal term since 2026-09-21: it became an
-    /// ordinary tier, so it answers like the others. This test used to assert it reverted; the
-    /// value itself is asserted above.
-    function test_everyPoolTypeResolvesAWithdrawTerm() public view {
-        for (uint8 i; i < PoolTypes.COUNT; i++) {
-            cfg.withdrawTerm(i);
+    /// The two rate ceilings launch at 20% a year and move only inside their bounds: never to
+    /// zero, which would freeze every price and every strategy's yield.
+    function test_rateCeilings_launchValuesAndBounds() public {
+        assertEq(cfg.maxRateCeilingBps(), 2000);
+        assertEq(cfg.manualRateCeilingBps(), 2000);
+        bytes32[2] memory keys = [K.MAX_RATE_CEILING_BPS, K.MANUAL_RATE_CEILING_BPS];
+        for (uint256 i; i < 2; i++) {
+            vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, keys[i]));
+            cfg.set(keys[i], 0);
+            vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, keys[i]));
+            cfg.set(keys[i], 10_001);
+            cfg.set(keys[i], 1);
+            cfg.set(keys[i], 10_000);
         }
-    }
-
-    function test_withdrawTermUnknownPoolTypeReverts() public {
-        vm.expectRevert(IConfig.UnknownPoolType.selector);
-        cfg.withdrawTerm(7);
-    }
-
-    function test_flexAndLockDefaultsAndBounds() public {
-        assertEq(cfg.flexBufferTargetBps(), 1000);
-        cfg.set(K.WITHDRAW_TERM_FLEX, 0);
-        cfg.set(K.WITHDRAW_TERM_FLEX, 30 days);
-        vm.expectRevert(abi.encodeWithSelector(Config.ValueOutOfBounds.selector, K.WITHDRAW_TERM_FLEX));
-        cfg.set(K.WITHDRAW_TERM_FLEX, 31 days);
+        assertEq(cfg.maxRateCeilingBps(), 10_000);
+        assertEq(cfg.manualRateCeilingBps(), 10_000);
     }
 
     // ---- Standing keys ----

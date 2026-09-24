@@ -13,7 +13,7 @@ import {Venue} from "../src/Venue.sol";
 import {IConfig} from "../src/interfaces/IConfig.sol";
 import {ICommunity} from "../src/interfaces/ICommunity.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {ConfigKeys as K} from "../src/ConfigKeys.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
 import {MockCreditCoreLeg} from "./mocks/MockSeatSiblings.sol";
@@ -60,11 +60,16 @@ contract LedgerForfeitTest is InviteSigner {
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 4);
         address[3] memory poolAddrs;
         for (uint8 t = 0; t < 3; t++) {
-            pools[t] = new Venue(usdc, IConfig(address(config)), predicted, t, owner, "Qudi", "q");
+            pools[t] = new Venue(usdc, IConfig(address(config)), predicted, owner, "Qudi", "q");
             poolAddrs[t] = address(pools[t]);
         }
         Seats seats = new Seats(predicted);
-        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, poolAddrs);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
+        for (uint8 t = 0; t < 3; t++) {
+            vm.prank(owner);
+            Venue(poolAddrs[t]).setLabels(VenueIds.labels(t));
+            factory.addVenue(poolAddrs[t]);
+        }
         assertEq(address(factory), predicted, "the tier vaults are wired to this factory");
 
         address[4] memory people = [host, ada, bea, cid];
@@ -94,7 +99,7 @@ contract LedgerForfeitTest is InviteSigner {
         vm.prank(who);
         id = ledger.createVault(
             ILedger.VaultParams({
-                poolType: PoolTypes.FLEX,
+                poolType: VenueIds.FLEX,
                 shared: false,
                 lockedUntil: lockedUntil,
                 contribution: 0,
@@ -114,7 +119,7 @@ contract LedgerForfeitTest is InviteSigner {
         vm.prank(host);
         uint256 pot = ledger.createVault(
             ILedger.VaultParams({
-                poolType: PoolTypes.FLEX,
+                poolType: VenueIds.FLEX,
                 shared: true,
                 lockedUntil: 0,
                 contribution: 0,
@@ -224,7 +229,7 @@ contract LedgerForfeitTest is InviteSigner {
         vm.prank(ada);
         uint256 id = ledger.createVault(
             ILedger.VaultParams({
-                poolType: PoolTypes.CORE,
+                poolType: VenueIds.CORE,
                 shared: false,
                 lockedUntil: 0,
                 contribution: 0,
@@ -242,7 +247,7 @@ contract LedgerForfeitTest is InviteSigner {
         vm.prank(ada);
         community.forfeit();
 
-        vm.warp(block.timestamp + config.withdrawTerm(PoolTypes.CORE));
+        vm.warp(block.timestamp + pools[VenueIds.CORE].labels().exitSeconds);
         vm.prank(ada);
         ledger.executeWithdraw(req);
         vm.prank(ada);

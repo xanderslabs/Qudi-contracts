@@ -60,7 +60,10 @@ abstract contract MembershipFixture is InviteSigner {
         }
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         seats = new Seats(predicted);
-        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, pools);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
+        for (uint8 t = 0; t < 3; t++) {
+            factory.addVenue(pools[t]);
+        }
         assertEq(address(factory), predicted, "Seats is wired to this factory");
 
         _attest(host);

@@ -12,25 +12,35 @@ import {Config} from "../../src/Config.sol";
 import {IConfig} from "../../src/interfaces/IConfig.sol";
 import {ComplianceRegistry} from "../../src/ComplianceRegistry.sol";
 import {ConfigKeys as K} from "../../src/ConfigKeys.sol";
-import {PoolTypes} from "../../src/PoolTypes.sol";
+import {VenueIds} from "./VenueIds.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
-import {MockVenue} from "../mocks/MockVenue.sol";
+import {IVenue} from "../../src/interfaces/IVenue.sol";
+import {MockStrategy} from "../mocks/MockStrategy.sol";
 
 /// A stand-in factory: answers isCommunityContract for addresses we register, hands the ledger the
-/// community id the credit leg is booked against, and holds Qudi's tier vaults in `pools`, which
-/// is what the ledger resolves a tier from now that the host opt-in is gone.
+/// community id, and holds Qudi's venues in a registry, which is what the ledger resolves a venue
+/// id from.
 contract LedgerFactoryStub {
     mapping(address => bool) public isCommunityContract;
     mapping(address => uint256) public communityIdOf;
-    address[3] public pools;
+    address[] internal _venues;
 
     function register(address a) external {
         isCommunityContract[a] = true;
         communityIdOf[a] = 1;
     }
 
-    function setPool(uint8 poolType, address vault) external {
-        pools[poolType] = vault;
+    /// Lists `vault` under the next id, as the real registry's `addVenue` does.
+    function addVenue(address vault) external {
+        _venues.push(vault);
+    }
+
+    function venueAt(uint256 id) external view returns (address) {
+        return _venues[id];
+    }
+
+    function venueCount() external view returns (uint256) {
+        return _venues.length;
     }
 }
 
@@ -70,11 +80,11 @@ contract LedgerCreditCoreStub {
     }
 }
 
-/// One community's ledger over real `Venue` tier instances, wired the way `CommunityFactory`
-/// wires it. Two tiers carry real vaults, FLEX and CORE, because the proofs need both an
-/// instant path and a queued one; nothing opens them, because there is nothing
-/// to open. No tier vault carries a lock of its own since the vault-level one was deleted, so the
-/// ledger's `lockedUntil` is the only lock there is.
+/// One community's ledger over real `Venue` instances, wired the way `CommunityFactory` wires it.
+/// Two venues carry strategies, FLEX and CORE, because the proofs need both an instant path and a
+/// queued one. Each venue carries the labels a deployment gives it: Flex Open with no exit time,
+/// Core Open with a one-day exit, Term Locked. The ledger's `lockedUntil` is the only lock there
+/// is.
 abstract contract LedgerFixture is Test {
     MockUSDC usdc;
     Config config;
@@ -90,8 +100,8 @@ abstract contract LedgerFixture is Test {
     /// no slot is ever zero. Only FLEX and CORE carry venues; TERM exists so a test
     /// can reach a tier this fixture never otherwise touches.
     Venue[3] tierVaults;
-    MockVenue flexVenue;
-    MockVenue coreVenue;
+    MockStrategy flexVenue;
+    MockStrategy coreVenue;
 
     address owner = makeAddr("vaultOwner");
     address treasury = makeAddr("treasury");
@@ -111,12 +121,12 @@ abstract contract LedgerFixture is Test {
 
         factory = new LedgerFactoryStub();
 
-        for (uint8 t = 0; t < PoolTypes.COUNT; t++) {
+        for (uint8 t = 0; t < VenueIds.COUNT; t++) {
             tierVaults[t] = _tierVault(t, "Qudi Tier", "qT");
-            factory.setPool(t, address(tierVaults[t]));
+            factory.addVenue(address(tierVaults[t]));
         }
-        flexVault = tierVaults[PoolTypes.FLEX];
-        coreVault = tierVaults[PoolTypes.CORE];
+        flexVault = tierVaults[VenueIds.FLEX];
+        coreVault = tierVaults[VenueIds.CORE];
         flexVenue = _venue(flexVault, "Flex venue", "FV");
         coreVenue = _venue(coreVault, "Core venue", "CV");
 
@@ -154,17 +164,25 @@ abstract contract LedgerFixture is Test {
     }
 
     function _tierVault(uint8 poolType, string memory n, string memory s) internal returns (Venue v) {
-        v = new Venue(usdc, IConfig(address(config)), address(factory), poolType, owner, n, s);
+        v = new Venue(usdc, IConfig(address(config)), address(factory), owner, n, s);
+        vm.prank(owner);
+        v.setLabels(VenueIds.labels(poolType));
     }
 
-    function _venue(Venue v, string memory n, string memory s) internal returns (MockVenue m) {
-        m = new MockVenue(usdc, n, s);
+    /// A venue's exit time: how long a queued ledger withdrawal waits before it can execute.
+    function exitOf(uint8 poolType) internal view returns (uint64) {
+        return tierVaults[poolType].labels().exitSeconds;
+    }
+
+    function _venue(Venue v, string memory, string memory) internal returns (MockStrategy m) {
+        m = new MockStrategy(usdc, address(v));
         address[] memory vs = new address[](1);
         vs[0] = address(m);
         uint16[] memory bps = new uint16[](1);
         bps[0] = 10_000;
         vm.startPrank(owner);
-        v.addVenue(address(m));
+        v.addStrategy(address(m), 0);
+        v.setCap(address(m), type(uint256).max);
         v.setWeights(vs, bps);
         vm.stopPrank();
     }

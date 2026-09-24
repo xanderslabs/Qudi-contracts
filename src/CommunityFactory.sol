@@ -6,7 +6,7 @@ import {IConfig} from "./interfaces/IConfig.sol";
 import {ICommunityFactory} from "./interfaces/ICommunityFactory.sol";
 import {ICommunityInit} from "./interfaces/ICommunityInit.sol";
 import {ISeats} from "./interfaces/ISeats.sol";
-import {PoolTypes} from "./PoolTypes.sol";
+import {Ownable2Step, Ownable} from "openzeppelin-contracts/contracts/access/Ownable2Step.sol";
 
 /// Anyone creates a community; the creator becomes founding steward and receives the founding
 /// seat unpaid inside initialize() (the creator does not pay for their own founding mint;
@@ -19,25 +19,24 @@ import {PoolTypes} from "./PoolTypes.sol";
 /// tokens in the one `Seats` contract, which this factory registers each community with. It used to
 /// deploy the community contract alone and clone a further ledger per tier, and that was collapsed into one.
 ///
-/// There is no tier opt-in. The host opt-in this factory used to carry is gone:
-/// every tier Qudi has deployed in `pools` is available to every community, the host picks one
-/// when creating a shared vault, and a member picks one for their own. The tier vault is the
-/// strategy layer every community in that tier shares, and the ledger is the per-community book
-/// that divides its own position in that tier between vault records; the ledger
-/// reads `pools` here to resolve it.
-contract CommunityFactory is ICommunityFactory {
+/// It also holds the venue registry: the list of Qudi's `Venue`s, each known by an id handed out in
+/// order from zero. Qudi's owner adds venues and retires them; a retired venue takes no new vaults
+/// but keeps the money already in it, and nothing is ever removed, so an id means the same venue
+/// for as long as the chain exists. There is no host opt-in: every active venue is available to
+/// every community, the host picks one when creating a shared vault, and a member picks one for
+/// their own. The ledger resolves a vault record's venue id here.
+contract CommunityFactory is ICommunityFactory, Ownable2Step {
     IConfig public immutable config;
     /// The one contract holding every community's seats. It trusts this factory alone to say
     /// which addresses are communities.
     ISeats public immutable seats;
     address public immutable communityImplementation;
     address public immutable ledgerImplementation;
-    /// One shared pool instance per pool type (PoolTypes.sol), indexed by the PoolTypes
-    /// constant: a `Venue` in every slot, FLEX, CORE and TERM, since a community has
-    /// exactly one custody layer per tier either way. This is the whole of what decides which
-    /// tiers exist, and it is Qudi's: a ledger reads it to resolve the tier a vault
-    /// record named, and no community has a say in it.
-    address[3] public pools;
+    /// Every venue ever listed, indexed by its id. This is the whole of what decides which venues
+    /// exist, and it is Qudi's: no community has a say in it.
+    address[] internal _venues;
+    /// Set by `retireVenue`. A retired venue takes no new vaults and is never removed.
+    mapping(uint256 => bool) internal _retired;
 
     struct CommunityEntry {
         address community;
@@ -65,31 +64,50 @@ contract CommunityFactory is ICommunityFactory {
     error ZeroAddress();
     error SeatsNotWiredToThisFactory();
 
-    /// Parameter order is intentional, not incidental: the clone implementations
-    /// (`communityImpl_`/`ledgerImpl_`) are grouped contiguously, each a single address; `pools_`
-    /// sits last since it is structurally different, a fixed-size array rather than a single
-    /// address. There was a third implementation, for the per-community credit pool, until
-    /// that contract was deleted.
+    /// `owner_` is the timelock, the only address that may list or retire a venue.
     ///
     /// `Seats` is deployed first, naming this factory's address, and is refused here unless it
     /// does: a `Seats` that trusted another factory would refuse every community this one creates.
-    constructor(
-        address config_,
-        address seats_,
-        address communityImpl_,
-        address ledgerImpl_,
-        address[3] memory pools_
-    ) {
+    constructor(address config_, address seats_, address communityImpl_, address ledgerImpl_, address owner_)
+        Ownable(owner_)
+    {
         if (config_ == address(0) || seats_ == address(0) || communityImpl_ == address(0) || ledgerImpl_ == address(0)) revert ZeroAddress();
-        for (uint256 i; i < pools_.length; i++) {
-            if (pools_[i] == address(0)) revert ZeroAddress();
-        }
         if (ISeats(seats_).factory() != address(this)) revert SeatsNotWiredToThisFactory();
         config = IConfig(config_);
         seats = ISeats(seats_);
         communityImplementation = communityImpl_;
         ledgerImplementation = ledgerImpl_;
-        pools = pools_;
+    }
+
+    // ---- the venue registry ----
+
+    /// Lists a venue under the next id and makes it active.
+    function addVenue(address venue) external onlyOwner returns (uint256 id) {
+        if (venue == address(0)) revert ZeroAddress();
+        id = _venues.length;
+        _venues.push(venue);
+        emit VenueAdded(id, venue);
+    }
+
+    /// No new vault may choose this venue. The money already in it is untouched and the venue
+    /// still pays out; its id keeps resolving.
+    function retireVenue(uint256 id) external onlyOwner {
+        if (id >= _venues.length) revert UnknownVenue();
+        _retired[id] = true;
+        emit VenueRetired(id);
+    }
+
+    function venueAt(uint256 id) external view returns (address) {
+        if (id >= _venues.length) revert UnknownVenue();
+        return _venues[id];
+    }
+
+    function venueCount() external view returns (uint256) {
+        return _venues.length;
+    }
+
+    function isActiveVenue(uint256 id) external view returns (bool) {
+        return id < _venues.length && !_retired[id];
     }
 
     function createCommunity(string calldata name, uint256 seatPrice) external returns (address community) {
@@ -140,22 +158,12 @@ contract CommunityFactory is ICommunityFactory {
         return communities[idxPlusOne - 1].ledger;
     }
 
-    /// The community's ledger, for any tier that exists. One ledger serves every tier
-    /// and every tier is available to every community, so this answers the same
-    /// address for every `poolType` below `PoolTypes.COUNT` and 0 above it.
+    /// The community's ledger, for any venue id that has been listed. One ledger serves every
+    /// venue, so this answers the same address for every listed id and 0 for any other.
     function vaultOf(address community, uint8 poolType) external view returns (address) {
         uint256 idxPlusOne = communityIndex[community];
-        if (idxPlusOne == 0 || poolType >= PoolTypes.COUNT) return address(0);
+        if (idxPlusOne == 0 || poolType >= _venues.length) return address(0);
         return communities[idxPlusOne - 1].ledger;
-    }
-
-    function vaultsOf(address community) external view returns (address[3] memory out) {
-        uint256 idxPlusOne = communityIndex[community];
-        if (idxPlusOne == 0) return out;
-        address ledger = communities[idxPlusOne - 1].ledger;
-        for (uint8 t = 0; t < PoolTypes.COUNT; t++) {
-            out[t] = ledger;
-        }
     }
 
     function isCommunity(address vault) external view returns (bool) {

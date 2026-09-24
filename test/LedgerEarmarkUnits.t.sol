@@ -3,7 +3,7 @@ pragma solidity 0.8.30;
 
 import {LedgerFixture} from "./helpers/LedgerFixture.sol";
 import {ILedger} from "../src/interfaces/ILedger.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
+import {VenueIds} from "./helpers/VenueIds.sol";
 import {ProposalStatus} from "../src/VaultStatus.sol";
 
 /// A shared withdrawal earmarks units, not dollars.
@@ -18,7 +18,7 @@ contract LedgerEarmarkUnitsTest is LedgerFixture {
 
     function setUp() public {
         setUpLedger();
-        pot = _shared(PoolTypes.FLEX);
+        pot = _shared(VenueIds.FLEX);
         _deposit(ada, pot, 400e6);
         _deposit(bea, pot, 300e6);
         _deposit(cid, pot, 200e6);
@@ -44,21 +44,20 @@ contract LedgerEarmarkUnitsTest is LedgerFixture {
         vm.warp(block.timestamp + _window() + 1);
     }
 
-    /// A loss in the venue, taken straight to the price because no reserve stands in front of it.
+    /// A loss in the strategy, which reaches the price at once.
     function _priceFalls(uint256 loss) internal {
         flexVenue.skim(loss);
-        flexVault.settle();
+        flexVault.accrue();
     }
 
-    /// A gain, harvested and released, so the price is genuinely above where it was.
+    /// A gain, with a year for the Venue's growth cap to let it through, so the price is
+    /// genuinely above where it was.
     function _priceRises(uint256 gain) internal {
         usdc.mint(address(this), gain);
         usdc.approve(address(flexVenue), gain);
         flexVenue.fund(gain);
-        flexVault.harvest(address(flexVenue));
-        (uint64 unlock,,) = config.yieldEngine();
-        vm.warp(block.timestamp + unlock);
-        flexVault.settle();
+        vm.warp(block.timestamp + 365 days);
+        flexVault.accrue();
     }
 
     // ---- proof 1: the price falls ----

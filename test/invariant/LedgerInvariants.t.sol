@@ -12,10 +12,10 @@ import {Config} from "../../src/Config.sol";
 import {IConfig} from "../../src/interfaces/IConfig.sol";
 import {ConfigKeys as K} from "../../src/ConfigKeys.sol";
 import {ComplianceRegistry} from "../../src/ComplianceRegistry.sol";
-import {PoolTypes} from "../../src/PoolTypes.sol";
+import {VenueIds} from "../helpers/VenueIds.sol";
 import {VaultStatus} from "../../src/VaultStatus.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
-import {MockVenue} from "../mocks/MockVenue.sol";
+import {MockStrategy} from "../mocks/MockStrategy.sol";
 import {LedgerFactoryStub, LedgerCommunityStub, LedgerCreditCoreStub} from "../helpers/LedgerFixture.sol";
 
 /// Drives one real ledger over two real `Venue` tiers, with several vault records in each so
@@ -55,8 +55,8 @@ contract LedgerHandler is Test {
 
     constructor(Ledger ledger_, LedgerCommunityStub community_, uint256[VAULTS] memory ids) {
         ledger = ledger_;
-        flexVault = Venue(ledger_.tierVault(PoolTypes.FLEX));
-        coreVault = Venue(ledger_.tierVault(PoolTypes.CORE));
+        flexVault = Venue(ledger_.tierVault(VenueIds.FLEX));
+        coreVault = Venue(ledger_.tierVault(VenueIds.CORE));
         config = ledger_.config();
         usdc = MockUSDC(config.usdc());
         community = community_;
@@ -189,11 +189,11 @@ contract LedgerHandler is Test {
 
     // ---- the tier vaults underneath ----
 
-    function report(uint256 gainSeed, uint256 whichSeed) external {
+    function gain(uint256 gainSeed, uint256 whichSeed) external {
         Venue v = whichSeed % 2 == 0 ? flexVault : coreVault;
-        uint256 gain = bound(gainSeed, 0, MAX_GAIN);
-        if (gain > 0) usdc.mint(address(v), gain);
-        try v.report() {} catch {}
+        uint256 amount = bound(gainSeed, 0, MAX_GAIN);
+        if (amount > 0) usdc.mint(address(v), amount);
+        try v.accrue() {} catch {}
     }
 
     function rebalance(uint256 whichSeed) external {
@@ -220,16 +220,15 @@ contract LedgerInvariantTest is StdInvariant, Test {
     Ledger ledger;
     Venue flexVault;
     Venue coreVault;
-    MockVenue flexSlow;
-    MockVenue coreSlow;
+    MockStrategy flexSlow;
+    MockStrategy coreSlow;
     LedgerHandler handler;
 
     address owner = makeAddr("vaultOwner");
     address treasury = makeAddr("treasury");
     address host = makeAddr("host");
     /// A registered depositor that deposits once and is never touched again, so a tier vault is
-    /// never drained to zero shares. See `VenueHandler.seedHolder` for what that state does
-    /// to the share price and why no suite here wants to live in it.
+    /// never drained to zero shares.
     address seedHolder = makeAddr("seedHolder");
 
     uint256 constant SEED = 1_000e6;
@@ -250,14 +249,16 @@ contract LedgerInvariantTest is StdInvariant, Test {
         vm.stopPrank();
 
         factory = new LedgerFactoryStub();
-        flexVault =
-            new Venue(usdc, IConfig(address(config)), address(factory), PoolTypes.FLEX, owner, "Qudi Flex", "qFLEX");
-        coreVault =
-            new Venue(usdc, IConfig(address(config)), address(factory), PoolTypes.CORE, owner, "Qudi Core", "qCORE");
+        flexVault = new Venue(usdc, IConfig(address(config)), address(factory), owner, "Qudi Flex", "qFLEX");
+        coreVault = new Venue(usdc, IConfig(address(config)), address(factory), owner, "Qudi Core", "qCORE");
+        vm.startPrank(owner);
+        flexVault.setLabels(VenueIds.labels(VenueIds.FLEX));
+        coreVault.setLabels(VenueIds.labels(VenueIds.CORE));
+        vm.stopPrank();
         flexSlow = _slowVenue(flexVault);
         coreSlow = _slowVenue(coreVault);
-        factory.setPool(PoolTypes.FLEX, address(flexVault));
-        factory.setPool(PoolTypes.CORE, address(coreVault));
+        factory.addVenue(address(flexVault));
+        factory.addVenue(address(coreVault));
 
         community = new LedgerCommunityStub();
         creditCore = new LedgerCreditCoreStub(usdc);
@@ -286,9 +287,9 @@ contract LedgerInvariantTest is StdInvariant, Test {
 
         uint256[4] memory ids;
         vm.startPrank(host);
-        ids[0] = ledger.createVault(_p(PoolTypes.FLEX, true, "shared flex"));
-        ids[1] = ledger.createVault(_p(PoolTypes.FLEX, false, "host flex"));
-        ids[2] = ledger.createVault(_p(PoolTypes.CORE, false, "host core"));
+        ids[0] = ledger.createVault(_p(VenueIds.FLEX, true, "shared flex"));
+        ids[1] = ledger.createVault(_p(VenueIds.FLEX, false, "host flex"));
+        ids[2] = ledger.createVault(_p(VenueIds.CORE, false, "host core"));
         vm.stopPrank();
 
         handler = new LedgerHandler(ledger, community, ids);
@@ -298,7 +299,7 @@ contract LedgerInvariantTest is StdInvariant, Test {
         // The fourth record belongs to an actor rather than the host, so a personal vault with an
         // owner who is not the proposer is under test too.
         vm.prank(handler.actors(0));
-        ids[3] = ledger.createVault(_p(PoolTypes.CORE, false, "actor core"));
+        ids[3] = ledger.createVault(_p(VenueIds.CORE, false, "actor core"));
         handler = new LedgerHandler(ledger, community, ids);
         for (uint256 i = 0; i < 4; i++) {
             community.setMember(handler.actors(i), true);
@@ -324,15 +325,15 @@ contract LedgerInvariantTest is StdInvariant, Test {
     /// One slow venue per tier, weighted so the instant tier is genuinely scarce. Without it
     /// every share is instantly liquid and `executeWithdraw` could never take its queued branch,
     /// which is the branch the reconciliation has to survive.
-    function _slowVenue(Venue v) internal returns (MockVenue m) {
-        m = new MockVenue(usdc, "Slow", "S");
-        m.setRedeemDelay(2 days);
+    function _slowVenue(Venue v) internal returns (MockStrategy m) {
+        m = new MockStrategy(usdc, address(v));
         address[] memory vs = new address[](1);
         vs[0] = address(m);
         uint16[] memory bps = new uint16[](1);
         bps[0] = 7_500;
         vm.startPrank(owner);
-        v.addVenue(address(m));
+        v.addStrategy(address(m), 2 days);
+        v.setCap(address(m), type(uint256).max);
         v.setWeights(vs, bps);
         vm.stopPrank();
     }
@@ -342,13 +343,13 @@ contract LedgerInvariantTest is StdInvariant, Test {
     /// statement, so any drift is a bug and not rounding.
     function invariant_tierUnitsEqualsSumOfItsVaults() public view {
         assertEq(
-            ledger.tierUnits(PoolTypes.FLEX),
-            handler.sumActiveVaultUnits(PoolTypes.FLEX),
+            ledger.tierUnits(VenueIds.FLEX),
+            handler.sumActiveVaultUnits(VenueIds.FLEX),
             "FLEX tierUnits is not the sum of its active vaults"
         );
         assertEq(
-            ledger.tierUnits(PoolTypes.CORE),
-            handler.sumActiveVaultUnits(PoolTypes.CORE),
+            ledger.tierUnits(VenueIds.CORE),
+            handler.sumActiveVaultUnits(VenueIds.CORE),
             "CORE tierUnits is not the sum of its active vaults"
         );
     }
@@ -371,12 +372,12 @@ contract LedgerInvariantTest is StdInvariant, Test {
     /// later ledger changes reached every time.
     function invariant_tierUnitsEqualsTheLedgersPosition() public view {
         assertEq(
-            ledger.tierUnits(PoolTypes.FLEX),
+            ledger.tierUnits(VenueIds.FLEX),
             flexVault.balanceOf(address(ledger)),
             "FLEX tierUnits is not the ledger's position in the tier vault"
         );
         assertEq(
-            ledger.tierUnits(PoolTypes.CORE),
+            ledger.tierUnits(VenueIds.CORE),
             coreVault.balanceOf(address(ledger)),
             "CORE tierUnits is not the ledger's position in the tier vault"
         );

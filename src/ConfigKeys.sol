@@ -16,7 +16,6 @@ library ConfigKeys {
     bytes32 constant MINT_SPLIT_POOL = keccak256("qudi.MINT_SPLIT_POOL");
     bytes32 constant MINT_SPLIT_PROTOCOL = keccak256("qudi.MINT_SPLIT_PROTOCOL");
     bytes32 constant EPOCH_LENGTH = keccak256("qudi.EPOCH_LENGTH");
-    bytes32 constant WITHDRAW_TERM_CORE = keccak256("qudi.WITHDRAW_TERM_CORE");
     // The host removal vote (was STEWARD_VOTE_*). An election uses the community vote.
     bytes32 constant HOST_VOTE_THRESHOLD_BPS = keccak256("qudi.HOST_VOTE_THRESHOLD_BPS");
     bytes32 constant HOST_VOTE_WINDOW = keccak256("qudi.HOST_VOTE_WINDOW");
@@ -42,7 +41,6 @@ library ConfigKeys {
     bytes32 constant YIELD_SPLIT_MEMBER = keccak256("qudi.YIELD_SPLIT_MEMBER");
     bytes32 constant YIELD_SPLIT_POOL = keccak256("qudi.YIELD_SPLIT_POOL");
     bytes32 constant YIELD_SPLIT_PROTOCOL = keccak256("qudi.YIELD_SPLIT_PROTOCOL");
-    bytes32 constant NAV_PAUSE_BPS = keccak256("qudi.NAV_PAUSE_BPS");
     bytes32 constant INSTANT_TIER_FLOOR_BPS = keccak256("qudi.INSTANT_TIER_FLOOR_BPS");
     bytes32 constant SLOW_TIER_CEILING_BPS = keccak256("qudi.SLOW_TIER_CEILING_BPS");
     bytes32 constant MAX_NOTICE_PERIOD = keccak256("qudi.MAX_NOTICE_PERIOD");
@@ -52,14 +50,6 @@ library ConfigKeys {
     // Member seasoning window: measured from the seat mint timestamp. Credit is
     // gated on it.
     bytes32 constant MEMBER_SEASONING_WINDOW = keccak256("qudi.MEMBER_SEASONING_WINDOW");
-    bytes32 constant WITHDRAW_TERM_FLEX = keccak256("qudi.WITHDRAW_TERM_FLEX");
-    bytes32 constant FLEX_BUFFER_TARGET_BPS = keccak256("qudi.FLEX_BUFFER_TARGET_BPS");
-    /// The Term tier's withdrawal waiting period. Awkwardly named because "term" means two things
-    /// here: the WITHDRAW_TERM_* family is the waiting period before a queued withdrawal releases,
-    /// and TERM is the tier. This is the waiting period for the Term tier, and it is 0:
-    /// a Term vault is locked until its date, so its venue has had the whole lock
-    /// period to arrange the liquidity and there is nothing left to wait for at the end of it.
-    bytes32 constant WITHDRAW_TERM_TERM = keccak256("qudi.WITHDRAW_TERM_TERM");
     // Standing, the CreditCore half. Line-sizing dollar figures are USDC 6-decimal;
     // the two multipliers are basis points; time windows are seconds.
     bytes32 constant MIN_LENDABLE = keccak256("qudi.MIN_LENDABLE"); // $50
@@ -117,22 +107,17 @@ library ConfigKeys {
     bytes32 constant CREDIT_CORE = keccak256("qudi.CREDIT_CORE");
     // Trust Extension is earned per completed obligation through its own counter.
     // The calibrated value comes later; the launch value is a bounded starting
-    // point, like the unlock period and the activity decay constants. Not
+    // point, like the activity decay constants. Not
     // a charge on an obligation: it sizes what a member can be lent, never what
     // they owe.
     bytes32 constant TE_EARN_INCREMENT = keccak256("qudi.TE_EARN_INCREMENT");
-    // The Yield Engine, vault half. None of the three puts a charge on an obligation:
-    // they time and bound how the vault recognizes its own venue yield, and a member
+    // The ceiling on any Venue's `maxRate`, the fastest its share price may rise, in annual bps.
+    // Not a charge on an obligation: it bounds how fast savings value is recognised, and a member
     // still repays exactly the principal drawn.
-    // The member leg's linear release window, a Risk Committee parameter bounded
-    // [1 day, 30 days], launching at the 1-day floor on testnet.
-    bytes32 constant UNLOCK_PERIOD = keccak256("qudi.UNLOCK_PERIOD");
-    // Harvests are idempotent by venue and period. This is the period's length, so the
-    // index a harvest is recorded against is block.timestamp / HARVEST_PERIOD.
-    bytes32 constant HARVEST_PERIOD = keccak256("qudi.HARVEST_PERIOD");
-    // The deviation breaker: attribution pauses when one harvest's gain exceeds this
-    // multiple of that venue's historical average gain. Hundredths, so 300 is 3x.
-    bytes32 constant HARVEST_DEVIATION_X100 = keccak256("qudi.HARVEST_DEVIATION_X100");
+    bytes32 constant MAX_RATE_CEILING_BPS = keccak256("qudi.MAX_RATE_CEILING_BPS");
+    // The ceiling on `ManualStrategy.setRate`, the annual rate its pre-funded yield is released at.
+    // Not a charge on an obligation, for the same reason.
+    bytes32 constant MANUAL_RATE_CEILING_BPS = keccak256("qudi.MANUAL_RATE_CEILING_BPS");
     // The shared-vault withdrawal. None of the three puts a charge on an obligation: they decide when a
     // community's own pot may pay a recipient it voted for, and a member still repays exactly
     // the principal drawn.

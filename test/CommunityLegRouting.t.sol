@@ -15,11 +15,7 @@ import {ComplianceRegistry} from "../src/ComplianceRegistry.sol";
 import {CommunityFactory} from "../src/CommunityFactory.sol";
 import {Community} from "../src/Community.sol";
 import {Ledger} from "../src/Ledger.sol";
-import {ILedger} from "../src/interfaces/ILedger.sol";
-import {Venue} from "../src/Venue.sol";
-import {PoolTypes} from "../src/PoolTypes.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
-import {MockVenue} from "./mocks/MockVenue.sol";
 
 /// The legs. Each pays `CreditCore` directly with a
 /// community id where each leg used to pay a per-community `NullCreditPool` clone that had no
@@ -28,9 +24,8 @@ import {MockVenue} from "./mocks/MockVenue.sol";
 /// Two communities, because "the right community id" is the whole point: a leg from one
 /// community's `Community` or ledger must not land on the other's balance.
 ///
-/// The Term interest leg, once counted as a third, pays through the same
-/// `Ledger.claimPoolLeg` path as every other tier since `LockedVault` was deleted, so the
-/// ledger proof covers it.
+/// The yield leg no longer runs through the Venue, which takes no fee; its routing is proved where
+/// the ledger that takes it is.
 contract CommunityLegRoutingTest is InviteSigner {
     MockUSDC usdc;
     Config config;
@@ -38,8 +33,6 @@ contract CommunityLegRoutingTest is InviteSigner {
     CommunityFactory factory;
     CreditStanding standing;
     CreditCore cc;
-    Venue flexVault;
-    MockVenue venue;
 
     Community communityA;
     Community communityB;
@@ -53,8 +46,6 @@ contract CommunityLegRoutingTest is InviteSigner {
     address protocolTreasury = makeAddr("protocolTreasury");
 
     uint256 constant SEAT = 50e6;
-    uint256 constant STAKE = 100_000e6;
-    uint256 constant GAIN = 10_000e6;
 
     function setUp() public {
         usdc = new MockUSDC();
@@ -64,18 +55,11 @@ contract CommunityLegRoutingTest is InviteSigner {
         address communityImpl = address(new Community());
         address ledgerImpl = address(new Ledger());
 
-        // Two creations sit between this nonce read and the factory: the FLEX vault, which takes
-        // the factory address as a constructor argument, and `Seats`, which takes it too.
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 2);
-        flexVault = new Venue(
-            IERC20(address(usdc)), IConfig(address(config)), predicted, PoolTypes.FLEX, address(this), "F", "F"
-        );
-        address[3] memory pools;
-        pools[PoolTypes.FLEX] = address(flexVault);
-        pools[PoolTypes.CORE] = makeAddr("pool1");
-        pools[PoolTypes.TERM] = makeAddr("poolTerm");
+        // One creation sits between this nonce read and the factory: `Seats`, which takes the
+        // factory address as a constructor argument.
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 1);
         Seats seats = new Seats(predicted);
-        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, pools);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
         require(address(factory) == predicted, "factory precompute mismatch");
 
         standing = new CreditStanding(IConfig(address(config)), address(factory), address(this));
@@ -91,14 +75,6 @@ contract CommunityLegRoutingTest is InviteSigner {
         standing.setCreditCore(address(cc));
         config.setAddress(K.CREDIT_CORE, address(cc));
 
-        venue = new MockVenue(usdc, "Venue", "V");
-        flexVault.addVenue(address(venue));
-        address[] memory vs = new address[](1);
-        vs[0] = address(venue);
-        uint16[] memory w = new uint16[](1);
-        w[0] = 10_000;
-        flexVault.setWeights(vs, w);
-
         // Community 0 and community 1. Neither opens a tier: every tier Qudi
         // deployed is available to every community and there is nothing to open.
         vm.prank(hostA);
@@ -113,8 +89,6 @@ contract CommunityLegRoutingTest is InviteSigner {
         communityB = Community(factory.createCommunity("B", SEAT));
         ledgerB = Ledger(factory.ledgerOf(address(communityB)));
 
-        usdc.mint(address(this), 1_000_000e6);
-        usdc.approve(address(venue), type(uint256).max);
         vm.warp(365 days);
     }
 
@@ -169,89 +143,5 @@ contract CommunityLegRoutingTest is InviteSigner {
         assertEq(_idOf(address(communityB)), 1);
         assertEq(cc.communityCreditOf(1).allocation, expectedPool);
         assertEq(cc.communityCreditOf(0).allocation, 0);
-    }
-
-    // -----------------------------------------------------------------
-    // Proof 9: the vault yield leg lands in CreditCore, against the right community id
-    // -----------------------------------------------------------------
-
-    function test_yieldLeg_landsInCreditCoreForTheRightCommunity() public {
-        _seatAndContribute(communityA, ledgerA, STAKE);
-        flexVault.rebalance();
-        venue.fund(GAIN);
-        vm.roll(block.number + 1);
-        flexVault.harvest(address(venue));
-
-        (, uint16 poolBps,) = config.yieldSplit();
-        uint256 expectedLeg = GAIN * poolBps / 10_000;
-
-        // The seat mint in `_seatAndContribute` already paid its own leg, so measure the delta.
-        uint256 before0 = cc.communityCreditOf(0).allocation;
-        uint256 claimed = ledgerA.claimPoolLeg(PoolTypes.FLEX);
-        assertGt(claimed, 0, "the ledger claimed a leg");
-        assertApproxEqAbs(claimed, expectedLeg, 2, "and it is the 15% pool leg");
-
-        assertEq(_idOf(address(ledgerA)), 0, "the ledger resolves to its own community");
-        assertEq(cc.communityCreditOf(0).allocation - before0, claimed, "which is the balance that rose");
-        assertEq(cc.communityCreditOf(1).allocation, 0, "the other community got none of it");
-        assertEq(cc.expectedCash(), usdc.balanceOf(address(cc)), "the booked-cash mirror matches");
-    }
-
-    /// Two ledgers in the same vault, one per community: each claim credits its own community.
-    function test_yieldLeg_twoCommunitiesInOneVaultAreNotCrossed() public {
-        _seatAndContribute(communityA, ledgerA, STAKE);
-        _seatAndContribute(communityB, ledgerB, STAKE);
-        flexVault.rebalance();
-        venue.fund(GAIN);
-        vm.roll(block.number + 1);
-        flexVault.harvest(address(venue));
-
-        uint256 before0 = cc.communityCreditOf(0).allocation;
-        uint256 before1 = cc.communityCreditOf(1).allocation;
-        uint256 legA = ledgerA.claimPoolLeg(PoolTypes.FLEX);
-        uint256 legB = ledgerB.claimPoolLeg(PoolTypes.FLEX);
-        assertGt(legA, 0);
-        assertGt(legB, 0);
-        assertEq(cc.communityCreditOf(0).allocation - before0, legA);
-        assertEq(cc.communityCreditOf(1).allocation - before1, legB);
-    }
-
-    /// Anyone may call `claimPoolLeg` (the shares go to the community either way), and the leg
-    /// still lands on the calling ledger's community, not the caller's.
-    function test_yieldLeg_claimableByAnyoneAndStillRoutedByLedger() public {
-        _seatAndContribute(communityA, ledgerA, STAKE);
-        flexVault.rebalance();
-        venue.fund(GAIN);
-        vm.roll(block.number + 1);
-        flexVault.harvest(address(venue));
-
-        uint256 before0 = cc.communityCreditOf(0).allocation;
-        vm.prank(makeAddr("passerby"));
-        uint256 claimed = ledgerA.claimPoolLeg(PoolTypes.FLEX);
-        assertGt(claimed, 0);
-        assertEq(cc.communityCreditOf(0).allocation - before0, claimed);
-    }
-
-    function _seatAndContribute(Community community, Ledger ledger, uint256 amount) internal {
-        address m = address(uint160(uint256(keccak256(abi.encode(address(community), "member")))));
-        usdc.mint(m, SEAT + amount);
-        vm.startPrank(m);
-        registry.attest(1);
-        usdc.approve(address(community), SEAT);
-        _invitedJoin(address(community), m);
-        usdc.approve(address(ledger), amount);
-        uint256 vaultId = ledger.createVault(
-            ILedger.VaultParams({
-                poolType: PoolTypes.FLEX,
-                shared: false,
-                lockedUntil: 0,
-                contribution: 0,
-                name: "savings",
-                target: 0,
-                targetDate: 0
-            })
-        );
-        ledger.deposit(vaultId, amount);
-        vm.stopPrank();
     }
 }

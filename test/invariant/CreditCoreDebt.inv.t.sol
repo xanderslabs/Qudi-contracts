@@ -17,7 +17,7 @@ import {Ledger} from "../../src/Ledger.sol";
 import {ILedger} from "../../src/interfaces/ILedger.sol";
 import {Venue} from "../../src/Venue.sol";
 import {ConfigKeys} from "../../src/ConfigKeys.sol";
-import {PoolTypes} from "../../src/PoolTypes.sol";
+import {VenueIds} from "../helpers/VenueIds.sol";
 import {CreditStandingHarness} from "../helpers/CreditStandingHarness.sol";
 import {CreditCoreHarness} from "../helpers/CreditCoreHarness.sol";
 import {MockUSDC} from "../mocks/MockUSDC.sol";
@@ -415,13 +415,15 @@ contract CreditCoreDebtInvariantTest is StdInvariant, InviteSigner {
         // withdraw. Two creations (the vault and `Seats`) sit between this nonce read and the
         // factory.
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)) + 2);
-        flexVault = new Venue(
-            IERC20(address(usdc)), IConfig(address(config)), predicted, PoolTypes.FLEX, address(this), "F", "F"
-        );
+        flexVault = new Venue(IERC20(address(usdc)), IConfig(address(config)), predicted, address(this), "F", "F");
         address[3] memory pools = _dummyPools();
-        pools[PoolTypes.FLEX] = address(flexVault);
+        pools[VenueIds.FLEX] = address(flexVault);
         Seats seats = new Seats(predicted);
-        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, pools);
+        factory = new CommunityFactory(address(config), address(seats), communityImpl, ledgerImpl, address(this));
+        flexVault.setLabels(VenueIds.labels(VenueIds.FLEX));
+        for (uint8 t = 0; t < 3; t++) {
+            factory.addVenue(pools[t]);
+        }
         require(address(factory) == predicted, "factory precompute mismatch");
         standing = new CreditStandingHarness(IConfig(address(config)), address(factory), governance);
         cc = new CreditCoreHarness(
@@ -496,7 +498,7 @@ contract CreditCoreDebtInvariantTest is StdInvariant, InviteSigner {
                 m,
                 flexLedger.createVault(
                     ILedger.VaultParams({
-                        poolType: PoolTypes.FLEX,
+                        poolType: VenueIds.FLEX,
                         shared: false,
                         lockedUntil: 0,
                         contribution: 0,

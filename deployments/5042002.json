@@ -1,0 +1,59 @@
+{
+  "chainId": 5042002,
+  "deployBlock": 63817719,
+  "deployTimestamp": 1790281706,
+  "gitCommit": "f3e323e863d8e04cac4f19449943be6b206033d9",
+  "contracts": {
+    "CommunityFactory": "0x663d440d1758Ae486Bd7ecC7115A80a8c6DC7Ef5",
+    "CommunityImplementation": "0x9F54b8a97dF12FDfBbcD93A357934cfAEe4438F0",
+    "LedgerImplementation": "0xAbE8d67Ed2E2aCb49Dd3FCd0A6F59D0181Cc76d4",
+    "Seats": "0xBa70C9aC18202596C57b7aED73b9e68e7386869E",
+    "Config": "0x1082AD667bb745FFfB082299e73AC5abd2c62C56",
+    "ComplianceRegistry": "0xF775AB776b6676050097986a6781A274d2AD505f",
+    "CreditCore": "0x8Cc920483379C3fC39b21d41ED69627BA750AbD3",
+    "CreditStanding": "0x5FBec4F6650A4E36e587D2CcBF86Def2a022621a",
+    "ImpactSourceSeats": "0x14e41fF7bC1CE3bf1eF8B8e1e8293Ca75C8347F0",
+    "ImpactSourceLedger": "0x33Bde4a5867b1D5D6C60d8a094896A1dc2Dd56eC",
+    "PauseGuard": "0x9861B3F022bf42c146bbf5c4bDEfd803c9aC2D6f",
+    "Timelock": "0xf78Cb9B32bc3Ea6182B8C204AA44E8c6B19C388D",
+    "TimelockLong": "0x08C5DC61121EeA98F9647421B65939584D647982",
+    "VenueFlex": "0xa408968412bc4D193B40355A9a2146603213e12C",
+    "ManualStrategyFlex": "0xee4598cb327cD8B7ba8f6BB15169fAcb4f2612a8",
+    "VenueCore": "0x1ddA06c88638c0292860F28E54cD13CdFdB65431",
+    "ManualStrategyCore": "0x51Ace3CF39298451035f13660708Bb0c68A3B182",
+    "VenueTerm": "0x72C98eed1FB68E1092d648727C1AC7a090508f15",
+    "ManualStrategyTerm": "0xBf0e779FCc5ED8F77A93735476C5DD31e2a13051"
+  },
+  "venues": [
+    {
+      "id": 0,
+      "name": "Flex",
+      "kind": "Open",
+      "venue": "0xa408968412bc4D193B40355A9a2146603213e12C",
+      "strategy": "0xee4598cb327cD8B7ba8f6BB15169fAcb4f2612a8"
+    },
+    {
+      "id": 1,
+      "name": "Core",
+      "kind": "Open",
+      "venue": "0x1ddA06c88638c0292860F28E54cD13CdFdB65431",
+      "strategy": "0x51Ace3CF39298451035f13660708Bb0c68A3B182"
+    },
+    {
+      "id": 2,
+      "name": "Term",
+      "kind": "Locked",
+      "venue": "0x72C98eed1FB68E1092d648727C1AC7a090508f15",
+      "strategy": "0xBf0e779FCc5ED8F77A93735476C5DD31e2a13051"
+    }
+  ],
+  "roles": {
+    "owner": "0x39a30e0BaD382C45d5D29f15654bB595E403a0D5",
+    "timelock": "0xf78Cb9B32bc3Ea6182B8C204AA44E8c6B19C388D",
+    "pauser": "0xe7473A3a5e0DB58633F18a515C5295f7708266AB",
+    "operator": "0x200c38AA605A4D4Ac954aBea1Ff60a1Cdf2532e0",
+    "screener": "0x76213dF9f82d4a1557466C9e4003D36b17162dC4",
+    "treasury": "0x6FA05053D2070fC4737353e5f4966afEed934592"
+  },
+  "calibur": "0x000000005c84F8Fd50b21CAC312528A64437030e"
+}

@@ -3,13 +3,42 @@
 Qudi is community finance on Arc, in USDC. A host creates a community, and members join by
 buying a seat. Members save into vaults at three tiers, Flex, Core and Term, each kept on a
 per-community ledger over shared yield vaults. A shared vault pays out only by a vote of the
-people who put money in. Each community has a credit balance, funded by Qudi and by a share of
-seat fees and vault yield, and a member with standing in the community can draw an
-interest-free advance from it and repay it one to one.
+people who put money in. Each community has a credit balance, funded by a share of its own seat
+fees and vault yield, and a member with standing in the community can draw an interest-free
+advance from it and repay it one to one. Members' savings are never lent.
 
 ## Status
 
-Deployed to Arc testnet, beta, unaudited. Do not use the contracts with real funds.
+Deployed to Arc mainnet and Arc testnet. Beta and unaudited. The app is not yet open to the
+public on mainnet.
+
+## Arc mainnet
+
+Chain id 5042, from block 22658745, at commit `b026fcd`. The full record is
+[`deployments/5042.json`](deployments/5042.json).
+
+| Contract | Address |
+| --- | --- |
+| `CommunityFactory` | [`0x4d2EE54b81c664C6B10E8631e1D99cecDD9EB4B5`](https://explorer.arc.io/address/0x4d2EE54b81c664C6B10E8631e1D99cecDD9EB4B5) |
+| `CommunityImplementation` | [`0x89bFBd4E145f4D9Eb16943d833A5efF362757782`](https://explorer.arc.io/address/0x89bFBd4E145f4D9Eb16943d833A5efF362757782) |
+| `LedgerImplementation` | [`0xC09Bc55637e767EeE3366eFfBCc9B8B848A33CBb`](https://explorer.arc.io/address/0xC09Bc55637e767EeE3366eFfBCc9B8B848A33CBb) |
+| `Seats` | [`0x166Bc4e0e7c1c9bc81DBF55FE2712580F25bA820`](https://explorer.arc.io/address/0x166Bc4e0e7c1c9bc81DBF55FE2712580F25bA820) |
+| `Config` | [`0x4c1Dd078c1e8fc764901490076d88837AB4176E7`](https://explorer.arc.io/address/0x4c1Dd078c1e8fc764901490076d88837AB4176E7) |
+| `ComplianceRegistry` | [`0x10f391578B2Fbc83F86A2183c14CfB40b669b1Dc`](https://explorer.arc.io/address/0x10f391578B2Fbc83F86A2183c14CfB40b669b1Dc) |
+| `CreditCore` | [`0xfC1Eb5bE3c7bffE8658C850BBa2Ae5f93A79bA3f`](https://explorer.arc.io/address/0xfC1Eb5bE3c7bffE8658C850BBa2Ae5f93A79bA3f) |
+| `CreditStanding` | [`0x0737A30E3FD674F442D7eA3E1035071a4ACc14C4`](https://explorer.arc.io/address/0x0737A30E3FD674F442D7eA3E1035071a4ACc14C4) |
+| `ImpactSourceSeats` | [`0x696bCA8635649806890277bF0ACC0360D82EFF56`](https://explorer.arc.io/address/0x696bCA8635649806890277bF0ACC0360D82EFF56) |
+| `ImpactSourceLedger` | [`0x0C2dC3Bea622EDBd464a4167AE0DEc3d7fC03132`](https://explorer.arc.io/address/0x0C2dC3Bea622EDBd464a4167AE0DEc3d7fC03132) |
+| `PauseGuard` | [`0x85F9C8992917089Fcd4811dC719C0B33968eBDd3`](https://explorer.arc.io/address/0x85F9C8992917089Fcd4811dC719C0B33968eBDd3) |
+| `Timelock` | [`0x6FeD84cB58caB820a1aB825a5b9144453D7Ad9e8`](https://explorer.arc.io/address/0x6FeD84cB58caB820a1aB825a5b9144453D7Ad9e8) |
+| `TimelockLong` | [`0x918B059aF0e0E641321CA466BE368AB3871587d9`](https://explorer.arc.io/address/0x918B059aF0e0E641321CA466BE368AB3871587d9) |
+| `VenueFlex` | [`0x808fB4B1942efC38D46782c302b2D5De1E6B5e5c`](https://explorer.arc.io/address/0x808fB4B1942efC38D46782c302b2D5De1E6B5e5c) |
+| `ManualStrategyFlex` | [`0x73c7E65f4F104C66121142B2c734027c68aF5ef4`](https://explorer.arc.io/address/0x73c7E65f4F104C66121142B2c734027c68aF5ef4) |
+| `VenueCore` | [`0x7081120D262B1AB92B02eB3413ad1C16E2Da5a8E`](https://explorer.arc.io/address/0x7081120D262B1AB92B02eB3413ad1C16E2Da5a8E) |
+| `ManualStrategyCore` | [`0xFAC9bEEa9a5A60FA5A7f0592D9Ca939f2ee96eBe`](https://explorer.arc.io/address/0xFAC9bEEa9a5A60FA5A7f0592D9Ca939f2ee96eBe) |
+| `VenueTerm` | [`0x799fDf702d306B994BA6629693cF353196bdE772`](https://explorer.arc.io/address/0x799fDf702d306B994BA6629693cF353196bdE772) |
+| `ManualStrategyTerm` | [`0x255aA78e053440293a766166A5C459952bC806A7`](https://explorer.arc.io/address/0x255aA78e053440293a766166A5C459952bC806A7) |
+| `Calibur` (EIP-7702 delegate) | [`0x000000005c84F8Fd50b21CAC312528A64437030e`](https://explorer.arc.io/address/0x000000005c84F8Fd50b21CAC312528A64437030e) |
 
 ## Arc testnet
 

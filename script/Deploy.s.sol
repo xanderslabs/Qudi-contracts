@@ -90,7 +90,9 @@ interface IMintableTestUsdc {
 ///   CREDIT_AGREEMENT_HASH  the Credit Agreement a member's first draw must carry.
 ///   GIT_COMMIT             recorded as given, not checked.
 ///   SKIP_SMOKE             "true" to skip the smoke community. It is permanent, with the deployer
-///                          as its host. Arc testnet runs it; Arc mainnet refuses to.
+///                          as its host. Only anvil runs it: forge simulates every script locally
+///                          first and cannot run Arc USDC's blocklist precompile, so it must be
+///                          "true" on Arc testnet, and Arc mainnet refuses it.
 ///
 /// Calibur must already be at its canonical address (`script/DeployCalibur.s.sol`); the record
 /// names it only if its code is the pinned build, and `CheckDeployment` fails otherwise.

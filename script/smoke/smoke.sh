@@ -73,10 +73,9 @@ signer() {
 # The gas limit is the node's estimate plus 30% plus a flat 1,000,000. The estimate alone is not
 # enough, for two reasons. It can come in short of the real cost (a strategy's first accrual after
 # funding costs more than the estimate saw). And the ledger makes some calls best-effort, inside
-# `try`: settling fees, and telling `CreditCore` a deposit happened. `eth_estimateGas` returns the
-# least gas at which the transaction does not revert, which is the gas at which those calls fail
-# quietly. Sent at the estimate, a deposit lands but its activity is never recorded, and an accrual
-# lands but pays no fee out.
+# `try`: settling fees, and telling `CreditCore` a deposit happened. The contracts now revert a
+# transaction whose best-effort call ran out of gas, so the estimate includes those calls; the
+# margin stays for the first case and costs little on Arc.
 send() {
   local role=$1 from=$2 to=$3; shift 3
   local est receipt

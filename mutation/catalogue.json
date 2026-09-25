@@ -3534,7 +3534,7 @@
     "file": "src/Community.sol",
     "function": "_split",
     "bound": "a paid seat mint is the joiner's own activity",
-    "match": "        try ICreditCore(core).noteActivity(communityId, msg.sender) {} catch {}",
+    "match": "        try ICreditCore(core).noteActivity(communityId, msg.sender) {}\n        catch {\n            if (gasleft() < g / 4) revert GasTooLow();\n        }\n",
     "mutant": "",
     "test": "test_activity_aPaidSeatMintStartsTheMembersClock",
     "status": "catalogued"
@@ -3838,5 +3838,115 @@
     "mutant": "",
     "status": "catalogued",
     "test": "test_proof5_theDeployerOwnsNothingAfterTheDeploy"
+  },
+  {
+    "id": "UL-53",
+    "file": "src/Ledger.sol",
+    "function": "settleFees",
+    "bound": "the peak follows the price a settlement's own rounding leaves, so that rise is never charged as gain",
+    "match": "            b.hwm = Math.max(b.hwm, tv.convertToAssets(PRICE_UNIT));\n",
+    "mutant": "",
+    "status": "catalogued",
+    "test": "test_proof1_aDrainedVenueChargesTheNextDepositNothing"
+  },
+  {
+    "id": "UL-54",
+    "file": "src/Ledger.sol",
+    "function": "settleFees",
+    "bound": "a settlement accrues first, so a real gain since the last accrual is charged before the peak moves",
+    "match": "            _accrueVenue(id);\n            VenueBook storage b = _books[id];\n",
+    "mutant": "            VenueBook storage b = _books[id];\n",
+    "status": "catalogued",
+    "test": "test_proof2_aRealGainBeforeAStandaloneSettlementIsStillCharged"
+  },
+  {
+    "id": "UL-55",
+    "file": "src/Ledger.sol",
+    "function": "_trySettle",
+    "bound": "a settlement starved of gas reverts the accrual or the member action instead of being skipped",
+    "match": "        try this.settleFees() {}\n        catch {\n            _requireGasWasEnough(g);\n        }\n",
+    "mutant": "        try this.settleFees() {} catch {}\n",
+    "status": "catalogued",
+    "test": "test_anAccrualSentAtItsEstimateSettlesItsFees"
+  },
+  {
+    "id": "UL-56",
+    "file": "src/Ledger.sol",
+    "function": "deposit",
+    "bound": "a deposit whose activity report is starved of gas reverts instead of landing without it",
+    "match": "            catch {\n                _requireGasWasEnough(g);\n            }\n",
+    "mutant": "            catch {}\n",
+    "status": "catalogued",
+    "test": "test_aDepositSentAtItsEstimateRecordsActivity"
+  },
+  {
+    "id": "UL-57",
+    "file": "src/Ledger.sol",
+    "function": "_push",
+    "bound": "a withdrawal whose queue step is starved of gas reverts instead of landing unpaid",
+    "match": "        try tv.processQueue(QUEUE_STEPS) {}\n        catch {\n            _requireGasWasEnough(g);\n        }\n",
+    "mutant": "        try tv.processQueue(QUEUE_STEPS) {} catch {}\n",
+    "status": "catalogued",
+    "test": "test_aWithdrawalSentAtItsEstimateIsPaidEvenFromASlowStrategy"
+  },
+  {
+    "id": "UL-58",
+    "file": "src/Ledger.sol",
+    "function": "_requireGasWasEnough",
+    "bound": "starvation below the callee counts too: a nested call that ran out hands back more than 1/64",
+    "match": "        if (gasleft() < before / 4) revert GasTooLow();\n",
+    "mutant": "        if (gasleft() < before / 64) revert GasTooLow();\n",
+    "status": "catalogued",
+    "test": "test_aDepositSentAtItsEstimateRecordsActivity"
+  },
+  {
+    "id": "UL-59",
+    "file": "src/Ledger.sol",
+    "function": "_requireGasWasEnough",
+    "bound": "a best-effort call that fails for its own reason is still ignored",
+    "match": "        if (gasleft() < before / 4) revert GasTooLow();\n",
+    "mutant": "        revert GasTooLow();\n",
+    "status": "catalogued",
+    "test": "test_aRefusedSettlementBlocksNeitherAnAccrualNorADeposit, test_aRefusedQueueStepStillQueuesTheWithdrawal, test_activity_aRefusedReportBlocksNeitherADepositNorAJoin"
+  },
+  {
+    "id": "SM-110",
+    "file": "src/Community.sol",
+    "function": "_split",
+    "bound": "a join whose activity record is starved of gas reverts instead of landing without it",
+    "match": "            if (gasleft() < g / 4) revert GasTooLow();\n        }\n        usdc.safeTransfer(config.protocolTreasury(), toProtocol);",
+    "mutant": "        }\n        usdc.safeTransfer(config.protocolTreasury(), toProtocol);",
+    "status": "catalogued",
+    "test": "test_aJoinSentAtItsEstimateRecordsActivityEvenWhenThatIsSlow"
+  },
+  {
+    "id": "SM-111",
+    "file": "src/Community.sol",
+    "function": "_split",
+    "bound": "a refused activity record at a join is still ignored",
+    "match": "            if (gasleft() < g / 4) revert GasTooLow();\n        }\n        usdc.safeTransfer(config.protocolTreasury(), toProtocol);",
+    "mutant": "            revert GasTooLow();\n        }\n        usdc.safeTransfer(config.protocolTreasury(), toProtocol);",
+    "status": "catalogued",
+    "test": "test_activity_aRefusedReportBlocksNeitherADepositNorAJoin"
+  },
+  {
+    "id": "CS-87",
+    "file": "src/CreditStanding.sol",
+    "function": "_heldImpact",
+    "bound": "an impact source starved of gas reverts the read instead of counting 0, so a formal default cannot leave its impact out",
+    "match": "            } catch {\n                if (gasleft() < g / 4) revert GasTooLow();\n            }\n",
+    "mutant": "            } catch {}\n",
+    "status": "catalogued",
+    "test": "test_aFormalDefaultWithASlowSourceDisqualifiesItsImpactAtAnyGasItLands"
+  },
+  {
+    "id": "CS-88",
+    "file": "src/CreditStanding.sol",
+    "function": "_heldImpact",
+    "bound": "an impact source that reverts for its own reason still counts 0",
+    "match": "            } catch {\n                if (gasleft() < g / 4) revert GasTooLow();\n            }\n",
+    "mutant": "            } catch {\n                revert GasTooLow();\n            }\n",
+    "status": "catalogued",
+    "test": "test_proof11_aBrokenSourceCountsZero"
   }
 ]

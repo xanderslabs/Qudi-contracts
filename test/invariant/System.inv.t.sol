@@ -89,13 +89,6 @@ contract SystemHandler is InviteSigner {
     /// was deployed.
     uint256[4] public yieldIn;
 
-    /// The known defect in `Ledger._touch`: the peak is set before the pending fee shares are
-    /// redeemed, and the redemption's rounding leaves the price above the peak just set, so the
-    /// next accrual charges that rounding gain to every share, including shares bought after it.
-    /// This is that gain, summed per ledger and venue, as a fraction of the peak scaled by 1e18.
-    /// Accepted for the testnet beta only; the check in invariant 1 allows exactly this much.
-    uint256[6] public roundingGain;
-
     uint256 public charges;
     uint256 public feeMiscounts;
     uint256 public chargedAtOrBelowPeak;
@@ -221,14 +214,7 @@ contract SystemHandler is InviteSigner {
         _checkFees(vm.getRecordedLogs(), hwm, shares);
         for (uint256 c; c < 2; c++) {
             for (uint8 v; v < 3; v++) {
-                uint256 peak = ledgers[c].highWaterPrice(v);
-                if (peak < hwm[c * 3 + v]) peakFell++;
-                // A peak set during this action, at this block's time, with the price already above
-                // it: no time has passed, so the difference is the settlement's rounding.
-                uint256 price = venues[v].convertToAssets(PRICE_UNIT);
-                if (peak != hwm[c * 3 + v] && price > peak) {
-                    roundingGain[c * 3 + v] += Math.mulDiv(price - peak, PRICE_UNIT, peak);
-                }
+                if (ledgers[c].highWaterPrice(v) < hwm[c * 3 + v]) peakFell++;
             }
         }
     }
@@ -1092,11 +1078,7 @@ contract SystemInvariantTest is InviteSigner {
                 sum[v] += value;
                 assertEq(l.vaultEarned(id), value > capital ? value - capital : 0, "earned is value above capital");
                 if (!handler.lossEver(v)) {
-                    assertGe(
-                        value + 4 * handler.vaultMoves(c, id) + 4 + _knownDefectAllowance(c, v, value),
-                        capital,
-                        "no loss, yet value below capital"
-                    );
+                    assertGe(value + 4 * handler.vaultMoves(c, id) + 4, capital, "no loss, yet value below capital");
                 }
                 if (l.vaultUnits(id) == 0) assertEq(value, 0, "no units, no value");
             }
@@ -1105,16 +1087,6 @@ contract SystemInvariantTest is InviteSigner {
                 assertLe(sum[v], venue.convertToAssets(venue.balanceOf(address(l))), "vaults above the ledger's share");
             }
         }
-    }
-
-    /// The known defect's reach, and no more: the two fee shares of the rounding gain the handler
-    /// measured after each settlement, on the vault's value, plus one wei. Accepted for the testnet
-    /// beta only, to be removed with the fix.
-    function _knownDefectAllowance(uint256 c, uint8 v, uint256 value) internal view returns (uint256) {
-        (, uint16 poolBps, uint16 protocolBps) = d.config().yieldSplit();
-        uint256 gain = handler.roundingGain(c * 3 + v);
-        if (gain == 0) return 0;
-        return Math.mulDiv(value, gain * (poolBps + protocolBps), 1e18 * 10_000) + 1;
     }
 
     // ---- 2. the fee split ----

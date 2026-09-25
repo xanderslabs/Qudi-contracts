@@ -60,6 +60,9 @@ contract CreditStanding is ICreditStanding, Ownable2Step {
     uint256 internal constant WAD = 1e18;
     uint256 internal constant _QUEUE_MAX = 64;
 
+    /// An impact source ran out of gas. The read reverts instead of counting that source as 0.
+    error GasTooLow();
+
     struct Scar {
         uint128 frozenConductWad; // conduct value at the moment of cure
         uint64 recordedAt;
@@ -163,13 +166,22 @@ contract CreditStanding is ICreditStanding, Ownable2Step {
 
     /// Every source's figure, summed. A source that reverts counts 0: one broken product must not
     /// stop every draw, or the default a repayment has to record first.
+    ///
+    /// A source that ran out of gas is not broken, though. Counted as 0, it would let anyone who
+    /// records a formal default cut the gas so that the snapshot leaves that source's impact out,
+    /// and the member would keep it. A call starved of gas, itself or below it, hands back a few
+    /// sixty-fourths of the gas at most, while a source that reverts for its own reason costs a
+    /// fixed amount and leaves most of it. So the first reverts the read, and the second counts 0.
     function _heldImpact(uint256 communityId, address member) internal view returns (uint256 total) {
         if (_liveSeat(communityId, member) == 0) return 0;
         uint256 n = _sources.length;
         for (uint256 i; i < n; i++) {
+            uint256 g = gasleft();
             try IImpactSource(_sources[i]).impactOf(communityId, member) returns (uint256 v) {
                 total += v;
-            } catch {}
+            } catch {
+                if (gasleft() < g / 4) revert GasTooLow();
+            }
         }
     }
 

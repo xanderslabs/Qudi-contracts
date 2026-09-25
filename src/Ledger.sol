@@ -68,6 +68,10 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
     /// and bounded so nobody's withdrawal pays to clear a long queue.
     uint256 internal constant QUEUE_STEPS = 8;
 
+    /// A best-effort call ran out of gas. The whole transaction reverts, so a wallet's gas estimate
+    /// always includes the call.
+    error GasTooLow();
+
     // ---- venues ----
 
     /// Qudi's `Venue` for each venue id, cached the first time this community touches it. The
@@ -79,8 +83,8 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
 
     /// One venue's position. `units` is every unit in this venue across the community's vaults and
     /// `shares` the `Venue` shares behind them. `hwm` is the highest price this ledger has been
-    /// charged at. `impactPerUnit` is the credit fee per unit so far, scaled by `ACC`. The two
-    /// pending counts are fee shares taken and not yet paid out.
+    /// charged at, or that its own fee settlement left. `impactPerUnit` is the credit fee per unit
+    /// so far, scaled by `ACC`. The two pending counts are fee shares taken and not yet paid out.
     struct VenueBook {
         uint256 units;
         uint256 shares;
@@ -269,9 +273,7 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
     function _touch(uint8 venueId) internal {
         _accrueVenue(venueId);
         VenueBook storage b = _books[venueId];
-        if (b.treasuryShares + b.creditShares != 0) {
-            try this.settleFees() {} catch {}
-        }
+        if (b.treasuryShares + b.creditShares != 0) _trySettle();
     }
 
     function accrue() external override {
@@ -279,11 +281,32 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
         for (uint256 i; i < n; i++) {
             _accrueVenue(_wired[i]);
         }
-        try this.settleFees() {} catch {}
+        _trySettle();
     }
 
-    /// Redeems pending fee shares as far as each venue pays now, and pays the treasury its share
-    /// and `CreditCore` this community's. The USDC reaches `CreditCore` before
+    function _trySettle() internal {
+        uint256 g = gasleft();
+        try this.settleFees() {}
+        catch {
+            _requireGasWasEnough(g);
+        }
+    }
+
+    /// A best-effort call may fail and be ignored, but never for want of gas. `eth_estimateGas`
+    /// returns the least gas at which a transaction does not revert, so if a starved call were
+    /// ignored, the estimate would be the gas at which the call is skipped, and the transaction
+    /// would land without it.
+    ///
+    /// A call that runs out of gas, itself or in any call below it, hands back only the 1/64 each
+    /// caller keeps back at a call, a few sixty-fourths in all. Any other failure costs a fixed
+    /// amount, so with enough gas it leaves most of it. Less than a quarter left therefore reverts,
+    /// and a wallet's estimate rises until the call either completes or fails for its own reason.
+    function _requireGasWasEnough(uint256 before) internal view {
+        if (gasleft() < before / 4) revert GasTooLow();
+    }
+
+    /// Accrues each venue, then redeems its pending fee shares as far as it pays now, and pays the
+    /// treasury its share and `CreditCore` this community's. The USDC reaches `CreditCore` before
     /// `receiveCommunityLeg` books it, which is the order that door checks. What cannot be paid
     /// now stays pending, split as it was.
     ///
@@ -299,6 +322,9 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
         uint256 n = _wired.length;
         for (uint256 i; i < n; i++) {
             uint8 id = _wired[i];
+            // Anyone may call this long after the last accrual, so a gain since then is charged
+            // first, before the peak below can move past it.
+            _accrueVenue(id);
             VenueBook storage b = _books[id];
             uint256 pending = b.treasuryShares + b.creditShares;
             if (pending == 0) continue;
@@ -309,6 +335,12 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
             b.creditShares -= cr;
             b.treasuryShares -= r - cr;
             uint256 assets = tv.redeem(r, address(this), address(this));
+            // The redemption rounds in the Venue's favour, so the remaining shares are priced a
+            // little above the peak just set. Nothing else moved the price since the accrual
+            // above, so the rise is this ledger's own rounding, not gain, and the peak follows it.
+            // Left behind, the next accrual would charge it to every share, even shares bought
+            // after it, and in a nearly empty Venue that is real money.
+            b.hwm = Math.max(b.hwm, tv.convertToAssets(PRICE_UNIT));
             uint256 toCredit = creditClosed ? 0 : Math.mulDiv(assets, cr, r);
             usdc.safeTransfer(config.protocolTreasury(), assets - toCredit);
             if (toCredit != 0) {
@@ -596,9 +628,12 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
         // dormant. Credit never blocks saving, so a refusal is ignored.
         address core = config.creditCore();
         if (core != address(0)) {
+            uint256 g = gasleft();
             try ICreditCore(core)
                 .noteActivity(ICommunityFactory(factory).communityIdOf(address(this)) - 1, msg.sender) {}
-                catch {}
+            catch {
+                _requireGasWasEnough(g);
+            }
         }
     }
 
@@ -638,7 +673,11 @@ contract Ledger is ILedger, ICommunityInit, IImpactSource {
     /// queue.
     function _push(IVenue tv, uint256 shares, address receiver) internal returns (uint256 venueRequestId) {
         venueRequestId = tv.requestRedeem(shares, receiver);
-        try tv.processQueue(QUEUE_STEPS) {} catch {}
+        uint256 g = gasleft();
+        try tv.processQueue(QUEUE_STEPS) {}
+        catch {
+            _requireGasWasEnough(g);
+        }
     }
 
     /// Owner only, and only past the lock. A frozen or Suspended member may withdraw, and so may one

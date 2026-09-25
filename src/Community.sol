@@ -142,6 +142,10 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
     /// lower when there are fewer voters (see `_minYes`).
     uint256 internal constant MIN_YES_VOTES = 3;
 
+    /// The activity record at a paid join ran out of gas. The join reverts instead, so a wallet's
+    /// gas estimate always includes the record.
+    error GasTooLow();
+
     /// The latest closure vote. Kept after it fails, because the cooldown runs from its deadline.
     uint256 public closureVoteId;
     /// Set when a closure vote executes. Terminal: nobody joins, no invite works, and the host role
@@ -922,7 +926,15 @@ contract Community is EIP712, ICommunity, ICommunityInit, IImpactSource {
         uint256 communityId = ICommunityFactory(factory).communityIdOf(address(this)) - 1;
         ICreditCore(core).receiveCommunityLeg(communityId, toPool);
         // A paid seat is the joiner's own activity too. Best-effort: credit never blocks a join.
-        try ICreditCore(core).noteActivity(communityId, msg.sender) {} catch {}
+        // Running out of gas is not a refusal, though: a call starved of gas, itself or below it,
+        // hands back a few sixty-fourths of the gas at most, and a wallet sending its estimate
+        // would land the join without the record. So that reverts, and a real refusal, which
+        // costs a fixed amount and leaves most of the gas, is still ignored.
+        uint256 g = gasleft();
+        try ICreditCore(core).noteActivity(communityId, msg.sender) {}
+        catch {
+            if (gasleft() < g / 4) revert GasTooLow();
+        }
         usdc.safeTransfer(config.protocolTreasury(), toProtocol);
     }
 

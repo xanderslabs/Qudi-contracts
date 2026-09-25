@@ -8,13 +8,15 @@ import {IStrategy} from "../../src/interfaces/IStrategy.sol";
 /// Test double for a strategy. Its value is its own USDC balance, so a test moves the Venue's
 /// position by hand: `fund` adds USDC (a gain) and `skim` removes it (a loss). `withdrawCap` is the
 /// most `maxWithdraw` reports, so a test can hold money in a strategy that will not give all of it
-/// back at once. Every setter is open, for test convenience.
+/// back at once. `withdrawWork` makes a withdrawal cost gas, as a strategy over an outside vault
+/// does. Every setter is open, for test convenience.
 contract MockStrategy is IStrategy {
     using SafeERC20 for IERC20;
 
     IERC20 internal immutable _asset;
     address public immutable venue;
     uint256 public withdrawCap = type(uint256).max;
+    uint256 public withdrawWork;
 
     constructor(IERC20 asset_, address venue_) {
         _asset = asset_;
@@ -41,6 +43,10 @@ contract MockStrategy is IStrategy {
 
     function withdraw(uint256 assets, address receiver) external {
         if (msg.sender != venue) revert NotVenue();
+        uint256 x;
+        for (uint256 i; i < withdrawWork; i++) {
+            x = uint256(keccak256(abi.encode(x, i)));
+        }
         _asset.safeTransfer(receiver, assets);
     }
 
@@ -54,5 +60,9 @@ contract MockStrategy is IStrategy {
 
     function setWithdrawCap(uint256 cap) external {
         withdrawCap = cap;
+    }
+
+    function setWithdrawWork(uint256 steps) external {
+        withdrawWork = steps;
     }
 }

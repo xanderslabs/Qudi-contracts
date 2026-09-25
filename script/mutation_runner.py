@@ -302,6 +302,12 @@ def ensure_worktree(repo_root: Path, state_dir: Path) -> tuple[Path, list[str], 
         if out.returncode != 0:
             return worktree, notes, f"could not create a worktree at {worktree}: {out.stderr.strip()}"
         notes.append(f"Created an isolated worktree at {worktree}, detached at {head[:12]}.")
+    # `git worktree add` checks out no submodules, and `lib/` is all submodules, so without this
+    # the worktree cannot build and the baseline refuses. Run on reuse too, so a HEAD that moved a
+    # pin gets the pinned commit.
+    out = _git(["submodule", "update", "--init", "--recursive"], worktree, check=False)
+    if out.returncode != 0:
+        return worktree, notes, f"could not check out the submodules in {worktree}: {out.stderr.strip()}"
     return worktree, notes, ""
 
 

@@ -55,5 +55,10 @@
     "screener": "0x76213dF9f82d4a1557466C9e4003D36b17162dC4",
     "treasury": "0x6FA05053D2070fC4737353e5f4966afEed934592"
   },
-  "calibur": "0x000000005c84F8Fd50b21CAC312528A64437030e"
+  "calibur": "0x000000005c84F8Fd50b21CAC312528A64437030e",
+  "verification": {
+    "sourcify": "match (partial) for all 19 contracts and the libraries DebtMath, StandingMath, VenueStrategies; forwarded to explorer.arc.io",
+    "verifiedAt": "2026-10-23",
+    "note": "Partial, not exact: runtime and creation code match the source with immutables and library links applied, but the metadata hash differs, even when rebuilt at deploy commit b026fcd with the libraries linked. The deploy was likely built from a tree with uncommitted edits or a different toolchain setup."
+  }
 }
